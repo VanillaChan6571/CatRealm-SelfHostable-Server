@@ -1,0 +1,195 @@
+{
+    "_comment": "FILE CREATED BY CAT REALM - MODIFY AT YOUR OWN RISK",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-02-12T11:41:25-07:00",
+    "name": "CatRealm Server",
+    "author": "admin@nekohosting.gg",
+    "description": "Self-hosted fantasy chat server. Users connect by IP\/domain using the CatRealm client.",
+    "features": [
+        "eula"
+    ],
+    "docker_images": {
+        "NodeJS 20": "ghcr.io\/pterodactyl\/yolks:nodejs_20",
+        "NodeJS 24 - Future Release Point": "ghcr.io\/pterodactyl\/yolks:nodejs_24"
+    },
+    "file_denylist": [],
+    "startup": "npm install --production && node src\/index.js",
+    "config": {
+        "files": "{}",
+        "startup": "{\r\n    \"done\": \"Server running on port\"\r\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!\/bin\/bash\n# CatRealm Server - Pterodactyl Install Script\n\napt-get update -y\napt-get install -y curl git\n\n# Install Node.js 20 if not present\nif ! command -v node &> \/dev\/null; then\n  curl -fsSL https:\/\/deb.nodesource.com\/setup_20.x | bash -\n  apt-get install -y nodejs\nfi\n\necho \"Node version: $(node -v)\"\n\n# Download latest release from GitHub (update URL when you publish)\ncd \/mnt\/server\n\nif [ -d \".git\" ]; then\n  echo \"Updating existing installation...\"\n  git pull\nelse\n  echo \"Fresh install...\"\n  # Replace with your actual repo URL when published\n  git clone https:\/\/github.com\/YOUR_USERNAME\/catrealm-server.git . || {\n    echo \"Git clone failed - manual install may be required\"\n    exit 1\n  }\nfi\n\nnpm install --production\n\n# Create data directory\nmkdir -p \/mnt\/server\/data\n\n# Write .env from Pterodactyl environment variables\ncat > \/mnt\/server\/.env <<EOF\nPORT=${SERVER_PORT}\nSERVER_NAME=${SERVER_NAME}\nSERVER_DESCRIPTION=${SERVER_DESCRIPTION}\nREGISTRATION_OPEN=${REGISTRATION_OPEN}\nSERVER_MODE=${SERVER_MODE}\nTURN_MODE=${TURN_MODE}\nTURN_SECRET=${TURN_SECRET}\nTURN_HOST=${TURN_HOST}\nTURN_PORT=${TURN_PORT}\nTURN_TLS_PORT=${TURN_TLS_PORT}\nTURN_FORCE_TCP=${TURN_FORCE_TCP}\nDB_PATH=\/mnt\/server\/data\/catrealm.db\nCLIENT_URL=*\nSSL_DOMAIN=${SSL_DOMAIN}\nSSL_EMAIL=${SSL_EMAIL}\nSSL_DNS_PROVIDER=${SSL_DNS_PROVIDER}\nSSL_DNS_API_TOKEN=${SSL_DNS_API_TOKEN}\nSSL_CERT_PATH=${SSL_CERT_PATH}\nSSL_KEY_PATH=${SSL_KEY_PATH}\nEOF\n\nmkdir -p \/mnt\/server\/ssl\necho \"CatRealm installation complete!\"",
+            "container": "ghcr.io\/pterodactyl\/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Server Name",
+            "description": "The display name of your chat server (shown to users on the connect screen).",
+            "env_variable": "SERVER_NAME",
+            "default_value": "My CatRealm Server",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:64",
+            "field_type": "text"
+        },
+        {
+            "name": "Server Description",
+            "description": "A short description of your server.",
+            "env_variable": "SERVER_DESCRIPTION",
+            "default_value": "A self-hosted CatRealm server",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:256",
+            "field_type": "text"
+        },
+        {
+            "name": "Open Registration",
+            "description": "Allow new users to register. Set to 'false' to make the server invite-only.",
+            "env_variable": "REGISTRATION_OPEN",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:true,false,none",
+            "field_type": "text"
+        },
+        {
+            "name": "SSL Domain (Auto-SSL)",
+            "description": "Domain name for automatic Let's Encrypt SSL. Requires the domain to point to this server. Leave empty to disable.",
+            "env_variable": "SSL_DOMAIN",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "SSL Email (Auto-SSL)",
+            "description": "Contact email for Let's Encrypt certificate notifications. Required if SSL Domain is set.",
+            "env_variable": "SSL_EMAIL",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|email",
+            "field_type": "text"
+        },
+        {
+            "name": "SSL Certificate Path",
+            "description": "Path to SSL certificate file (e.g. .\/ssl\/cert.pem). Leave empty for plain HTTP.",
+            "env_variable": "SSL_CERT_PATH",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "SSL Key Path",
+            "description": "Path to SSL private key file (e.g. .\/ssl\/key.pem). Leave empty for plain HTTP.",
+            "env_variable": "SSL_KEY_PATH",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Server Mode",
+            "description": "central_only: CatRealm central accounts only; mixed: central + local; decentral_only: local only",
+            "env_variable": "SERVER_MODE",
+            "default_value": "mixed",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|in:central_only,mixed,decentral_only",
+            "field_type": "text"
+        },
+        {
+            "name": "TURN Mode",
+            "description": "fallback: public relay, central: central auth TURN, custom: your own coturn",
+            "env_variable": "TURN_MODE",
+            "default_value": "fallback",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|in:fallback,central,custom",
+            "field_type": "text"
+        },
+        {
+            "name": "TURN Secret (Custom)",
+            "description": "Used in TURN mode custom. Must match your coturn static-auth-secret.",
+            "env_variable": "TURN_SECRET",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:256",
+            "field_type": "text"
+        },
+        {
+            "name": "TURN Host (Custom)",
+            "description": "Used in TURN mode custom. Hostname only (no http/https, no port).",
+            "env_variable": "TURN_HOST",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "TURN Port (Custom)",
+            "description": "Used in TURN mode custom.",
+            "env_variable": "TURN_PORT",
+            "default_value": "3478",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
+            "name": "TURN TLS Port (Custom)",
+            "description": "Used in TURN mode custom. Leave blank to disable turns endpoint.",
+            "env_variable": "TURN_TLS_PORT",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
+            "name": "TURN Force TCP",
+            "description": "When true, only TCP TURN endpoints are returned (helps restricted networks).",
+            "env_variable": "TURN_FORCE_TCP",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:true,false,1,0,yes,no,on,off",
+            "field_type": "text"
+        },
+        {
+            "name": "SSL DNS Provider",
+            "description": "DNS provider for DNS-01 challenge (no port 80 needed). Supported: cloudflare. Leave empty to use HTTP-01 challenge on port 80.",
+            "env_variable": "SSL_DNS_PROVIDER",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:none,cloudflare",
+            "field_type": "text"
+        },
+        {
+            "name": "SSL DNS API Token",
+            "description": "API token for the DNS provider. For Cloudflare: create a token with Zone:DNS:Edit permissions.",
+            "env_variable": "SSL_DNS_API_TOKEN",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:256",
+            "field_type": "text"
+        }
+    ]
+}

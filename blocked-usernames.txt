@@ -1,0 +1,10 @@
+admin
+administrator
+owner
+mod
+moderator
+support
+staff
+official
+system
+catrealm
