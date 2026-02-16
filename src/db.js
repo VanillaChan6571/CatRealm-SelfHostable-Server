@@ -74,6 +74,10 @@ function persistEnvValue(key, value) {
   fs.writeFileSync(envPath, envContents, 'utf8');
 }
 
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex');
+}
+
 // ── Schema ─────────────────────────────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -224,11 +228,35 @@ if (secureModeLocked && !secureModeRequested && secureModeEnvRaw !== undefined) 
 
 if (secureModeEnabled) {
   let secureModeKey = getEnvValue(['SECURE_MODE_KEY', 'secure-mode-key']);
+  const encryptedMessageCount = db.prepare(`
+    SELECT COUNT(*) as c
+    FROM messages
+    WHERE content LIKE 'enc:v1:%'
+  `).get().c;
+  const storedKeyHashRow = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('secure_mode_key_hash');
+  const storedKeyHash = storedKeyHashRow?.value || '';
+
   if (String(secureModeKey).trim().length < 16) {
+    if (encryptedMessageCount > 0 || storedKeyHash) {
+      throw new Error('[CatRealm] SECURE_MODE_KEY is missing/invalid while encrypted messages already exist. Restore the original key from backup.');
+    }
     secureModeKey = crypto.randomBytes(48).toString('hex');
-    process.env.SECURE_MODE_KEY = secureModeKey;
     persistEnvValue('SECURE_MODE_KEY', secureModeKey);
     pteroLog('[CatRealm] Generated SECURE_MODE_KEY and saved it to .env');
+  }
+
+  process.env.SECURE_MODE_KEY = secureModeKey;
+
+  const keyHash = sha256Hex(secureModeKey);
+  if (storedKeyHash && storedKeyHash !== keyHash) {
+    throw new Error('[CatRealm] SECURE_MODE_KEY does not match the original secure-mode key. Refusing to start to prevent data corruption.');
+  }
+  if (!storedKeyHash) {
+    db.prepare(`
+      INSERT INTO server_settings (key, value)
+      VALUES ('secure_mode_key_hash', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(keyHash);
   }
 }
 
