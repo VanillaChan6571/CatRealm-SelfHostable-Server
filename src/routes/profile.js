@@ -185,7 +185,7 @@ router.delete('/me/banner', (req, res) => {
 });
 
 // GET /api/profile/:userId
-router.get('/:userId', ensureProfileAllowed, (req, res) => {
+router.get('/:userId([0-9a-fA-F-]{36})', ensureProfileAllowed, (req, res) => {
   const { userId } = req.params;
   const user = db.prepare(`
     SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.status, u.display_name, u.activity_type, u.activity_text, u.account_type,
@@ -204,7 +204,7 @@ router.get('/:userId', ensureProfileAllowed, (req, res) => {
 });
 
 // GET /api/profile/:userId/roles
-router.get('/:userId/roles', ensureProfileAllowed, (req, res) => {
+router.get('/:userId([0-9a-fA-F-]{36})/roles', ensureProfileAllowed, (req, res) => {
   const { userId } = req.params;
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
