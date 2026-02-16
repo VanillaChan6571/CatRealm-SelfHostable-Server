@@ -197,7 +197,7 @@ router.post('/central', async (req, res) => {
   }
 
   // Sync central banner into local record when no server-specific banner is set
-  const centralBanner = centralUser.banner || null;
+  const centralBanner = centralUser.banner || centralUser.banner_url || null;
   if (centralBanner) {
     const bannerUrl = /^https?:\/\//i.test(centralBanner)
       ? centralBanner
