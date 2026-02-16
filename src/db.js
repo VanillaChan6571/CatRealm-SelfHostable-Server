@@ -264,7 +264,7 @@ process.env.CATREALM_SECURE_MODE_EFFECTIVE = secureModeEnabled ? '1' : '0';
 process.env.CATREALM_SECURE_MODE_LOCKED = (secureModeLocked || secureModeRequested) ? '1' : '0';
 pteroLog(`[CatRealm] Secure mode: ${secureModeEnabled ? 'ENABLED' : 'DISABLED'} (locked=${(secureModeLocked || secureModeRequested) ? '1' : '0'})`);
 
-if (secureModeJustEnabled && secureModeEnabled) {
+if (secureModeEnabled) {
   const { encryptMessageContent } = require('./messageCrypto');
   const rows = db.prepare(`
     SELECT id, content
@@ -282,7 +282,10 @@ if (secureModeJustEnabled && secureModeEnabled) {
     migrateMessages(rows);
   }
 
-  pteroLog(`[CatRealm] Secure mode migration complete. Encrypted ${rows.length} existing messages.`);
+  if (rows.length > 0) {
+    const context = secureModeJustEnabled ? 'initial enable' : 'startup self-heal';
+    pteroLog(`[CatRealm] Secure mode migration complete (${context}). Encrypted ${rows.length} plaintext messages.`);
+  }
 }
 
 // ── Thread Settings Migrations ───────────────────────────────────────────────
