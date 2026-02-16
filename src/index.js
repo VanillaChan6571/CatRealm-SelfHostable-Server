@@ -2,7 +2,6 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const readline = require('readline');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 
@@ -321,13 +320,9 @@ function logTurnStatus() {
 function setupConsoleCommands(db) {
   if (!process.stdin || typeof process.stdin.on !== 'function') return;
 
-  let rl;
   try {
-    rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: false,
-    });
+    process.stdin.setEncoding('utf8');
+    process.stdin.resume();
   } catch {
     return;
   }
@@ -390,8 +385,8 @@ function setupConsoleCommands(db) {
     }
   }
 
-  rl.on('line', (line) => {
-    const raw = String(line || '').trim();
+  function handleCommand(rawInput) {
+    const raw = String(rawInput || '').trim();
     if (!raw) return;
     const [command, ...args] = raw.split(/\s+/);
     const cmd = command.toLowerCase();
@@ -418,7 +413,31 @@ function setupConsoleCommands(db) {
         runCheckpoint();
         break;
       default:
+        pteroLog(`[CatRealm Console] Unknown command: ${cmd}. Type "help".`);
         break;
+    }
+  }
+
+  let stdinBuffer = '';
+  process.stdin.on('data', (chunk) => {
+    const text = String(chunk || '');
+    if (!text) return;
+    stdinBuffer += text;
+
+    if (!/[\r\n]/.test(stdinBuffer)) {
+      // Pterodactyl may deliver one full command without newline.
+      const single = stdinBuffer.trim();
+      if (single.length > 0) {
+        handleCommand(single);
+        stdinBuffer = '';
+      }
+      return;
+    }
+
+    const lines = stdinBuffer.split(/\r?\n/);
+    stdinBuffer = lines.pop() || '';
+    for (const line of lines) {
+      handleCommand(line);
     }
   });
 

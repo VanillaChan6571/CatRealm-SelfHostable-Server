@@ -8,6 +8,7 @@ const { randomUUID } = require('crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { decryptMessageContent } = require('../messageCrypto');
 
 function requirePermission(permission) {
   return (req, res, next) => {
@@ -16,6 +17,89 @@ function requirePermission(permission) {
     }
     next();
   };
+}
+
+function runDiagnosticCommand(raw) {
+  const commandLine = String(raw || '').trim();
+  if (!commandLine) return { ok: false, error: 'Command is required' };
+  const [command, ...args] = commandLine.split(/\s+/);
+  const cmd = command.toLowerCase();
+
+  if (cmd === 'help' || cmd === 'catrealm-help') {
+    return {
+      ok: true,
+      lines: ['Commands: help, secure-status, db-status, db-latest [n], db-checkpoint'],
+    };
+  }
+
+  if (cmd === 'secure-status' || cmd === 'catrealm-secure') {
+    const enabled = process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1';
+    const locked = process.env.CATREALM_SECURE_MODE_LOCKED === '1';
+    return {
+      ok: true,
+      lines: [`Secure mode: ${enabled ? 'ENABLED' : 'DISABLED'} (locked=${locked ? 1 : 0})`],
+    };
+  }
+
+  if (cmd === 'db-status' || cmd === 'catrealm-db-status') {
+    const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/catrealm.db');
+    const walPath = `${dbPath}-wal`;
+    const shmPath = `${dbPath}-shm`;
+    const messageCount = db.prepare('SELECT COUNT(*) as c FROM messages').get().c;
+    const latest = db.prepare('SELECT created_at FROM messages ORDER BY created_at DESC LIMIT 1').get();
+    const walSize = fs.existsSync(walPath) ? fs.statSync(walPath).size : 0;
+    const shmSize = fs.existsSync(shmPath) ? fs.statSync(shmPath).size : 0;
+    return {
+      ok: true,
+      lines: [
+        `DB_PATH=${dbPath}`,
+        `messages=${messageCount} latest_created_at=${latest?.created_at || 'none'}`,
+        `wal_size=${walSize} shm_size=${shmSize}`,
+      ],
+    };
+  }
+
+  if (cmd === 'db-latest' || cmd === 'catrealm-db-latest') {
+    const limit = Math.min(Math.max(parseInt(args[0], 10) || 5, 1), 50);
+    const rows = db.prepare(`
+      SELECT id, channel_id, user_id, created_at, content
+      FROM messages
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit);
+    if (rows.length === 0) {
+      return { ok: true, lines: ['No messages found.'] };
+    }
+    return {
+      ok: true,
+      lines: rows.map((row) => {
+        const encrypted = typeof row.content === 'string' && row.content.startsWith('enc:v1:');
+        const previewSource = encrypted ? decryptMessageContent(row.content) : row.content;
+        const preview = String(previewSource || '').slice(0, 36).replace(/\s+/g, ' ');
+        return `msg=${row.id} ch=${row.channel_id} user=${row.user_id} ts=${row.created_at} encrypted=${encrypted ? 1 : 0} preview=${preview}`;
+      }),
+    };
+  }
+
+  if (cmd === 'db-checkpoint' || cmd === 'catrealm-db-checkpoint') {
+    try {
+      const result = db.prepare('PRAGMA wal_checkpoint(FULL)').get();
+      if (result && typeof result === 'object') {
+        const busy = result.busy ?? 'n/a';
+        const logFrames = result.log ?? result['wal frames'] ?? 'n/a';
+        const checkpointed = result.checkpointed ?? result['checkpointed frames'] ?? 'n/a';
+        return {
+          ok: true,
+          lines: [`WAL checkpoint complete (busy=${busy} log=${logFrames} checkpointed=${checkpointed})`],
+        };
+      }
+      return { ok: true, lines: ['WAL checkpoint complete.'] };
+    } catch (err) {
+      return { ok: false, error: `WAL checkpoint failed: ${err.message}` };
+    }
+  }
+
+  return { ok: false, error: `Unknown command: ${cmd}` };
 }
 
 // Helper function to log audit actions
@@ -854,5 +938,19 @@ router.delete('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), (r
   res.json({ success: true });
 });
 
-module.exports = router;
+// POST /api/admin/console-command
+router.post('/console-command', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
+  const command = typeof req.body?.command === 'string' ? req.body.command : '';
+  const result = runDiagnosticCommand(command);
+  if (!result.ok) {
+    return res.status(400).json(result);
+  }
 
+  for (const line of result.lines || []) {
+    const msg = `[CatRealm Console API] ${line}`;
+    try { pteroLog(msg); } catch {}
+  }
+  res.json(result);
+});
+
+module.exports = router;
