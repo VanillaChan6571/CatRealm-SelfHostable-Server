@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const db = require('../db');
 const { JWT_SECRET } = require('../middleware/auth');
-const { PERMISSIONS, ALL_PERMISSIONS, computePermissionsForUser } = require('../permissions');
+const { PERMISSIONS, ALL_PERMISSIONS, computePermissionsForUser, hasPermission } = require('../permissions');
 const pteroLog = require('../logger');
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
@@ -29,21 +29,21 @@ function emitServerImportStatus(status, data) {
 }
 
 // Helper function to filter channels based on user's NSFW preferences
-function filterChannelsForUser(userId, channels) {
-  const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(userId);
-  if (prefs) {
-    try {
-      const parsed = JSON.parse(prefs.preferences);
-      if (!parsed.allowNsfw) {
-        // User doesn't allow NSFW, filter out NSFW channels
-        return channels.filter(ch => !ch.nsfw);
+function filterChannelsForUser(user, channels) {
+  const canManageNsfwChannels = hasPermission(user, PERMISSIONS.MANAGE_CHANNELS);
+  if (!canManageNsfwChannels) {
+    const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(user.id);
+    if (prefs) {
+      try {
+        const parsed = JSON.parse(prefs.preferences);
+        if (!parsed.allowNsfw) {
+          // User doesn't allow NSFW, filter out NSFW channels
+          return channels.filter(ch => !ch.nsfw);
+        }
+      } catch (_err) {
+        // Invalid JSON: do not hide channels unexpectedly.
       }
-    } catch (err) {
-      // Invalid JSON, skip filtering
     }
-  } else {
-    // No preferences set, default to filtering NSFW (safe default)
-    return channels.filter(ch => !ch.nsfw);
   }
   return channels;
 }
@@ -119,7 +119,7 @@ function setupSocketHandlers(io) {
 
     // Join channel rooms based on user's NSFW preferences and send channel list
     const allChannels = db.prepare('SELECT * FROM channels ORDER BY position').all();
-    const userChannels = filterChannelsForUser(user.id, allChannels);
+    const userChannels = filterChannelsForUser(user, allChannels);
     for (const ch of userChannels) {
       socket.join(ch.id);
     }
@@ -640,4 +640,3 @@ function buildVoiceRoomCounts() {
     users: Array.from(room.values()).map((entry) => entry.user),
   }));
 }
-

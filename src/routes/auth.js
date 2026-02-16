@@ -78,7 +78,7 @@ router.post('/login', (req, res) => {
   );
   res.json({
     token,
-    user: { id: user.id, username: user.username, role: user.role, isOwner: !!user.is_owner, permissions, accountType: 'local', status: user.status || 'online', avatar: user.avatar || null, bio: user.bio || null },
+    user: { id: user.id, username: user.username, role: user.role, isOwner: !!user.is_owner, permissions, accountType: 'local', status: user.status || 'online', avatar: user.avatar || null, banner: user.banner || null, bio: user.bio || null },
   });
 });
 
@@ -196,6 +196,21 @@ router.post('/central', async (req, res) => {
     }
   }
 
+  // Sync central banner into local record when no server-specific banner is set
+  const centralBanner = centralUser.banner || null;
+  if (centralBanner) {
+    const bannerUrl = /^https?:\/\//i.test(centralBanner)
+      ? centralBanner
+      : `${AUTH_SERVER_URL}${centralBanner}`;
+    const existing = db.prepare('SELECT banner FROM users WHERE id = ?').get(localUser.id);
+    const existingBanner = existing?.banner || null;
+    const isLocalBannerUpload = !!existingBanner && existingBanner.startsWith('/uploads/banners/');
+    if (!existingBanner || !isLocalBannerUpload) {
+      db.prepare('UPDATE users SET banner = ? WHERE id = ?').run(bannerUrl, localUser.id);
+      localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
+    }
+  }
+
   // Sync central display name into local record (server-specific override takes precedence in rendering)
   const centralDisplayName = centralUser.display_name || centralUser.displayName || null;
   if (typeof centralDisplayName === 'string') {
@@ -233,6 +248,7 @@ router.post('/central', async (req, res) => {
       accountType: 'central',
       status: localUser.status || 'online',
       avatar: localUser.avatar || null,
+      banner: localUser.banner || null,
       verified: centralUser.verified || false,
     },
   });
@@ -241,4 +257,3 @@ router.post('/central', async (req, res) => {
 module.exports = router;
 const AUTH_SERVER_URL = process.env.AUTH_SERVER_URL || 'https://auth.catrealm.app';
 const AUTH_VERIFY_TIMEOUT = Number(process.env.AUTH_VERIFY_TIMEOUT || 5000);
-

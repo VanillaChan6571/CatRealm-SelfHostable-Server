@@ -24,6 +24,7 @@ db.exec(`
     password    TEXT NOT NULL,
     role        TEXT NOT NULL DEFAULT 'member',  -- 'owner' | 'admin' | 'member'
     avatar      TEXT,
+    banner      TEXT,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
   );
 
@@ -245,6 +246,10 @@ if (!userColumns.includes('activity_type')) {
 if (!userColumns.includes('activity_text')) {
   db.prepare('ALTER TABLE users ADD COLUMN activity_text TEXT').run();
   pteroLog('[CatRealm] Added users.activity_text column');
+}
+if (!userColumns.includes('banner')) {
+  db.prepare('ALTER TABLE users ADD COLUMN banner TEXT').run();
+  pteroLog('[CatRealm] Added users.banner column');
 }
 
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);

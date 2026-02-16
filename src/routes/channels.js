@@ -8,22 +8,22 @@ const { getSetting } = require('../settings');
 // GET /api/channels - list all channels
 router.get('/', (req, res) => {
   let channels = db.prepare('SELECT * FROM channels ORDER BY position ASC').all();
+  const canManageNsfwChannels = hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS);
 
   // Filter NSFW channels based on user preferences
-  const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(req.user.id);
-  if (prefs) {
-    try {
-      const parsed = JSON.parse(prefs.preferences);
-      if (!parsed.allowNsfw) {
-        // User doesn't allow NSFW, filter out NSFW channels
-        channels = channels.filter(ch => !ch.nsfw);
+  if (!canManageNsfwChannels) {
+    const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(req.user.id);
+    if (prefs) {
+      try {
+        const parsed = JSON.parse(prefs.preferences);
+        if (!parsed.allowNsfw) {
+          // User doesn't allow NSFW, filter out NSFW channels
+          channels = channels.filter(ch => !ch.nsfw);
+        }
+      } catch (_err) {
+        // Invalid JSON: do not hide channels unexpectedly.
       }
-    } catch (err) {
-      // Invalid JSON, skip filtering
     }
-  } else {
-    // No preferences set, default to filtering NSFW (safe default)
-    channels = channels.filter(ch => !ch.nsfw);
   }
 
   res.json(channels);
@@ -351,4 +351,3 @@ router.delete('/:id/permissions/:overwriteId', (req, res) => {
 });
 
 module.exports = router;
-
