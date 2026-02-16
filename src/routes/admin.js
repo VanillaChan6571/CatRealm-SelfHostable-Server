@@ -8,7 +8,7 @@ const { randomUUID } = require('crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { decryptMessageContent } = require('../messageCrypto');
+const { decryptMessageContent, encryptMessageContent } = require('../messageCrypto');
 
 function requirePermission(permission) {
   return (req, res, next) => {
@@ -28,7 +28,7 @@ function runDiagnosticCommand(raw) {
   if (cmd === 'help' || cmd === 'catrealm-help') {
     return {
       ok: true,
-      lines: ['Commands: help, secure-status, db-status, db-latest [n], db-checkpoint'],
+      lines: ['Commands: help, secure-status, db-status, db-latest [n], db-checkpoint, db-encrypt-legacy'],
     };
   }
 
@@ -97,6 +97,26 @@ function runDiagnosticCommand(raw) {
     } catch (err) {
       return { ok: false, error: `WAL checkpoint failed: ${err.message}` };
     }
+  }
+
+  if (cmd === 'db-encrypt-legacy' || cmd === 'catrealm-db-encrypt-legacy') {
+    const rows = db.prepare(`
+      SELECT id, content
+      FROM messages
+      WHERE content NOT LIKE 'enc:v1:%'
+    `).all();
+    if (rows.length === 0) {
+      return { ok: true, lines: ['No legacy plaintext messages found.'] };
+    }
+
+    const updateMessage = db.prepare('UPDATE messages SET content = ? WHERE id = ?');
+    const migrateMessages = db.transaction((items) => {
+      for (const row of items) {
+        updateMessage.run(encryptMessageContent(row.content || ''), row.id);
+      }
+    });
+    migrateMessages(rows);
+    return { ok: true, lines: [`Encrypted ${rows.length} legacy plaintext messages.`] };
   }
 
   return { ok: false, error: `Unknown command: ${cmd}` };

@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
+const { encryptMessageContent } = require('./messageCrypto');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -328,7 +329,7 @@ function setupConsoleCommands(db) {
   }
 
   function printHelp() {
-    pteroLog('[CatRealm Console] Commands: help, secure-status, db-status, db-latest [n], db-checkpoint');
+    pteroLog('[CatRealm Console] Commands: help, secure-status, db-status, db-latest [n], db-checkpoint, db-encrypt-legacy');
   }
 
   function printSecureStatus() {
@@ -385,6 +386,27 @@ function setupConsoleCommands(db) {
     }
   }
 
+  function encryptLegacyMessages() {
+    const rows = db.prepare(`
+      SELECT id, content
+      FROM messages
+      WHERE content NOT LIKE 'enc:v1:%'
+    `).all();
+    if (rows.length === 0) {
+      pteroLog('[CatRealm Console] No legacy plaintext messages found.');
+      return;
+    }
+
+    const updateMessage = db.prepare('UPDATE messages SET content = ? WHERE id = ?');
+    const migrateMessages = db.transaction((items) => {
+      for (const row of items) {
+        updateMessage.run(encryptMessageContent(row.content || ''), row.id);
+      }
+    });
+    migrateMessages(rows);
+    pteroLog(`[CatRealm Console] Encrypted ${rows.length} legacy plaintext messages.`);
+  }
+
   function handleCommand(rawInput) {
     const raw = String(rawInput || '').trim();
     if (!raw) return;
@@ -411,6 +433,10 @@ function setupConsoleCommands(db) {
       case 'db-checkpoint':
       case 'catrealm-db-checkpoint':
         runCheckpoint();
+        break;
+      case 'db-encrypt-legacy':
+      case 'catrealm-db-encrypt-legacy':
+        encryptLegacyMessages();
         break;
       default:
         pteroLog(`[CatRealm Console] Unknown command: ${cmd}. Type "help".`);
