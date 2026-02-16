@@ -53,6 +53,10 @@ function ensureProfileAllowed(req, res, next) {
   next();
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+}
+
 // GET /api/profile/me
 router.get('/me', (req, res) => {
   const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text FROM users WHERE id = ?').get(req.user.id);
@@ -185,8 +189,9 @@ router.delete('/me/banner', (req, res) => {
 });
 
 // GET /api/profile/:userId
-router.get('/:userId([0-9a-fA-F-]{36})', ensureProfileAllowed, (req, res) => {
+router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
   const { userId } = req.params;
+  if (!isUuid(userId)) return next();
   const user = db.prepare(`
     SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.status, u.display_name, u.activity_type, u.activity_text, u.account_type,
       COALESCE(dno.display_name, u.display_name) as effective_display_name
@@ -204,8 +209,9 @@ router.get('/:userId([0-9a-fA-F-]{36})', ensureProfileAllowed, (req, res) => {
 });
 
 // GET /api/profile/:userId/roles
-router.get('/:userId([0-9a-fA-F-]{36})/roles', ensureProfileAllowed, (req, res) => {
+router.get('/:userId/roles', ensureProfileAllowed, (req, res, next) => {
   const { userId } = req.params;
+  if (!isUuid(userId)) return next();
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const roles = db.prepare(`
