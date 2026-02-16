@@ -181,6 +181,7 @@ const secureModeRequested = isTruthy(secureModeEnvRaw, false);
 const secureModeLockRow = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('secure_mode_locked');
 const secureModeLocked = secureModeLockRow?.value === '1';
 let secureModeEnabled = secureModeLocked || secureModeRequested;
+const secureModeJustEnabled = secureModeRequested && !secureModeLocked;
 
 if (secureModeRequested && !secureModeLocked) {
   db.prepare(`
@@ -207,6 +208,27 @@ if (secureModeEnabled) {
 
 process.env.CATREALM_SECURE_MODE_EFFECTIVE = secureModeEnabled ? '1' : '0';
 process.env.CATREALM_SECURE_MODE_LOCKED = (secureModeLocked || secureModeRequested) ? '1' : '0';
+
+if (secureModeJustEnabled && secureModeEnabled) {
+  const { encryptMessageContent } = require('./messageCrypto');
+  const rows = db.prepare(`
+    SELECT id, content
+    FROM messages
+    WHERE content NOT LIKE 'enc:v1:%'
+  `).all();
+
+  if (rows.length > 0) {
+    const updateMessage = db.prepare('UPDATE messages SET content = ? WHERE id = ?');
+    const migrateMessages = db.transaction((items) => {
+      for (const row of items) {
+        updateMessage.run(encryptMessageContent(row.content || ''), row.id);
+      }
+    });
+    migrateMessages(rows);
+  }
+
+  pteroLog(`[CatRealm] Secure mode migration complete. Encrypted ${rows.length} existing messages.`);
+}
 
 // ── Thread Settings Migrations ───────────────────────────────────────────────
 db.exec(`
