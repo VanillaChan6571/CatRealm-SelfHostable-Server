@@ -111,6 +111,28 @@ router.post('/me/avatar-url', (req, res) => {
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'central' });
 });
 
+// POST /api/profile/me/banner-url  (central accounts only)
+router.post('/me/banner-url', (req, res) => {
+  if (req.user?.accountType !== 'central') {
+    return res.status(403).json({ error: 'Banner URL updates are only available for central accounts' });
+  }
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ error: 'Invalid banner URL' });
+  }
+
+  const existing = db.prepare('SELECT banner FROM users WHERE id = ?').get(req.user.id);
+  const existingBanner = existing?.banner || null;
+  const isLocalUpload = !!existingBanner && existingBanner.startsWith('/uploads/banners/');
+  if (isLocalUpload) {
+    return res.status(409).json({ error: 'Server-specific banner is set. Remove it to sync from central.' });
+  }
+
+  db.prepare('UPDATE users SET banner = ? WHERE id = ?').run(url, req.user.id);
+  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text FROM users WHERE id = ?').get(req.user.id);
+  res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'central' });
+});
+
 // POST /api/profile/me/avatar  (multipart/form-data, field "avatar")
 router.post('/me/avatar', upload.single('avatar'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Avatar file required' });
