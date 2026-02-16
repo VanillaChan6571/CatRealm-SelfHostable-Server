@@ -598,6 +598,16 @@ module.exports.updateOnlineUserActivity = (userId, activityType, activityText) =
   ioInstance.emit('presence:update', buildOnlineList());
 };
 
+module.exports.getActiveVoiceUserCount = () => {
+  let total = 0;
+  for (const room of voiceRooms.values()) {
+    total += room.size;
+  }
+  return total;
+};
+
+module.exports.getActiveVoiceRoomCount = () => voiceRooms.size;
+
 function leaveVoiceRoom(io, socket, channelId, userId) {
   const room = voiceRooms.get(channelId);
   if (!room) return;

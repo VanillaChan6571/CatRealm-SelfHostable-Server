@@ -33,96 +33,166 @@ function runNpmInstall(repoRoot) {
   return npm.status === 0;
 }
 
-function ensureGitRepoAndUpdate() {
-  const autoUpdate = isTruthy(process.env.AUTO_UPDATE, true);
-  if (!autoUpdate) {
-    pteroLog('[CatRealm] Auto-update disabled.');
-    return;
-  }
+const updateRuntime = {
+  checkerDisabled: false,
+  updateInProgress: false,
+};
 
-  const repoRoot = path.join(__dirname, '..');
-  const branch = safeBranch(process.env.GIT_BRANCH || 'main');
-  const repo = (process.env.GIT_REPO || 'https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git').trim();
+function shortHash(value) {
+  const hash = (value || '').trim();
+  return hash ? hash.slice(0, 7) : 'unknown';
+}
 
+function shouldAutoUpdate() {
+  return isTruthy(process.env.AUTO_UPDATE, true);
+}
+
+function updateConfig() {
+  return {
+    repoRoot: path.join(__dirname, '..'),
+    branch: safeBranch(process.env.GIT_BRANCH || 'main'),
+    repo: (process.env.GIT_REPO || 'https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git').trim(),
+    checkerMs: Math.max(60_000, Number(process.env.AUTO_UPDATE_CHECK_INTERVAL_MS || 300_000) || 300_000),
+    voiceDelayThreshold: Math.max(1, Number(process.env.AUTO_UPDATE_VOICE_DELAY_THRESHOLD || 2) || 2),
+    restartOnStartupUpdate: isTruthy(process.env.AUTO_UPDATE_RESTART_ON_START, true),
+  };
+}
+
+function ensureRepoReady(repoRoot, repo, branch) {
   const gitVersion = spawnSync('git', ['--version'], { encoding: 'utf8' });
   if (gitVersion.status !== 0) {
-    pteroLog('[CatRealm] Auto-update skipped: git is not installed.');
-    return;
+    pteroLog('[CatRealm <- GitHub]: Git is unavailable. Auto update checks are disabled.');
+    updateRuntime.checkerDisabled = true;
+    return false;
   }
-
-  pteroLog(`[CatRealm] Auto-update check (branch=${branch})`);
 
   const gitDir = path.join(repoRoot, '.git');
   if (!fs.existsSync(gitDir)) {
     pteroLog('[CatRealm] .git not found. Initializing repository from GIT_REPO...');
-    if (runGit(repoRoot, ['init']).status !== 0) {
-      pteroLog('[CatRealm] Auto-update failed: git init failed.');
-      return;
-    }
+    if (runGit(repoRoot, ['init']).status !== 0) return false;
     runGit(repoRoot, ['remote', 'remove', 'origin']);
-    if (runGit(repoRoot, ['remote', 'add', 'origin', repo]).status !== 0) {
-      pteroLog('[CatRealm] Auto-update failed: unable to add origin remote.');
-      return;
-    }
-    if (runGit(repoRoot, ['fetch', '--depth=1', 'origin', branch]).status !== 0) {
-      pteroLog('[CatRealm] Auto-update failed: unable to fetch branch from origin.');
-      return;
-    }
-    if (runGit(repoRoot, ['checkout', '-B', branch, `origin/${branch}`]).status !== 0) {
-      pteroLog('[CatRealm] Auto-update failed: unable to checkout fetched branch.');
-      return;
-    }
+    if (runGit(repoRoot, ['remote', 'add', 'origin', repo]).status !== 0) return false;
+    if (runGit(repoRoot, ['fetch', '--depth=1', 'origin', branch]).status !== 0) return false;
+    if (runGit(repoRoot, ['checkout', '-B', branch, `origin/${branch}`]).status !== 0) return false;
     pteroLog('[CatRealm] Repository initialized from remote.');
-    runNpmInstall(repoRoot);
-    return;
+    if (!runNpmInstall(repoRoot)) return false;
   }
 
-  // Ensure origin points at configured repository.
   const currentOrigin = runGit(repoRoot, ['remote', 'get-url', 'origin']);
   if (currentOrigin.status !== 0) {
-    runGit(repoRoot, ['remote', 'add', 'origin', repo]);
+    if (runGit(repoRoot, ['remote', 'add', 'origin', repo]).status !== 0) return false;
   } else if ((currentOrigin.stdout || '').trim() !== repo) {
-    runGit(repoRoot, ['remote', 'set-url', 'origin', repo]);
+    if (runGit(repoRoot, ['remote', 'set-url', 'origin', repo]).status !== 0) return false;
   }
 
+  return true;
+}
+
+function getHashState(repoRoot, branch) {
   const localSha = runGit(repoRoot, ['rev-parse', 'HEAD']);
-  if (localSha.status !== 0) {
-    pteroLog('[CatRealm] Auto-update failed: could not read local HEAD.');
-    return;
-  }
+  if (localSha.status !== 0) return null;
 
-  if (runGit(repoRoot, ['fetch', '--all', '--prune']).status !== 0) {
-    pteroLog('[CatRealm] Auto-update failed: git fetch failed.');
-    return;
-  }
+  if (runGit(repoRoot, ['fetch', '--all', '--prune']).status !== 0) return null;
 
   const remoteSha = runGit(repoRoot, ['rev-parse', `origin/${branch}`]);
-  if (remoteSha.status !== 0) {
-    pteroLog(`[CatRealm] Auto-update skipped: origin/${branch} not found.`);
-    return;
-  }
+  if (remoteSha.status !== 0) return null;
 
   const local = (localSha.stdout || '').trim();
   const remote = (remoteSha.stdout || '').trim();
-  if (!local || !remote) {
-    pteroLog('[CatRealm] Auto-update skipped: invalid revision data.');
-    return;
-  }
-  if (local === remote) {
-    pteroLog('[CatRealm] Auto-update: already up-to-date.');
-    return;
-  }
-
-  pteroLog(`[CatRealm] Update found: ${local.slice(0, 7)} -> ${remote.slice(0, 7)}. Applying...`);
-  if (runGit(repoRoot, ['reset', '--hard', `origin/${branch}`]).status !== 0) {
-    pteroLog('[CatRealm] Auto-update failed: git reset failed.');
-    return;
-  }
-  runNpmInstall(repoRoot);
-  pteroLog('[CatRealm] Auto-update applied.');
+  if (!local || !remote) return null;
+  return { local, remote };
 }
 
-ensureGitRepoAndUpdate();
+function applyUpdateAndMaybeRestart(config, remoteHash, shouldRestart) {
+  if (runGit(config.repoRoot, ['reset', '--hard', `origin/${config.branch}`]).status !== 0) {
+    pteroLog('[CatRealm <- GitHub]: Update apply failed during git reset.');
+    return false;
+  }
+  if (!runNpmInstall(config.repoRoot)) {
+    pteroLog('[CatRealm <- GitHub]: Update apply failed during npm install.');
+    return false;
+  }
+  pteroLog(`[CatRealm] Update Applied... Restarting Now... (${shortHash(remoteHash)})`);
+  if (shouldRestart) {
+    setTimeout(() => process.exit(0), 250);
+  }
+  return true;
+}
+
+function runUpdateCheck(opts = {}) {
+  const source = opts.source === 'task' ? 'task' : 'startup';
+  const config = updateConfig();
+  const getActiveVoiceUserCount = typeof opts.getActiveVoiceUserCount === 'function'
+    ? opts.getActiveVoiceUserCount
+    : (() => 0);
+
+  if (updateRuntime.checkerDisabled) return;
+  if (updateRuntime.updateInProgress) return;
+
+  if (!shouldAutoUpdate()) {
+    pteroLog('[CatRealm <- GitHub]: There is an update however won\'t download as manually marked as Do Not Update. Disabling Auto Checker Task....');
+    updateRuntime.checkerDisabled = true;
+    return;
+  }
+
+  if (source === 'startup') {
+    pteroLog('[CatRealm] Checking For Updates...');
+  } else {
+    pteroLog('[CatRealm -> Auto Checker Task]: Running a check if there is an update...');
+  }
+
+  if (!ensureRepoReady(config.repoRoot, config.repo, config.branch)) {
+    pteroLog('[CatRealm <- GitHub]: Unable to prepare git repository for update checks.');
+    return;
+  }
+
+  const hashes = getHashState(config.repoRoot, config.branch);
+  if (!hashes) {
+    pteroLog('[CatRealm <- GitHub]: Unable to compare local and remote hashes.');
+    return;
+  }
+
+  const localShort = shortHash(hashes.local);
+  const remoteShort = shortHash(hashes.remote);
+  pteroLog(`[CatRealm -> GitHub]: Checking ${localShort} vs remote hash is ${remoteShort}`);
+
+  if (hashes.local === hashes.remote) {
+    if (source === 'startup') {
+      pteroLog('[CatRealm <- GitHub]: On Latest Build');
+    } else {
+      pteroLog('[CatRealm <- GitHub]: On Latest Build, Continuing with Life.');
+    }
+    return;
+  }
+
+  updateRuntime.updateInProgress = true;
+  try {
+    if (source === 'startup') {
+      pteroLog(`[CatRealm <- GitHub]: There is an update to ${remoteShort}! Downloading & Applying...`);
+      applyUpdateAndMaybeRestart(config, hashes.remote, config.restartOnStartupUpdate);
+      return;
+    }
+
+    pteroLog(`[CatRealm <- GitHub]: There is an update to ${remoteShort}! Unable to Download & Apply since we are mid running!`);
+    pteroLog('[CatRealm] Update Found - Checking if anyone in a Voice Call on Realm..');
+
+    const activeVoiceUsers = Number(getActiveVoiceUserCount()) || 0;
+    if (activeVoiceUsers >= config.voiceDelayThreshold) {
+      pteroLog(`[CatRealm <- GitHub]: Called to continue to check ${localShort} vs ${remoteShort}`);
+      pteroLog(`[CatRealm] There are ${activeVoiceUsers} users in a Voice Call.. Delay Update, Callback in 5 minutes..`);
+      return;
+    }
+
+    if (activeVoiceUsers === 0) {
+      pteroLog(`[CatRealm <- GitHub]: Called to Download & Apply ${remoteShort} since no one is in a Voice Call.`);
+    } else {
+      pteroLog(`[CatRealm <- GitHub]: Called to Download & Apply ${remoteShort} since active voice users are below delay threshold (${config.voiceDelayThreshold}).`);
+    }
+    applyUpdateAndMaybeRestart(config, hashes.remote, true);
+  } finally {
+    updateRuntime.updateInProgress = false;
+  }
+}
 
 function ensureJwtSecret() {
   const current = process.env.JWT_SECRET;
@@ -307,6 +377,11 @@ app.use('/api/turn', turnRoutes); // TURN/STUN credentials (no auth required)
 
 // ── Create server & start ─────────────────────────────────────────────────────
 async function start() {
+  runUpdateCheck({
+    source: 'startup',
+    getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
+  });
+
   let httpServer;
   const sslCert = process.env.SSL_CERT_PATH;
   const sslKey = process.env.SSL_KEY_PATH;
@@ -356,6 +431,16 @@ async function start() {
   });
 
   setupSocketHandlers(io);
+
+  if (!updateRuntime.checkerDisabled && shouldAutoUpdate()) {
+    const checkerMs = updateConfig().checkerMs;
+    setInterval(() => {
+      runUpdateCheck({
+        source: 'task',
+        getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
+      });
+    }, checkerMs);
+  }
 
   // ── Start ───────────────────────────────────────────────────────────────────
   httpServer.listen(PORT, '0.0.0.0', () => {
