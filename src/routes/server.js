@@ -47,6 +47,10 @@ router.get('/', (req, res) => {
   const mentionAlias = getSetting('mention_alias', '@everyone');
   const serverIcon = getSetting('server_icon', null);
   const serverBanner = getSetting('server_banner', null);
+  const secureMode = {
+    enabled: process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1',
+    locked: process.env.CATREALM_SECURE_MODE_LOCKED === '1',
+  };
 
   res.json({
     name,
@@ -57,6 +61,7 @@ router.get('/', (req, res) => {
     mentionAlias,
     serverIcon,
     serverBanner,
+    secureMode,
     version: packageVersion,
     gitHash: gitHash,
     buildInfo: `v${packageVersion} (${gitHash})`
