@@ -6,6 +6,7 @@ const db = require('../db');
 const { JWT_SECRET } = require('../middleware/auth');
 const { PERMISSIONS, ALL_PERMISSIONS, computePermissionsForUser, hasPermission } = require('../permissions');
 const pteroLog = require('../logger');
+const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
 const onlineUsers = new Map();
@@ -347,6 +348,7 @@ function setupSocketHandlers(io) {
           WHERE m.id = ?
         `).get(replyToId);
         if (!replyTo) return socket.emit('error', 'Reply target not found');
+        replyTo.content = decryptMessageContent(replyTo.content);
       }
 
       // Validate forwardFromId
@@ -360,6 +362,7 @@ function setupSocketHandlers(io) {
           WHERE m.id = ?
         `).get(forwardFromId);
         if (!forwardFrom) return socket.emit('error', 'Forward source not found');
+        forwardFrom.content = decryptMessageContent(forwardFrom.content);
       }
 
       const id = randomUUID();
@@ -385,7 +388,7 @@ function setupSocketHandlers(io) {
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        id, channelId, user.id, trimmed, now,
+        id, channelId, user.id, encryptMessageContent(trimmed), now,
         attachmentUrl, attachmentType, attachmentSize, 'user', threadId || null,
         replyToId || null,
         forwardFrom?.id || null,
@@ -463,7 +466,7 @@ function setupSocketHandlers(io) {
         return socket.emit('error', 'Media channels do not allow text edits');
       }
 
-      db.prepare('UPDATE messages SET content = ?, edited = 1 WHERE id = ?').run(content.trim(), messageId);
+      db.prepare('UPDATE messages SET content = ?, edited = 1 WHERE id = ?').run(encryptMessageContent(content.trim()), messageId);
       const payload = { messageId, content: content.trim(), threadId: msg.thread_id || null };
       if (msg.thread_id) {
         io.to(`thread:${msg.thread_id}`).emit('message:edited', payload);

@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission } = require('../permissions');
+const { decryptMessageRows } = require('../messageCrypto');
 
 // GET /api/threads?channelId=...
 router.get('/', (req, res) => {
@@ -140,6 +141,8 @@ router.get('/:id/messages', (req, res) => {
     `).all(id, limit);
   }
 
+  messages = decryptMessageRows(messages);
+
   // Transform reply metadata
   messages = messages.map(m => ({
     ...m,
@@ -191,4 +194,3 @@ router.post('/:id/unarchive', (req, res) => {
 });
 
 module.exports = router;
-

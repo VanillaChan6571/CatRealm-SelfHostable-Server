@@ -4,6 +4,7 @@ const db = require('../db');
 const { PERMISSIONS, hasPermission } = require('../permissions');
 const { broadcastChannelUpdate, emitMessage } = require('../socket/handler');
 const { getSetting } = require('../settings');
+const { encryptMessageContent, decryptMessageRows } = require('../messageCrypto');
 
 // GET /api/channels - list all channels
 router.get('/', (req, res) => {
@@ -125,7 +126,7 @@ router.get('/:id/pins', (req, res) => {
     WHERE p.channel_id = ?
     ORDER BY p.pinned_at DESC
   `).all(id);
-  res.json(pins);
+  res.json(decryptMessageRows(pins));
 });
 
 // POST /api/channels/:id/pins
@@ -155,7 +156,7 @@ router.post('/:id/pins', (req, res) => {
   db.prepare(`
     INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type, attachment_url)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(sysId, req.params.id, req.user.id, content, now, 'system', messageId);
+  `).run(sysId, req.params.id, req.user.id, encryptMessageContent(content), now, 'system', messageId);
 
   emitMessage(req.params.id, {
     id: sysId,

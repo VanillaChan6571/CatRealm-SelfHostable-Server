@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const db = require('../db');
+const { decryptMessageRows } = require('../messageCrypto');
 
 // GET /api/messages/:channelId?before=<timestamp>&limit=50
 router.get('/:channelId', (req, res) => {
@@ -54,6 +55,8 @@ router.get('/:channelId', (req, res) => {
       ORDER BY m.created_at DESC LIMIT ?
     `).all(channelId, limit);
   }
+
+  messages = decryptMessageRows(messages);
 
   // Transform reply metadata
   messages = messages.map(m => ({

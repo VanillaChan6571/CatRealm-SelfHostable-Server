@@ -16,6 +16,38 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+function isTruthy(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
+function ensureEnvFile() {
+  const envPath = path.join(__dirname, '../.env');
+  const envExamplePath = path.join(__dirname, '../.env.example');
+  if (!fs.existsSync(envPath) && fs.existsSync(envExamplePath)) {
+    fs.copyFileSync(envExamplePath, envPath);
+  }
+  return envPath;
+}
+
+function persistEnvValue(key, value) {
+  const envPath = ensureEnvFile();
+  let envContents = '';
+  if (fs.existsSync(envPath)) {
+    envContents = fs.readFileSync(envPath, 'utf8');
+  }
+
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escapedKey}=.*$`, 'm');
+  if (pattern.test(envContents)) {
+    envContents = envContents.replace(pattern, `${key}=${value}`);
+  } else {
+    envContents = `${envContents.trimEnd()}\n${key}=${value}\n`;
+  }
+
+  fs.writeFileSync(envPath, envContents, 'utf8');
+}
+
 // ── Schema ─────────────────────────────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -143,6 +175,38 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_overwrites_channel ON channel_permission_overwrites(channel_id);
   CREATE INDEX IF NOT EXISTS idx_overwrites_target ON channel_permission_overwrites(target_id);
 `);
+
+const secureModeEnvRaw = process.env.SECURE_MODE ?? process.env['secure-mode'];
+const secureModeRequested = isTruthy(secureModeEnvRaw, false);
+const secureModeLockRow = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('secure_mode_locked');
+const secureModeLocked = secureModeLockRow?.value === '1';
+let secureModeEnabled = secureModeLocked || secureModeRequested;
+
+if (secureModeRequested && !secureModeLocked) {
+  db.prepare(`
+    INSERT INTO server_settings (key, value)
+    VALUES ('secure_mode_locked', '1')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run();
+  pteroLog('[CatRealm] Secure mode has been enabled and permanently locked.');
+}
+
+if (secureModeLocked && !secureModeRequested && secureModeEnvRaw !== undefined) {
+  pteroLog('[CatRealm] secure-mode=0 ignored because secure mode is permanently locked.');
+}
+
+if (secureModeEnabled) {
+  let secureModeKey = process.env.SECURE_MODE_KEY || process.env['secure-mode-key'] || '';
+  if (String(secureModeKey).trim().length < 16) {
+    secureModeKey = crypto.randomBytes(48).toString('hex');
+    process.env.SECURE_MODE_KEY = secureModeKey;
+    persistEnvValue('SECURE_MODE_KEY', secureModeKey);
+    pteroLog('[CatRealm] Generated SECURE_MODE_KEY and saved it to .env');
+  }
+}
+
+process.env.CATREALM_SECURE_MODE_EFFECTIVE = secureModeEnabled ? '1' : '0';
+process.env.CATREALM_SECURE_MODE_LOCKED = (secureModeLocked || secureModeRequested) ? '1' : '0';
 
 // ── Thread Settings Migrations ───────────────────────────────────────────────
 db.exec(`
