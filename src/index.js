@@ -2,7 +2,127 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
+
+function isTruthy(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
+function safeBranch(value) {
+  const branch = (value || 'main').trim();
+  if (/^[A-Za-z0-9._/-]+$/.test(branch)) return branch;
+  return 'main';
+}
+
+function runGit(repoRoot, args) {
+  return spawnSync('git', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function runNpmInstall(repoRoot) {
+  const npm = spawnSync('npm', ['install', '--omit=dev'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: 'inherit',
+  });
+  return npm.status === 0;
+}
+
+function ensureGitRepoAndUpdate() {
+  const autoUpdate = isTruthy(process.env.AUTO_UPDATE, true);
+  if (!autoUpdate) {
+    pteroLog('[CatRealm] Auto-update disabled.');
+    return;
+  }
+
+  const repoRoot = path.join(__dirname, '..');
+  const branch = safeBranch(process.env.GIT_BRANCH || 'main');
+  const repo = (process.env.GIT_REPO || 'https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git').trim();
+
+  const gitVersion = spawnSync('git', ['--version'], { encoding: 'utf8' });
+  if (gitVersion.status !== 0) {
+    pteroLog('[CatRealm] Auto-update skipped: git is not installed.');
+    return;
+  }
+
+  pteroLog(`[CatRealm] Auto-update check (branch=${branch})`);
+
+  const gitDir = path.join(repoRoot, '.git');
+  if (!fs.existsSync(gitDir)) {
+    pteroLog('[CatRealm] .git not found. Initializing repository from GIT_REPO...');
+    if (runGit(repoRoot, ['init']).status !== 0) {
+      pteroLog('[CatRealm] Auto-update failed: git init failed.');
+      return;
+    }
+    runGit(repoRoot, ['remote', 'remove', 'origin']);
+    if (runGit(repoRoot, ['remote', 'add', 'origin', repo]).status !== 0) {
+      pteroLog('[CatRealm] Auto-update failed: unable to add origin remote.');
+      return;
+    }
+    if (runGit(repoRoot, ['fetch', '--depth=1', 'origin', branch]).status !== 0) {
+      pteroLog('[CatRealm] Auto-update failed: unable to fetch branch from origin.');
+      return;
+    }
+    if (runGit(repoRoot, ['checkout', '-B', branch, `origin/${branch}`]).status !== 0) {
+      pteroLog('[CatRealm] Auto-update failed: unable to checkout fetched branch.');
+      return;
+    }
+    pteroLog('[CatRealm] Repository initialized from remote.');
+    runNpmInstall(repoRoot);
+    return;
+  }
+
+  // Ensure origin points at configured repository.
+  const currentOrigin = runGit(repoRoot, ['remote', 'get-url', 'origin']);
+  if (currentOrigin.status !== 0) {
+    runGit(repoRoot, ['remote', 'add', 'origin', repo]);
+  } else if ((currentOrigin.stdout || '').trim() !== repo) {
+    runGit(repoRoot, ['remote', 'set-url', 'origin', repo]);
+  }
+
+  const localSha = runGit(repoRoot, ['rev-parse', 'HEAD']);
+  if (localSha.status !== 0) {
+    pteroLog('[CatRealm] Auto-update failed: could not read local HEAD.');
+    return;
+  }
+
+  if (runGit(repoRoot, ['fetch', '--all', '--prune']).status !== 0) {
+    pteroLog('[CatRealm] Auto-update failed: git fetch failed.');
+    return;
+  }
+
+  const remoteSha = runGit(repoRoot, ['rev-parse', `origin/${branch}`]);
+  if (remoteSha.status !== 0) {
+    pteroLog(`[CatRealm] Auto-update skipped: origin/${branch} not found.`);
+    return;
+  }
+
+  const local = (localSha.stdout || '').trim();
+  const remote = (remoteSha.stdout || '').trim();
+  if (!local || !remote) {
+    pteroLog('[CatRealm] Auto-update skipped: invalid revision data.');
+    return;
+  }
+  if (local === remote) {
+    pteroLog('[CatRealm] Auto-update: already up-to-date.');
+    return;
+  }
+
+  pteroLog(`[CatRealm] Update found: ${local.slice(0, 7)} -> ${remote.slice(0, 7)}. Applying...`);
+  if (runGit(repoRoot, ['reset', '--hard', `origin/${branch}`]).status !== 0) {
+    pteroLog('[CatRealm] Auto-update failed: git reset failed.');
+    return;
+  }
+  runNpmInstall(repoRoot);
+  pteroLog('[CatRealm] Auto-update applied.');
+}
+
+ensureGitRepoAndUpdate();
 
 function ensureJwtSecret() {
   const current = process.env.JWT_SECRET;

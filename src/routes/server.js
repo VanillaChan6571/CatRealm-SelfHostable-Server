@@ -17,14 +17,18 @@ try {
   console.error('Failed to read package.json version:', err.message);
 }
 
-// Get git commit hash
-try {
-  gitHash = execSync('git rev-parse --short HEAD', {
-    cwd: path.join(__dirname, '../..'),
-    encoding: 'utf8'
-  }).trim();
-} catch (err) {
-  console.error('Failed to get git hash:', err.message);
+// Get git commit hash (silent fallback when deployment is not a git checkout)
+const repoRoot = path.join(__dirname, '../..');
+if (fs.existsSync(path.join(repoRoot, '.git'))) {
+  try {
+    gitHash = execSync('git rev-parse --short HEAD', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    gitHash = 'unknown';
+  }
 }
 
 // GET /api/server — public info shown to client before login
