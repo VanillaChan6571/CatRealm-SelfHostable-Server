@@ -174,7 +174,11 @@ sleep 3
 echo ""
 
 # Start the server
-node src/index.js
+if [ -x "./scripts/auto-update-start.sh" ]; then
+    ./scripts/auto-update-start.sh
+else
+    node src/index.js
+fi
 
 # If server crashes or exits
 echo ""

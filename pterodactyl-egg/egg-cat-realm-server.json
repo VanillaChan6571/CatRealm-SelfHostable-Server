@@ -2,7 +2,7 @@
     "_comment": "FILE CREATED BY CAT REALM - MODIFY AT YOUR OWN RISK",
     "meta": {
         "version": "PTDL_v2",
-        "update_url": null
+        "update_url": "https://raw.githubusercontent.com/VanillaChan6571/CatRealm-SelfHostable-Server/main/egg-cat-realm-server.json"
     },
     "exported_at": "2026-02-12T11:41:25-07:00",
     "name": "CatRealm Server",
@@ -16,7 +16,7 @@
         "NodeJS 24 - Future Release Point": "ghcr.io\/pterodactyl\/yolks:nodejs_24"
     },
     "file_denylist": [],
-    "startup": "npm install --production && node src\/index.js",
+    "startup": "bash scripts\/auto-update-start.sh",
     "config": {
         "files": "{}",
         "startup": "{\r\n    \"done\": \"Server running on port\"\r\n}",
@@ -25,7 +25,7 @@
     },
     "scripts": {
         "installation": {
-            "script": "#!\/bin\/bash\n# CatRealm Server - Pterodactyl Install Script\n\napt-get update -y\napt-get install -y curl git\n\n# Install Node.js 20 if not present\nif ! command -v node &> \/dev\/null; then\n  curl -fsSL https:\/\/deb.nodesource.com\/setup_20.x | bash -\n  apt-get install -y nodejs\nfi\n\necho \"Node version: $(node -v)\"\n\n# Download latest release from GitHub (update URL when you publish)\ncd \/mnt\/server\n\nif [ -d \".git\" ]; then\n  echo \"Updating existing installation...\"\n  git pull\nelse\n  echo \"Fresh install...\"\n  # Replace with your actual repo URL when published\n  git clone https:\/\/github.com\/YOUR_USERNAME\/catrealm-server.git . || {\n    echo \"Git clone failed - manual install may be required\"\n    exit 1\n  }\nfi\n\nnpm install --production\n\n# Create data directory\nmkdir -p \/mnt\/server\/data\n\n# Write .env from Pterodactyl environment variables\ncat > \/mnt\/server\/.env <<EOF\nPORT=${SERVER_PORT}\nSERVER_NAME=${SERVER_NAME}\nSERVER_DESCRIPTION=${SERVER_DESCRIPTION}\nREGISTRATION_OPEN=${REGISTRATION_OPEN}\nSERVER_MODE=${SERVER_MODE}\nTURN_MODE=${TURN_MODE}\nTURN_SECRET=${TURN_SECRET}\nTURN_HOST=${TURN_HOST}\nTURN_PORT=${TURN_PORT}\nTURN_TLS_PORT=${TURN_TLS_PORT}\nTURN_FORCE_TCP=${TURN_FORCE_TCP}\nDB_PATH=\/mnt\/server\/data\/catrealm.db\nCLIENT_URL=*\nSSL_DOMAIN=${SSL_DOMAIN}\nSSL_EMAIL=${SSL_EMAIL}\nSSL_DNS_PROVIDER=${SSL_DNS_PROVIDER}\nSSL_DNS_API_TOKEN=${SSL_DNS_API_TOKEN}\nSSL_CERT_PATH=${SSL_CERT_PATH}\nSSL_KEY_PATH=${SSL_KEY_PATH}\nEOF\n\nmkdir -p \/mnt\/server\/ssl\necho \"CatRealm installation complete!\"",
+            "script": "#!\/bin\/bash\n# CatRealm Server - Pterodactyl Install Script\n\napt-get update -y\napt-get install -y curl git\n\n# Install Node.js 20 if not present\nif ! command -v node &> \/dev\/null; then\n  curl -fsSL https:\/\/deb.nodesource.com\/setup_20.x | bash -\n  apt-get install -y nodejs\nfi\n\necho \"Node version: $(node -v)\"\n\n# Download latest release from GitHub\ncd \/mnt\/server\n\nif [ -d \".git\" ]; then\n  echo \"Updating existing installation...\"\n  git fetch --all --prune || true\n  git reset --hard origin\/${GIT_BRANCH:-main} || git pull\nelse\n  echo \"Fresh install...\"\n  git clone ${GIT_REPO:-https:\/\/github.com\/VanillaChan6571\/CatRealm-SelfHostable-Server.git} . || {\n    echo \"Git clone failed - manual install may be required\"\n    exit 1\n  }\n  git checkout ${GIT_BRANCH:-main} || true\nfi\n\nnpm install --production\nchmod +x scripts\/auto-update-start.sh || true\n\n# Create data directory\nmkdir -p \/mnt\/server\/data\n\n# Write .env from Pterodactyl environment variables\ncat > \/mnt\/server\/.env <<EOF\nPORT=${SERVER_PORT}\nSERVER_NAME=${SERVER_NAME}\nSERVER_DESCRIPTION=${SERVER_DESCRIPTION}\nREGISTRATION_OPEN=${REGISTRATION_OPEN}\nSERVER_MODE=${SERVER_MODE}\nTURN_MODE=${TURN_MODE}\nTURN_SECRET=${TURN_SECRET}\nTURN_HOST=${TURN_HOST}\nTURN_PORT=${TURN_PORT}\nTURN_TLS_PORT=${TURN_TLS_PORT}\nTURN_FORCE_TCP=${TURN_FORCE_TCP}\nDB_PATH=\/mnt\/server\/data\/catrealm.db\nCLIENT_URL=*\nSSL_DOMAIN=${SSL_DOMAIN}\nSSL_EMAIL=${SSL_EMAIL}\nSSL_DNS_PROVIDER=${SSL_DNS_PROVIDER}\nSSL_DNS_API_TOKEN=${SSL_DNS_API_TOKEN}\nSSL_CERT_PATH=${SSL_CERT_PATH}\nSSL_KEY_PATH=${SSL_KEY_PATH}\nAUTO_UPDATE=${AUTO_UPDATE}\nGIT_REPO=${GIT_REPO}\nGIT_BRANCH=${GIT_BRANCH}\nEOF\n\nmkdir -p \/mnt\/server\/ssl\necho \"CatRealm installation complete!\"",
             "container": "ghcr.io\/pterodactyl\/installers:debian",
             "entrypoint": "bash"
         }
@@ -169,6 +169,36 @@
             "user_viewable": true,
             "user_editable": true,
             "rules": "nullable|in:true,false,1,0,yes,no,on,off",
+            "field_type": "text"
+        },
+        {
+            "name": "Auto Update",
+            "description": "If true, startup will fetch and reset to origin branch when this server folder is a git repository.",
+            "env_variable": "AUTO_UPDATE",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:true,false,1,0,yes,no,on,off",
+            "field_type": "text"
+        },
+        {
+            "name": "Git Repository URL",
+            "description": "Repository used for install/update. Leave default unless you forked CatRealm.",
+            "env_variable": "GIT_REPO",
+            "default_value": "https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Git Branch",
+            "description": "Branch used for install/update.",
+            "env_variable": "GIT_BRANCH",
+            "default_value": "main",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:64",
             "field_type": "text"
         },
         {
