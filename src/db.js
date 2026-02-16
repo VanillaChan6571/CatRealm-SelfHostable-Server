@@ -30,6 +30,32 @@ function ensureEnvFile() {
   return envPath;
 }
 
+function readEnvFileValue(rawKey) {
+  const envPath = path.join(__dirname, '../.env');
+  if (!fs.existsSync(envPath)) return undefined;
+  const envContents = fs.readFileSync(envPath, 'utf8');
+  const escapedKey = rawKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = envContents.match(new RegExp(`^\\s*${escapedKey}\\s*=\\s*(.*)\\s*$`, 'm'));
+  if (!match) return undefined;
+  return (match[1] || '').trim();
+}
+
+function getEnvValue(keys) {
+  for (const key of keys) {
+    const envValue = process.env[key];
+    if (envValue !== undefined && envValue !== null && String(envValue).trim() !== '') {
+      return String(envValue).trim();
+    }
+  }
+  for (const key of keys) {
+    const fileValue = readEnvFileValue(key);
+    if (fileValue !== undefined && fileValue !== null && String(fileValue).trim() !== '') {
+      return String(fileValue).trim();
+    }
+  }
+  return '';
+}
+
 function persistEnvValue(key, value) {
   const envPath = ensureEnvFile();
   let envContents = '';
@@ -176,7 +202,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_overwrites_target ON channel_permission_overwrites(target_id);
 `);
 
-const secureModeEnvRaw = process.env.SECURE_MODE ?? process.env['secure-mode'];
+const secureModeEnvRaw = getEnvValue(['SECURE_MODE', 'secure-mode']);
 const secureModeRequested = isTruthy(secureModeEnvRaw, false);
 const secureModeLockRow = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('secure_mode_locked');
 const secureModeLocked = secureModeLockRow?.value === '1';
@@ -197,7 +223,7 @@ if (secureModeLocked && !secureModeRequested && secureModeEnvRaw !== undefined) 
 }
 
 if (secureModeEnabled) {
-  let secureModeKey = process.env.SECURE_MODE_KEY || process.env['secure-mode-key'] || '';
+  let secureModeKey = getEnvValue(['SECURE_MODE_KEY', 'secure-mode-key']);
   if (String(secureModeKey).trim().length < 16) {
     secureModeKey = crypto.randomBytes(48).toString('hex');
     process.env.SECURE_MODE_KEY = secureModeKey;
@@ -208,6 +234,7 @@ if (secureModeEnabled) {
 
 process.env.CATREALM_SECURE_MODE_EFFECTIVE = secureModeEnabled ? '1' : '0';
 process.env.CATREALM_SECURE_MODE_LOCKED = (secureModeLocked || secureModeRequested) ? '1' : '0';
+pteroLog(`[CatRealm] Secure mode: ${secureModeEnabled ? 'ENABLED' : 'DISABLED'} (locked=${(secureModeLocked || secureModeRequested) ? '1' : '0'})`);
 
 if (secureModeJustEnabled && secureModeEnabled) {
   const { encryptMessageContent } = require('./messageCrypto');
