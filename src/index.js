@@ -4,7 +4,6 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
-const { encryptMessageContent } = require('./messageCrypto');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -387,6 +386,7 @@ function setupConsoleCommands(db) {
   }
 
   function encryptLegacyMessages() {
+    const { encryptMessageContent } = require('./messageCrypto');
     const rows = db.prepare(`
       SELECT id, content
       FROM messages

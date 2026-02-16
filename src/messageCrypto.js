@@ -1,22 +1,26 @@
 const crypto = require('crypto');
 
 const SECURE_PREFIX = 'enc:v1:';
-const secureModeEnabled = process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1';
-const secureModeKeyRaw = process.env.SECURE_MODE_KEY || process.env['secure-mode-key'] || '';
-const secureModeKey = secureModeEnabled
-  ? crypto.createHash('sha256').update(String(secureModeKeyRaw), 'utf8').digest()
-  : null;
+
+function getSecureContext() {
+  const enabled = process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1';
+  if (!enabled) return { enabled: false, key: null };
+  const keyRaw = process.env.SECURE_MODE_KEY || process.env['secure-mode-key'] || '';
+  const key = crypto.createHash('sha256').update(String(keyRaw), 'utf8').digest();
+  return { enabled: true, key };
+}
 
 function isSecureModeEnabled() {
-  return secureModeEnabled;
+  return process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1';
 }
 
 function encryptMessageContent(content) {
+  const secure = getSecureContext();
   const text = typeof content === 'string' ? content : '';
-  if (!secureModeEnabled) return text;
+  if (!secure.enabled) return text;
 
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', secureModeKey, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', secure.key, iv);
   const ciphertext = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
 
@@ -24,8 +28,9 @@ function encryptMessageContent(content) {
 }
 
 function decryptMessageContent(content) {
+  const secure = getSecureContext();
   if (typeof content !== 'string' || !content.startsWith(SECURE_PREFIX)) return content;
-  if (!secureModeEnabled) return content;
+  if (!secure.enabled) return content;
 
   const encoded = content.slice(SECURE_PREFIX.length);
   const parts = encoded.split(':');
@@ -35,7 +40,7 @@ function decryptMessageContent(content) {
     const iv = Buffer.from(parts[0], 'base64url');
     const authTag = Buffer.from(parts[1], 'base64url');
     const ciphertext = Buffer.from(parts[2], 'base64url');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', secureModeKey, iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', secure.key, iv);
     decipher.setAuthTag(authTag);
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return plaintext.toString('utf8');
