@@ -54,12 +54,22 @@ function extractMetaTag(html, key, attr = 'property') {
   const re = new RegExp(`<meta[^>]+${attr}=["']${escaped}["'][^>]*content=["']([^"']+)["'][^>]*>`, 'i');
   const reInverse = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]*${attr}=["']${escaped}["'][^>]*>`, 'i');
   const m = html.match(re) || html.match(reInverse);
-  return m?.[1]?.trim() || null;
+  return decodeHtmlEntities(m?.[1]?.trim() || null);
 }
 
 function extractTitle(html) {
   const m = html.match(/<title[^>]*>([^<]{1,400})<\/title>/i);
-  return m?.[1]?.trim() || null;
+  return decodeHtmlEntities(m?.[1]?.trim() || null);
+}
+
+function decodeHtmlEntities(value) {
+  if (typeof value !== 'string' || value.length === 0) return value || null;
+  return value
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
 }
 
 function resolveMaybeRelative(base, target) {
@@ -457,6 +467,7 @@ router.get('/', async (req, res) => {
     const ogTitle = extractMetaTag(html, 'og:title', 'property');
     const ogDescription = extractMetaTag(html, 'og:description', 'property');
     const ogImage = extractMetaTag(html, 'og:image', 'property');
+    const ogImageSecure = extractMetaTag(html, 'og:image:secure_url', 'property');
     const ogSiteName = extractMetaTag(html, 'og:site_name', 'property');
     const twTitle = extractMetaTag(html, 'twitter:title', 'name');
     const twDescription = extractMetaTag(html, 'twitter:description', 'name');
@@ -465,7 +476,7 @@ router.get('/', async (req, res) => {
 
     const title = ogTitle || twTitle || extractTitle(html);
     const summary = ogDescription || twDescription || description;
-    const image = resolveMaybeRelative(finalUrl, ogImage || twImage);
+    const image = resolveMaybeRelative(finalUrl, ogImageSecure || ogImage || twImage);
     const siteName = ogSiteName || new URL(finalUrl).hostname;
 
     return res.json({
