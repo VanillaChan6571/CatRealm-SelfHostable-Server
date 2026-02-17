@@ -139,12 +139,16 @@ function setupSocketHandlers(io) {
     const mode = process.env.SERVER_MODE || 'decentralized';
     const registrationOpen = getSetting('registration_open', process.env.REGISTRATION_OPEN !== 'false' ? 'true' : 'false');
     const mentionAlias = getSetting('mention_alias', '@everyone');
+    const serverIcon = getSetting('server_icon', null);
+    const serverBanner = getSetting('server_banner', null);
     socket.emit('server:info', {
       name: serverName,
       description: serverDescription,
       mode,
       registrationOpen: registrationOpen === 'true',
-      mentionAlias
+      mentionAlias,
+      serverIcon,
+      serverBanner,
     });
 
     // ── Voice: join/leave/signaling ───────────────────────────────────────────────
@@ -305,6 +309,7 @@ function setupSocketHandlers(io) {
       if (hasAttachment && !((user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.SEND_MEDIA) !== 0))) {
         return socket.emit('error', 'Missing permission: send_media');
       }
+      const canEmbedLinks = (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.EMBED_LINKS) !== 0);
 
       const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
       if (!channel) return socket.emit('error', 'Channel not found');
@@ -384,16 +389,17 @@ function setupSocketHandlers(io) {
         INSERT INTO messages (
           id, channel_id, user_id, content, created_at,
           attachment_url, attachment_type, attachment_size, message_type, thread_id,
-          reply_to_id, forward_from_id, forward_from_user, forward_from_channel
+          reply_to_id, forward_from_id, forward_from_user, forward_from_channel, embeds_enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, channelId, user.id, encryptMessageContent(trimmed), now,
         attachmentUrl, attachmentType, attachmentSize, 'user', threadId || null,
         replyToId || null,
         forwardFrom?.id || null,
         forwardFrom?.username || null,
-        forwardFrom?.channel_name || null
+        forwardFrom?.channel_name || null,
+        canEmbedLinks ? 1 : 0
       );
 
       const topRole = db.prepare(`
@@ -438,6 +444,7 @@ function setupSocketHandlers(io) {
         forward_from_id: forwardFrom?.id || null,
         forward_from_user: forwardFrom?.username || null,
         forward_from_channel: forwardFrom?.channel_name || null,
+        embeds_enabled: canEmbedLinks ? 1 : 0,
       };
 
       if (threadId) {
@@ -461,13 +468,14 @@ function setupSocketHandlers(io) {
       if (!msg) return socket.emit('error', 'Message not found');
       const canEdit = msg.user_id === user.id || (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.EDIT_MESSAGES) !== 0);
       if (!canEdit) return socket.emit('error', 'Not allowed');
+      const canEmbedLinks = (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.EMBED_LINKS) !== 0);
       const channel = db.prepare('SELECT type FROM channels WHERE id = ?').get(msg.channel_id);
       if (channel?.type === 'media') {
         return socket.emit('error', 'Media channels do not allow text edits');
       }
 
-      db.prepare('UPDATE messages SET content = ?, edited = 1 WHERE id = ?').run(encryptMessageContent(content.trim()), messageId);
-      const payload = { messageId, content: content.trim(), threadId: msg.thread_id || null };
+      db.prepare('UPDATE messages SET content = ?, edited = 1, embeds_enabled = ? WHERE id = ?').run(encryptMessageContent(content.trim()), canEmbedLinks ? 1 : 0, messageId);
+      const payload = { messageId, content: content.trim(), threadId: msg.thread_id || null, embeds_enabled: canEmbedLinks ? 1 : 0 };
       if (msg.thread_id) {
         io.to(`thread:${msg.thread_id}`).emit('message:edited', payload);
       } else {

@@ -355,6 +355,20 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_invites_creator ON invites(creator_user_id);
   CREATE INDEX IF NOT EXISTS idx_invites_expires ON invites(expires_at);
+
+  CREATE TABLE IF NOT EXISTS expressions (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL CHECK(type IN ('emotes', 'anim-emotes', 'stickers', 'anim-stickers')),
+    file_url    TEXT NOT NULL,
+    mime_type   TEXT NOT NULL,
+    file_size   INTEGER NOT NULL DEFAULT 0,
+    created_by  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_expressions_name_type ON expressions(name COLLATE NOCASE, type);
+  CREATE INDEX IF NOT EXISTS idx_expressions_type ON expressions(type);
 `);
 
 // â”€â”€ Migrations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -432,6 +446,10 @@ if (!messageColumns.includes('forward_from_user')) {
 if (!messageColumns.includes('forward_from_channel')) {
   db.prepare('ALTER TABLE messages ADD COLUMN forward_from_channel TEXT').run();
   pteroLog('[CatRealm] Added messages.forward_from_channel column');
+}
+if (!messageColumns.includes('embeds_enabled')) {
+  db.prepare("ALTER TABLE messages ADD COLUMN embeds_enabled INTEGER NOT NULL DEFAULT 1").run();
+  pteroLog('[CatRealm] Added messages.embeds_enabled column');
 }
 
 // Create indexes after columns exist

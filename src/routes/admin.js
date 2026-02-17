@@ -148,6 +148,10 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
   const mentionAlias = getSetting('mention_alias', '@everyone');
   const serverIcon = getSetting('server_icon', null);
   const serverBanner = getSetting('server_banner', null);
+  const maxEmotes = Number(getSetting('max_emotes', '100'));
+  const maxAnimatedEmotes = Number(getSetting('max_animated_emotes', '50'));
+  const maxStickers = Number(getSetting('max_stickers', '100'));
+  const maxAnimatedStickers = Number(getSetting('max_animated_stickers', '50'));
 
   res.json({
     name,
@@ -159,6 +163,10 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     mentionAlias,
     serverIcon,
     serverBanner,
+    maxEmotes,
+    maxAnimatedEmotes,
+    maxStickers,
+    maxAnimatedStickers,
   });
 });
 
@@ -195,6 +203,18 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     if (typeof req.body?.avatarMaxMb === 'number' && req.body.avatarMaxMb >= 1 && req.body.avatarMaxMb <= 50) {
       setSetting('avatar_max_mb', String(req.body.avatarMaxMb));
     }
+    if (typeof req.body?.maxEmotes === 'number' && req.body.maxEmotes >= 1 && req.body.maxEmotes <= 500) {
+      setSetting('max_emotes', String(req.body.maxEmotes));
+    }
+    if (typeof req.body?.maxAnimatedEmotes === 'number' && req.body.maxAnimatedEmotes >= 1 && req.body.maxAnimatedEmotes <= 500) {
+      setSetting('max_animated_emotes', String(req.body.maxAnimatedEmotes));
+    }
+    if (typeof req.body?.maxStickers === 'number' && req.body.maxStickers >= 1 && req.body.maxStickers <= 500) {
+      setSetting('max_stickers', String(req.body.maxStickers));
+    }
+    if (typeof req.body?.maxAnimatedStickers === 'number' && req.body.maxAnimatedStickers >= 1 && req.body.maxAnimatedStickers <= 500) {
+      setSetting('max_animated_stickers', String(req.body.maxAnimatedStickers));
+    }
   }
 
   const response = {
@@ -205,6 +225,12 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     maxPins: Number(getSetting('max_pins', '300')),
     avatarMaxMb: Number(getSetting('avatar_max_mb', '10')),
     mentionAlias: getSetting('mention_alias', '@everyone'),
+    serverIcon: getSetting('server_icon', null),
+    serverBanner: getSetting('server_banner', null),
+    maxEmotes: Number(getSetting('max_emotes', '100')),
+    maxAnimatedEmotes: Number(getSetting('max_animated_emotes', '50')),
+    maxStickers: Number(getSetting('max_stickers', '100')),
+    maxAnimatedStickers: Number(getSetting('max_animated_stickers', '50')),
   };
 
   // Push live server-info updates to all connected clients.
@@ -213,6 +239,8 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     description: response.description,
     registrationOpen: response.registrationOpen,
     mentionAlias: response.mentionAlias,
+    serverIcon: response.serverIcon,
+    serverBanner: response.serverBanner,
   });
 
   res.json(response);
@@ -856,23 +884,23 @@ router.post('/import-template', requirePermission(PERMISSIONS.MANAGE_SERVER), as
 });
 
 // ── Server Icon/Banner Upload ──────────────────────────────────────────────────
-const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
-if (!fs.existsSync(UGC_IMAGES_DIR)) fs.mkdirSync(UGC_IMAGES_DIR, { recursive: true });
+const UGC_SERVER_DIR = process.env.UGC_SERVER_DIR || path.join(__dirname, '../../data/ugc/server');
+if (!fs.existsSync(UGC_SERVER_DIR)) fs.mkdirSync(UGC_SERVER_DIR, { recursive: true });
 
 const MIME_TO_EXT = {
   'image/png': '.png',
+  'image/apng': '.apng',
   'image/jpeg': '.jpg',
-  'image/webp': '.webp',
   'image/gif': '.gif',
 };
 
 const iconBannerStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UGC_IMAGES_DIR),
+  destination: (_req, _file, cb) => cb(null, UGC_SERVER_DIR),
   filename: (req, file, cb) => {
     const ext = MIME_TO_EXT[file.mimetype];
     if (!ext) return cb(new Error('Invalid file type'));
-    const type = req.path.includes('icon') ? 'icon' : 'banner';
-    const filename = `server-${type}-${Date.now()}${ext}`;
+    const isIcon = req.path.includes('icon');
+    const filename = `${isIcon ? 'RealmIcon' : 'RealmBanner'}${ext}`;
     cb(null, filename);
   },
 });
@@ -883,42 +911,49 @@ const iconBannerUpload = multer({
     fileSize: 10 * 1024 * 1024, // 10MB max
   },
   fileFilter: (_req, file, cb) => {
-    if (!MIME_TO_EXT[file.mimetype]) return cb(new Error('Invalid file type (must be PNG, JPG, WebP, or GIF)'));
+    if (!MIME_TO_EXT[file.mimetype]) return cb(new Error('Invalid file type (must be PNG, APNG, JPG/JPEG, or GIF)'));
     cb(null, true);
   },
 });
+
+function removeRealmAsset(baseName) {
+  const files = fs.readdirSync(UGC_SERVER_DIR);
+  for (const file of files) {
+    if (file.startsWith(`${baseName}.`)) {
+      const oldPath = path.join(UGC_SERVER_DIR, file);
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    }
+  }
+}
 
 // POST /api/admin/server-icon
 router.post('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBannerUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'File required' });
 
-  // Delete old icon if exists
-  const oldIcon = getSetting('server_icon', null);
-  if (oldIcon) {
-    const oldPath = path.join(UGC_IMAGES_DIR, path.basename(oldIcon));
-    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-  }
+  removeRealmAsset('RealmIcon');
 
-  const iconUrl = `/ugc/images/${req.file.filename}`;
+  const iconUrl = `/ugc/server/${req.file.filename}`;
   setSetting('server_icon', iconUrl);
 
   // Broadcast update
-  emitServerInfoUpdate({ serverIcon: iconUrl });
+  emitServerInfoUpdate({
+    serverIcon: iconUrl,
+    serverBanner: getSetting('server_banner', null),
+  });
 
   res.json({ serverIcon: iconUrl });
 });
 
 // DELETE /api/admin/server-icon
 router.delete('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
-  const oldIcon = getSetting('server_icon', null);
-  if (oldIcon) {
-    const oldPath = path.join(UGC_IMAGES_DIR, path.basename(oldIcon));
-    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-    setSetting('server_icon', null);
-  }
+  removeRealmAsset('RealmIcon');
+  db.prepare('DELETE FROM server_settings WHERE key = ?').run('server_icon');
 
   // Broadcast update
-  emitServerInfoUpdate({ serverIcon: null });
+  emitServerInfoUpdate({
+    serverIcon: null,
+    serverBanner: getSetting('server_banner', null),
+  });
 
   res.json({ success: true });
 });
@@ -927,33 +962,30 @@ router.delete('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), (req
 router.post('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBannerUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'File required' });
 
-  // Delete old banner if exists
-  const oldBanner = getSetting('server_banner', null);
-  if (oldBanner) {
-    const oldPath = path.join(UGC_IMAGES_DIR, path.basename(oldBanner));
-    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-  }
+  removeRealmAsset('RealmBanner');
 
-  const bannerUrl = `/ugc/images/${req.file.filename}`;
+  const bannerUrl = `/ugc/server/${req.file.filename}`;
   setSetting('server_banner', bannerUrl);
 
   // Broadcast update
-  emitServerInfoUpdate({ serverBanner: bannerUrl });
+  emitServerInfoUpdate({
+    serverIcon: getSetting('server_icon', null),
+    serverBanner: bannerUrl,
+  });
 
   res.json({ serverBanner: bannerUrl });
 });
 
 // DELETE /api/admin/server-banner
 router.delete('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
-  const oldBanner = getSetting('server_banner', null);
-  if (oldBanner) {
-    const oldPath = path.join(UGC_IMAGES_DIR, path.basename(oldBanner));
-    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-    setSetting('server_banner', null);
-  }
+  removeRealmAsset('RealmBanner');
+  db.prepare('DELETE FROM server_settings WHERE key = ?').run('server_banner');
 
   // Broadcast update
-  emitServerInfoUpdate({ serverBanner: null });
+  emitServerInfoUpdate({
+    serverIcon: getSetting('server_icon', null),
+    serverBanner: null,
+  });
 
   res.json({ success: true });
 });

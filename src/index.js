@@ -496,6 +496,7 @@ const usersRoutes = require('./routes/users');
 const rolesRoutes = require('./routes/roles');
 const turnRoutes = require('./routes/turn');
 const invitesRoutes = require('./routes/invites');
+const expressionsRoutes = require('./routes/expressions');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
 
@@ -512,6 +513,12 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../data/upl
 app.use('/uploads', express.static(UPLOADS_DIR));
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../data/ugc/images');
 app.use('/ugc/images', express.static(UGC_IMAGES_DIR));
+const UGC_SERVER_DIR = process.env.UGC_SERVER_DIR || path.join(__dirname, '../data/ugc/server');
+if (!fs.existsSync(UGC_SERVER_DIR)) fs.mkdirSync(UGC_SERVER_DIR, { recursive: true });
+app.use('/ugc/server', express.static(UGC_SERVER_DIR));
+const UGC_EXPRESSIONS_DIR = process.env.UGC_EXPRESSIONS_DIR || path.join(__dirname, '../data/ugc/expressions');
+if (!fs.existsSync(UGC_EXPRESSIONS_DIR)) fs.mkdirSync(UGC_EXPRESSIONS_DIR, { recursive: true });
+app.use('/ugc/expressions', express.static(UGC_EXPRESSIONS_DIR));
 
 // ── REST Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRoutes);
@@ -528,6 +535,7 @@ app.use('/api/users', authenticateToken, usersRoutes);
 app.use('/api/roles', authenticateToken, rolesRoutes);
 app.use('/api/invites', invitesRoutes); // Some endpoints public, some require auth
 app.use('/api/turn', turnRoutes); // TURN/STUN credentials (no auth required)
+app.use('/api/expressions', expressionsRoutes);
 
 // ── Create server & start ─────────────────────────────────────────────────────
 async function start() {
