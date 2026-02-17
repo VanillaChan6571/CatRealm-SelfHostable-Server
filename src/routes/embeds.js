@@ -98,6 +98,28 @@ function parseTwitterLikeStatusUrl(urlObj) {
   };
 }
 
+function parseKickUrl(urlObj) {
+  const host = String(urlObj.hostname || '').toLowerCase();
+  if (!(host === 'kick.com' || host === 'www.kick.com' || host.endsWith('.kick.com'))) {
+    return null;
+  }
+
+  const segments = String(urlObj.pathname || '').split('/').filter(Boolean);
+  if (segments.length === 0) return null;
+
+  const channelSlug = sanitizeTextValue(segments[0], 120);
+  if (!channelSlug) return null;
+
+  const videosIndex = segments.findIndex((segment) => segment.toLowerCase() === 'videos');
+  if (videosIndex >= 0 && videosIndex < segments.length - 1) {
+    const vodUuid = sanitizeTextValue(segments[videosIndex + 1], 120);
+    if (!vodUuid) return null;
+    return { channelSlug, vodUuid };
+  }
+
+  return { channelSlug, vodUuid: null };
+}
+
 function sanitizeTextValue(value, max = 600) {
   if (typeof value !== 'string') return null;
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -128,10 +150,120 @@ function isLikelyImageUrl(value) {
   );
 }
 
+function normalizeKickProfilePic(url) {
+  const value = sanitizeTextValue(url, 600);
+  if (!value) return null;
+  if (value.startsWith('http://') || value.startsWith('https://')) return value;
+  if (value.startsWith('//')) return `https:${value}`;
+  if (value.startsWith('/')) return `https://kick.com${value}`;
+  return `https://kick.com/${value.replace(/^\/+/, '')}`;
+}
+
 function toEmbedMediaProxyUrl(mediaUrl) {
   const token = createEmbedProxyToken(mediaUrl);
   if (!token) return mediaUrl;
   return `/api/embed-media?token=${encodeURIComponent(token)}`;
+}
+
+async function fetchKickPreview(kickRef, fallbackUrl) {
+  const channelSlug = sanitizeTextValue(kickRef.channelSlug, 120);
+  if (!channelSlug) return null;
+
+  let channelData = null;
+  try {
+    const channelResp = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(channelSlug)}`, {
+      timeout: 7000,
+      responseType: 'json',
+      validateStatus: (status) => status >= 200 && status < 300,
+      headers: {
+        'User-Agent': 'CatRealm-EmbedFetcher/1.0',
+        Accept: 'application/json',
+      },
+    });
+    channelData = channelResp.data && typeof channelResp.data === 'object' ? channelResp.data : null;
+  } catch {
+    channelData = null;
+  }
+
+  let authorName =
+    sanitizeTextValue(channelData?.user?.username, 120) ||
+    sanitizeTextValue(channelData?.slug, 120) ||
+    channelSlug;
+  let authorAvatar = normalizeKickProfilePic(channelData?.user?.profile_pic);
+
+  if (kickRef.vodUuid) {
+    const vodUuid = sanitizeTextValue(kickRef.vodUuid, 120);
+    if (!vodUuid) return null;
+
+    let vodTitle = null;
+    let vodChannelSlug = null;
+    try {
+      const vodResp = await axios.get(`https://kick.com/api/v1/video/${encodeURIComponent(vodUuid)}`, {
+        timeout: 7000,
+        responseType: 'json',
+        validateStatus: (status) => status >= 200 && status < 300,
+        headers: {
+          'User-Agent': 'CatRealm-EmbedFetcher/1.0',
+          Accept: 'application/json',
+        },
+      });
+      const vodData = vodResp.data && typeof vodResp.data === 'object' ? vodResp.data : null;
+      const livestream = vodData?.livestream;
+      vodTitle = sanitizeTextValue(livestream?.session_title, 600);
+      vodChannelSlug = sanitizeTextValue(livestream?.channel?.slug, 120);
+      const vodAuthorName = sanitizeTextValue(livestream?.channel?.user?.username, 120);
+      const vodAuthorAvatar = normalizeKickProfilePic(livestream?.channel?.user?.profilepic);
+      if (vodAuthorName) authorName = vodAuthorName;
+      if (vodAuthorAvatar) authorAvatar = vodAuthorAvatar;
+    } catch {
+      // ignore and fallback below
+    }
+
+    if (!vodTitle) {
+      try {
+        const videosResp = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(channelSlug)}/videos`, {
+          timeout: 7000,
+          responseType: 'json',
+          validateStatus: (status) => status >= 200 && status < 300,
+          headers: {
+            'User-Agent': 'CatRealm-EmbedFetcher/1.0',
+            Accept: 'application/json',
+          },
+        });
+        const videos = Array.isArray(videosResp.data) ? videosResp.data : [];
+        const match = videos.find((entry) => sanitizeTextValue(entry?.video?.uuid, 120) === vodUuid);
+        vodTitle = sanitizeTextValue(match?.session_title, 600) || vodTitle;
+      } catch {
+        // ignore
+      }
+    }
+
+    const resolvedSlug = vodChannelSlug || channelSlug;
+    const vodUrl = `https://kick.com/${encodeURIComponent(resolvedSlug)}/videos/${encodeURIComponent(vodUuid)}`;
+    return {
+      type: 'kick',
+      url: vodUrl || fallbackUrl,
+      siteName: 'Kick.com - VOD',
+      title: `${authorName} - Watch the VOD on Kick`,
+      description: vodTitle || null,
+      image: authorAvatar || null,
+      authorName,
+      authorAvatar: authorAvatar || null,
+    };
+  }
+
+  const channelUrl = `https://kick.com/${encodeURIComponent(channelSlug)}`;
+  const liveTitle = sanitizeTextValue(channelData?.livestream?.session_title, 600);
+  return {
+    type: 'kick',
+    url: channelUrl || fallbackUrl,
+    siteName: 'Kick.com',
+    title: `${authorName} - Watch on Kick`,
+    description: liveTitle || null,
+    image: authorAvatar || null,
+    authorName,
+    authorAvatar: authorAvatar || null,
+  };
 }
 
 async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
@@ -293,6 +425,14 @@ router.get('/', async (req, res) => {
     const twitterPreview = await fetchTwitterLikePreview(twitterRef, parsed.toString());
     if (twitterPreview) {
       return res.json({ embed: twitterPreview });
+    }
+  }
+
+  const kickRef = parseKickUrl(parsed);
+  if (kickRef) {
+    const kickPreview = await fetchKickPreview(kickRef, parsed.toString());
+    if (kickPreview) {
+      return res.json({ embed: kickPreview });
     }
   }
 
