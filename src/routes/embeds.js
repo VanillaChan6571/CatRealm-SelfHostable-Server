@@ -104,14 +104,27 @@ function sanitizeTextValue(value, max = 600) {
   return normalized.slice(0, max);
 }
 
-function firstString(items) {
-  if (!Array.isArray(items)) return null;
-  for (const item of items) {
-    if (typeof item === 'string' && item.trim()) {
-      return item.trim();
-    }
-  }
-  return null;
+function isLikelyVideoUrl(value) {
+  if (typeof value !== 'string') return false;
+  const lower = value.toLowerCase();
+  return lower.endsWith('.mp4') || lower.includes('.mp4?') || lower.includes('/vid/');
+}
+
+function isLikelyImageUrl(value) {
+  if (typeof value !== 'string') return false;
+  const lower = value.toLowerCase();
+  return (
+    lower.endsWith('.png') ||
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.webp') ||
+    lower.endsWith('.gif') ||
+    lower.includes('.png?') ||
+    lower.includes('.jpg?') ||
+    lower.includes('.jpeg?') ||
+    lower.includes('.webp?') ||
+    lower.includes('.gif?')
+  );
 }
 
 async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
@@ -143,12 +156,55 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
       const title = titleName && titleHandle ? `${titleName} (@${titleHandle})` : (titleName || (titleHandle ? `@${titleHandle}` : null));
       const description = sanitizeTextValue(data.text, 600);
 
-      let image = firstString(data.mediaURLs);
+      if (Array.isArray(data.media_extended)) {
+        for (const media of data.media_extended) {
+          if (!media || typeof media !== 'object') continue;
+          const mediaType = sanitizeTextValue(media.type, 40);
+          const mediaUrl = sanitizeTextValue(media.url, 400);
+          if (!mediaUrl) continue;
+          if (mediaType === 'video' || mediaType === 'gif' || isLikelyVideoUrl(mediaUrl)) {
+            return {
+              type: 'media',
+              url: mediaUrl,
+              mime: 'video/mp4',
+              siteName: 'X',
+              title,
+              description,
+            };
+          }
+        }
+      }
+
+      let image = null;
+      if (Array.isArray(data.media_extended)) {
+        for (const media of data.media_extended) {
+          if (!media || typeof media !== 'object') continue;
+          const mediaType = sanitizeTextValue(media.type, 40);
+          if (mediaType && mediaType !== 'photo' && mediaType !== 'image') continue;
+          const candidate = sanitizeTextValue(media.url, 400) || sanitizeTextValue(media.thumbnail_url, 400);
+          if (candidate && isLikelyImageUrl(candidate)) {
+            image = candidate;
+            break;
+          }
+        }
+      }
+      if (!image && Array.isArray(data.mediaURLs)) {
+        for (const mediaUrl of data.mediaURLs) {
+          const candidate = sanitizeTextValue(mediaUrl, 400);
+          if (candidate && isLikelyImageUrl(candidate)) {
+            image = candidate;
+            break;
+          }
+        }
+      }
       if (!image && Array.isArray(data.media_extended)) {
         for (const media of data.media_extended) {
           if (!media || typeof media !== 'object') continue;
-          image = sanitizeTextValue(media.thumbnail_url, 400) || sanitizeTextValue(media.url, 400);
-          if (image) break;
+          const thumb = sanitizeTextValue(media.thumbnail_url, 400);
+          if (thumb && isLikelyImageUrl(thumb)) {
+            image = thumb;
+            break;
+          }
         }
       }
 
