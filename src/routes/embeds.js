@@ -5,7 +5,7 @@ const net = require('net');
 const { createEmbedProxyToken } = require('../embedProxyToken');
 
 const MAX_REDIRECTS = 5;
-const MAX_HTML_BYTES = 1024 * 1024;
+const MAX_HTML_BYTES = 2 * 1024 * 1024;
 
 function isPrivateOrLocalIp(address) {
   const family = net.isIP(address);
