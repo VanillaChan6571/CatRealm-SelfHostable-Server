@@ -130,6 +130,26 @@ function parseKickUrl(urlObj) {
   return { channelSlug, vodUuid: null };
 }
 
+function parseInstagramPostUrl(urlObj) {
+  const host = String(urlObj.hostname || '').toLowerCase();
+  const supportedHost =
+    host === 'instagram.com' ||
+    host === 'www.instagram.com' ||
+    host.endsWith('.instagram.com');
+  if (!supportedHost) return null;
+
+  const segments = String(urlObj.pathname || '').split('/').filter(Boolean);
+  if (segments.length < 2) return null;
+
+  const kind = segments[0].toLowerCase();
+  if (!['p', 'reel', 'tv'].includes(kind)) return null;
+
+  const shortcode = sanitizeTextValue(segments[1], 120);
+  if (!shortcode || !/^[a-zA-Z0-9_-]+$/.test(shortcode)) return null;
+
+  return { kind, shortcode };
+}
+
 function sanitizeTextValue(value, max = 600) {
   if (typeof value !== 'string') return null;
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -274,6 +294,43 @@ async function fetchKickPreview(kickRef, fallbackUrl) {
     authorName,
     authorAvatar: authorAvatar || null,
   };
+}
+
+async function fetchInstagramPreview(instaRef, fallbackUrl) {
+  const canonicalUrl = `https://www.instagram.com/${encodeURIComponent(instaRef.kind)}/${encodeURIComponent(instaRef.shortcode)}/`;
+  const endpoint = `https://www.instagram.com/api/v1/oembed/?url=${encodeURIComponent(canonicalUrl)}`;
+
+  try {
+    const response = await axios.get(endpoint, {
+      timeout: 7000,
+      responseType: 'json',
+      validateStatus: (status) => status >= 200 && status < 300,
+      headers: {
+        'User-Agent': 'CatRealm-EmbedFetcher/1.0',
+        Accept: 'application/json',
+      },
+    });
+
+    const data = response.data && typeof response.data === 'object' ? response.data : null;
+    if (!data) return null;
+
+    const title = sanitizeTextValue(decodeHtmlEntities(data.title), 600);
+    const authorName = sanitizeTextValue(decodeHtmlEntities(data.author_name), 120);
+    const thumbnailUrl = sanitizeTextValue(decodeHtmlEntities(data.thumbnail_url), 1400);
+
+    return {
+      type: 'link',
+      url: canonicalUrl || fallbackUrl,
+      siteName: 'Instagram',
+      title: title || null,
+      description: authorName ? `By ${authorName}` : null,
+      image: resolveMaybeRelative(canonicalUrl, thumbnailUrl),
+      authorName: authorName || null,
+      authorAvatar: null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
@@ -435,6 +492,14 @@ router.get('/', async (req, res) => {
     const twitterPreview = await fetchTwitterLikePreview(twitterRef, parsed.toString());
     if (twitterPreview) {
       return res.json({ embed: twitterPreview });
+    }
+  }
+
+  const instagramRef = parseInstagramPostUrl(parsed);
+  if (instagramRef) {
+    const instagramPreview = await fetchInstagramPreview(instagramRef, parsed.toString());
+    if (instagramPreview) {
+      return res.json({ embed: instagramPreview });
     }
   }
 
