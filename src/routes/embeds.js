@@ -381,38 +381,39 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
         }
       }
 
-      let image = null;
+      const imageCandidates = [];
+      const seenImages = new Set();
+      const addImageCandidate = (value) => {
+        const candidate = sanitizeTextValue(value, 400);
+        if (!candidate || !isLikelyImageUrl(candidate)) return;
+        if (seenImages.has(candidate)) return;
+        seenImages.add(candidate);
+        imageCandidates.push(candidate);
+      };
+
       if (Array.isArray(data.media_extended)) {
         for (const media of data.media_extended) {
           if (!media || typeof media !== 'object') continue;
           const mediaType = sanitizeTextValue(media.type, 40);
           if (mediaType && mediaType !== 'photo' && mediaType !== 'image') continue;
-          const candidate = sanitizeTextValue(media.url, 400) || sanitizeTextValue(media.thumbnail_url, 400);
-          if (candidate && isLikelyImageUrl(candidate)) {
-            image = candidate;
-            break;
-          }
+          addImageCandidate(media.url);
+          addImageCandidate(media.thumbnail_url);
         }
       }
-      if (!image && Array.isArray(data.mediaURLs)) {
+      if (Array.isArray(data.mediaURLs)) {
         for (const mediaUrl of data.mediaURLs) {
-          const candidate = sanitizeTextValue(mediaUrl, 400);
-          if (candidate && isLikelyImageUrl(candidate)) {
-            image = candidate;
-            break;
-          }
+          addImageCandidate(mediaUrl);
         }
       }
-      if (!image && Array.isArray(data.media_extended)) {
+      if (imageCandidates.length === 0 && Array.isArray(data.media_extended)) {
         for (const media of data.media_extended) {
           if (!media || typeof media !== 'object') continue;
-          const thumb = sanitizeTextValue(media.thumbnail_url, 400);
-          if (thumb && isLikelyImageUrl(thumb)) {
-            image = thumb;
-            break;
-          }
+          addImageCandidate(media.thumbnail_url);
         }
       }
+
+      const images = imageCandidates.slice(0, 4);
+      const image = images[0] || null;
 
       const canonicalUrl = sanitizeTextValue(data.tweetURL, 400) || fallbackUrl;
 
@@ -423,6 +424,7 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
         title,
         description,
         image: image || null,
+        images,
       };
     } catch {
       // Try the next candidate endpoint.
