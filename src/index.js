@@ -497,6 +497,7 @@ const rolesRoutes = require('./routes/roles');
 const turnRoutes = require('./routes/turn');
 const invitesRoutes = require('./routes/invites');
 const expressionsRoutes = require('./routes/expressions');
+const embedsRoutes = require('./routes/embeds');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
 
@@ -536,6 +537,7 @@ app.use('/api/roles', authenticateToken, rolesRoutes);
 app.use('/api/invites', invitesRoutes); // Some endpoints public, some require auth
 app.use('/api/turn', turnRoutes); // TURN/STUN credentials (no auth required)
 app.use('/api/expressions', expressionsRoutes);
+app.use('/api/embeds', authenticateToken, embedsRoutes);
 
 // ── Create server & start ─────────────────────────────────────────────────────
 async function start() {
