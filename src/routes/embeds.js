@@ -2,6 +2,7 @@ const router = require('express').Router();
 const axios = require('axios');
 const dns = require('dns').promises;
 const net = require('net');
+const { createEmbedProxyToken } = require('../embedProxyToken');
 
 const MAX_REDIRECTS = 5;
 const MAX_HTML_BYTES = 1024 * 1024;
@@ -127,6 +128,12 @@ function isLikelyImageUrl(value) {
   );
 }
 
+function toEmbedMediaProxyUrl(mediaUrl) {
+  const token = createEmbedProxyToken(mediaUrl);
+  if (!token) return mediaUrl;
+  return `/api/embed-media?token=${encodeURIComponent(token)}`;
+}
+
 async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
   const candidates = [];
   if (tweetRef.username) {
@@ -165,7 +172,7 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
           if (mediaType === 'video' || mediaType === 'gif' || isLikelyVideoUrl(mediaUrl)) {
             return {
               type: 'media',
-              url: mediaUrl,
+              url: toEmbedMediaProxyUrl(mediaUrl),
               mime: 'video/mp4',
               siteName: 'X',
               title,
