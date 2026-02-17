@@ -78,7 +78,8 @@ function parseTwitterLikeStatusUrl(urlObj) {
     host.endsWith('.x.com') ||
     host.includes('vxtwitter.com') ||
     host.includes('fxtwitter.com') ||
-    host.includes('fixupx.com');
+    host.includes('fixupx.com') ||
+    host.includes('fixvx.com');
 
   if (!supportedHost) return null;
 
