@@ -495,12 +495,14 @@ router.get('/', async (req, res) => {
     }
   }
 
+  let instagramOembedPreview = null;
   const instagramRef = parseInstagramPostUrl(parsed);
   if (instagramRef) {
     const instagramPreview = await fetchInstagramPreview(instagramRef, parsed.toString());
-    if (instagramPreview) {
+    if (instagramPreview && instagramPreview.image) {
       return res.json({ embed: instagramPreview });
     }
+    instagramOembedPreview = instagramPreview;
   }
 
   const kickRef = parseKickUrl(parsed);
@@ -539,10 +541,10 @@ router.get('/', async (req, res) => {
     const twImage = extractMetaTag(html, 'twitter:image', 'name');
     const description = extractMetaTag(html, 'description', 'name');
 
-    const title = ogTitle || twTitle || extractTitle(html);
-    const summary = ogDescription || twDescription || description;
-    const image = resolveMaybeRelative(finalUrl, ogImageSecure || ogImage || twImage);
-    const siteName = ogSiteName || new URL(finalUrl).hostname;
+    const title = ogTitle || twTitle || extractTitle(html) || instagramOembedPreview?.title || null;
+    const summary = ogDescription || twDescription || description || instagramOembedPreview?.description || null;
+    const image = resolveMaybeRelative(finalUrl, ogImageSecure || ogImage || twImage) || instagramOembedPreview?.image || null;
+    const siteName = ogSiteName || instagramOembedPreview?.siteName || new URL(finalUrl).hostname;
 
     return res.json({
       embed: {
