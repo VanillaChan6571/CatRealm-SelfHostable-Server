@@ -435,14 +435,48 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
   const { id } = req.params;
   const user = db.prepare('SELECT id, is_owner FROM users WHERE id = ?').get(id);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  if (user.is_owner) return res.status(400).json({ error: 'Cannot modify roles for the server owner' });
+  // Server owner can manage their own role list; non-owners cannot modify the owner.
+  if (user.is_owner && !req.user?.is_owner) {
+    return res.status(403).json({ error: 'Cannot modify roles for the server owner' });
+  }
 
   const { roleIds } = req.body ?? {};
   if (!Array.isArray(roleIds)) return res.status(400).json({ error: 'roleIds must be an array' });
-  const existingRoles = db.prepare('SELECT id, is_default FROM roles').all();
+  const existingRoles = db.prepare('SELECT id, is_default, position FROM roles').all();
   const roleSet = new Set(existingRoles.map((r) => r.id));
+  const rolePositionById = new Map(existingRoles.map((r) => [r.id, Number(r.position || 0)]));
   const defaultRole = existingRoles.find((r) => r.is_default);
   const filtered = roleIds.filter((rid) => roleSet.has(rid));
+
+  if (!req.user?.is_owner) {
+    const getHighestRolePosition = (userId) => {
+      const row = db.prepare(`
+        SELECT MAX(r.position) as max_position
+        FROM user_roles ur
+        JOIN roles r ON r.id = ur.role_id
+        WHERE ur.user_id = ?
+      `).get(userId);
+      return Number(row?.max_position ?? -1);
+    };
+
+    const actorHighestRolePosition = getHighestRolePosition(req.user.id);
+    const targetHighestRolePosition = getHighestRolePosition(id);
+
+    // Non-owners cannot modify members with equal or higher top roles.
+    if (targetHighestRolePosition >= actorHighestRolePosition) {
+      return res.status(403).json({ error: 'Cannot modify roles for this user due to role hierarchy' });
+    }
+
+    // Non-owners cannot assign roles equal or higher than their own top role.
+    const hasUnassignableRole = filtered.some((rid) => {
+      const rolePos = rolePositionById.get(rid);
+      return typeof rolePos === 'number' && rolePos >= actorHighestRolePosition;
+    });
+    if (hasUnassignableRole) {
+      return res.status(403).json({ error: 'Cannot assign roles equal to or higher than your highest role' });
+    }
+  }
+
   if (defaultRole && !filtered.includes(defaultRole.id)) {
     filtered.push(defaultRole.id);
   }
