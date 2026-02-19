@@ -409,6 +409,10 @@ if (!userColumns.includes('banner')) {
   db.prepare('ALTER TABLE users ADD COLUMN banner TEXT').run();
   pteroLog('[CatRealm] Added users.banner column');
 }
+if (!userColumns.includes('pronouns')) {
+  db.prepare('ALTER TABLE users ADD COLUMN pronouns TEXT').run();
+  pteroLog('[CatRealm] Added users.pronouns column (synced from central)');
+}
 
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
 if (!messageColumns.includes('attachment_url')) {
