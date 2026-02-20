@@ -7,6 +7,10 @@ const db = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 const { PERMISSIONS, hasPermission } = require('../permissions');
 const { getSetting } = require('../settings');
+let sharp = null;
+try {
+  sharp = require('sharp');
+} catch {}
 
 const UGC_EXPRESSIONS_DIR = process.env.UGC_EXPRESSIONS_DIR || path.join(__dirname, '../../data/ugc/expressions');
 const EXPRESSION_TYPES = ['emotes', 'anim-emotes', 'stickers', 'anim-stickers'];
@@ -41,6 +45,9 @@ const TYPE_DEFAULT_LIMITS = {
   'anim-stickers': 50,
 };
 
+const EMOTE_VARIANT_SIZES = [512, 256, 128, 96, 64, 32, 16];
+const STICKER_VARIANT_SIZES = [320];
+
 if (!fs.existsSync(UGC_EXPRESSIONS_DIR)) fs.mkdirSync(UGC_EXPRESSIONS_DIR, { recursive: true });
 for (const type of EXPRESSION_TYPES) {
   const dir = path.join(UGC_EXPRESSIONS_DIR, type);
@@ -56,11 +63,122 @@ function sanitizeName(value) {
     .slice(0, 64);
 }
 
+function getVariantSizesForType(type) {
+  return (type === 'stickers' || type === 'anim-stickers')
+    ? STICKER_VARIANT_SIZES
+    : EMOTE_VARIANT_SIZES;
+}
+
+function parseVariantsJson(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return {};
+    const variants = {};
+    for (const [sizeKey, url] of Object.entries(parsed)) {
+      if (!/^\d+$/.test(sizeKey)) continue;
+      if (typeof url !== 'string' || !url.startsWith('/ugc/expressions/')) continue;
+      variants[sizeKey] = url;
+    }
+    return variants;
+  } catch {
+    return {};
+  }
+}
+
+function buildFallbackVariants(type, primaryUrl) {
+  const sizes = getVariantSizesForType(type);
+  const variants = {};
+  for (const size of sizes) {
+    variants[String(size)] = primaryUrl;
+  }
+  return variants;
+}
+
+function toLocalExpressionPath(fileUrl) {
+  if (typeof fileUrl !== 'string') return null;
+  const cleaned = fileUrl.split('?')[0];
+  if (!cleaned.startsWith('/ugc/expressions/')) return null;
+  const relativePart = cleaned.replace('/ugc/expressions/', '');
+  if (!relativePart || relativePart.includes('..')) return null;
+  return path.join(UGC_EXPRESSIONS_DIR, relativePart);
+}
+
+async function processExpressionUpload(type, file) {
+  const relativeOriginalUrl = `/ugc/expressions/${type}/${file.filename}`;
+  const shouldResizeStatic =
+    !!sharp &&
+    (type === 'emotes' || type === 'stickers') &&
+    ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(file.mimetype);
+
+  if (!shouldResizeStatic) {
+    return {
+      fileUrl: relativeOriginalUrl,
+      mimeType: file.mimetype,
+      fileSize: file.size,
+      variants: buildFallbackVariants(type, relativeOriginalUrl),
+      cleanupPaths: [file.path],
+    };
+  }
+
+  const variantSizes = getVariantSizesForType(type);
+  const parsed = path.parse(file.filename);
+  const variantPaths = [];
+  const variants = {};
+
+  try {
+    for (const size of variantSizes) {
+      const variantFilename = `${parsed.name}-${size}.png`;
+      const variantPath = path.join(path.dirname(file.path), variantFilename);
+      await sharp(file.path)
+        .resize(size, size, {
+          fit: 'contain',
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+          withoutEnlargement: false,
+        })
+        .png({ compressionLevel: 9, quality: 100 })
+        .toFile(variantPath);
+      variantPaths.push(variantPath);
+      variants[String(size)] = `/ugc/expressions/${type}/${variantFilename}`;
+    }
+
+    fs.unlink(file.path, () => {});
+    const primarySize = variantSizes[0];
+    const primaryVariantPath = variantPaths[0];
+    const primarySizeBytes = fs.existsSync(primaryVariantPath) ? fs.statSync(primaryVariantPath).size : file.size;
+    return {
+      fileUrl: variants[String(primarySize)],
+      mimeType: 'image/png',
+      fileSize: primarySizeBytes,
+      variants,
+      cleanupPaths: variantPaths,
+    };
+  } catch {
+    for (const variantPath of variantPaths) {
+      fs.unlink(variantPath, () => {});
+    }
+    return {
+      fileUrl: relativeOriginalUrl,
+      mimeType: file.mimetype,
+      fileSize: file.size,
+      variants: buildFallbackVariants(type, relativeOriginalUrl),
+      cleanupPaths: [file.path],
+    };
+  }
+}
+
 function withAbsoluteUrl(req, row) {
   if (!row) return row;
   const base = `${req.protocol}://${req.get('host')}`;
+  const variants = parseVariantsJson(row.variants_json);
+  const absoluteVariants = {};
+  for (const [size, url] of Object.entries(variants)) {
+    absoluteVariants[size] = `${base}${url}`;
+  }
   return {
     ...row,
+    variants,
+    absolute_variants: absoluteVariants,
     absolute_url: `${base}${row.file_url}`,
   };
 }
@@ -75,6 +193,16 @@ function canManageType(user, type) {
 
 function ensureValidType(type) {
   return EXPRESSION_TYPES.includes(type);
+}
+
+function isAllowedMimeForType(type, file) {
+  if (TYPE_ALLOWED_MIMES[type].has(file.mimetype)) return true;
+  const lowerName = String(file.originalname || '').toLowerCase();
+  // APNG files are often reported as image/png by browsers.
+  if ((type === 'anim-emotes' || type === 'anim-stickers') && file.mimetype === 'image/png' && lowerName.endsWith('.apng')) {
+    return true;
+  }
+  return false;
 }
 
 function expressionStorage(type) {
@@ -97,7 +225,7 @@ function buildUploadMiddleware(type) {
     storage: expressionStorage(type),
     limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
-      if (!TYPE_ALLOWED_MIMES[type].has(file.mimetype)) {
+      if (!isAllowedMimeForType(type, file)) {
         return cb(new Error(`Invalid file type for ${type}`));
       }
       cb(null, true);
@@ -115,12 +243,14 @@ router.get('/', (req, res) => {
   const rows = type
     ? db.prepare(`
       SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at
+      , variants_json
       FROM expressions
       WHERE type = ?
       ORDER BY created_at DESC
     `).all(type)
     : db.prepare(`
       SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at
+      , variants_json
       FROM expressions
       ORDER BY type ASC, created_at DESC
     `).all();
@@ -130,7 +260,7 @@ router.get('/', (req, res) => {
 
 router.get('/manifest', (req, res) => {
   const rows = db.prepare(`
-    SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at
+    SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at, variants_json
     FROM expressions
     ORDER BY created_at DESC
   `).all();
@@ -160,7 +290,7 @@ router.get('/limits', (_req, res) => {
 
 router.get('/:id', (req, res) => {
   const row = db.prepare(`
-    SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at
+    SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at, variants_json
     FROM expressions
     WHERE id = ?
   `).get(req.params.id);
@@ -185,27 +315,30 @@ router.post('/:type', authenticateToken, (req, res) => {
   }
 
   const upload = buildUploadMiddleware(type);
-  upload(req, res, (err) => {
+  upload(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file || !req.expressionMeta) return res.status(400).json({ error: 'File and name are required' });
 
-    const relativeUrl = `/ugc/expressions/${type}/${req.file.filename}`;
+    const processed = await processExpressionUpload(type, req.file);
 
     try {
       db.prepare(`
-        INSERT INTO expressions (id, name, type, file_url, mime_type, file_size, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO expressions (id, name, type, file_url, variants_json, mime_type, file_size, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         req.expressionMeta.id,
         req.expressionMeta.name,
         type,
-        relativeUrl,
-        req.file.mimetype,
-        req.file.size,
+        processed.fileUrl,
+        JSON.stringify(processed.variants),
+        processed.mimeType,
+        processed.fileSize,
         req.user.id
       );
     } catch (insertErr) {
-      fs.unlink(req.file.path, () => {});
+      for (const localPath of processed.cleanupPaths || []) {
+        fs.unlink(localPath, () => {});
+      }
       if (String(insertErr.message || '').includes('idx_expressions_name_type')) {
         return res.status(409).json({ error: `An expression named "${req.expressionMeta.name}" already exists in ${type}` });
       }
@@ -213,7 +346,7 @@ router.post('/:type', authenticateToken, (req, res) => {
     }
 
     const created = db.prepare(`
-      SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at
+      SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at, variants_json
       FROM expressions WHERE id = ?
     `).get(req.expressionMeta.id);
 
@@ -241,7 +374,7 @@ router.patch('/:id', authenticateToken, (req, res) => {
   }
 
   const updated = db.prepare(`
-    SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at
+    SELECT id, name, type, file_url, mime_type, file_size, created_by, created_at, variants_json
     FROM expressions
     WHERE id = ?
   `).get(req.params.id);
@@ -250,7 +383,7 @@ router.patch('/:id', authenticateToken, (req, res) => {
 });
 
 router.delete('/:id', authenticateToken, (req, res) => {
-  const row = db.prepare('SELECT id, type, file_url FROM expressions WHERE id = ?').get(req.params.id);
+  const row = db.prepare('SELECT id, type, file_url, variants_json FROM expressions WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Expression not found' });
   if (!canManageType(req.user, row.type)) {
     return res.status(403).json({ error: 'Missing permission to manage this expression type' });
@@ -258,8 +391,11 @@ router.delete('/:id', authenticateToken, (req, res) => {
 
   db.prepare('DELETE FROM expressions WHERE id = ?').run(req.params.id);
 
-  if (row.file_url && row.file_url.startsWith('/ugc/expressions/')) {
-    const localPath = path.join(UGC_EXPRESSIONS_DIR, row.file_url.replace('/ugc/expressions/', ''));
+  const variants = parseVariantsJson(row.variants_json);
+  const urls = new Set([row.file_url, ...Object.values(variants)]);
+  for (const url of urls) {
+    const localPath = toLocalExpressionPath(url);
+    if (!localPath) continue;
     fs.unlink(localPath, () => {});
   }
 

@@ -369,6 +369,7 @@ db.exec(`
     name        TEXT NOT NULL,
     type        TEXT NOT NULL CHECK(type IN ('emotes', 'anim-emotes', 'stickers', 'anim-stickers')),
     file_url    TEXT NOT NULL,
+    variants_json TEXT,
     mime_type   TEXT NOT NULL,
     file_size   INTEGER NOT NULL DEFAULT 0,
     created_by  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -420,6 +421,12 @@ if (!userColumns.includes('banner')) {
 if (!userColumns.includes('pronouns')) {
   db.prepare('ALTER TABLE users ADD COLUMN pronouns TEXT').run();
   pteroLog('[CatRealm] Added users.pronouns column (synced from central)');
+}
+
+const expressionColumns = db.prepare('PRAGMA table_info(expressions)').all().map((c) => c.name);
+if (!expressionColumns.includes('variants_json')) {
+  db.prepare('ALTER TABLE expressions ADD COLUMN variants_json TEXT').run();
+  pteroLog('[CatRealm] Added expressions.variants_json column');
 }
 
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
@@ -619,4 +626,3 @@ if (!adminExists && !tokenRow) {
 }
 
 module.exports = db;
-
