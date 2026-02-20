@@ -1058,7 +1058,7 @@ router.post('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBa
 
   removeRealmAsset('RealmIcon', req.file.filename);
 
-  const iconUrl = `/ugc/server/${req.file.filename}`;
+  const iconUrl = `/ugc/server/${req.file.filename}?v=${Date.now()}`;
   setSetting('server_icon', iconUrl);
 
   // Broadcast update
@@ -1090,7 +1090,7 @@ router.post('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), icon
 
   removeRealmAsset('RealmBanner', req.file.filename);
 
-  const bannerUrl = `/ugc/server/${req.file.filename}`;
+  const bannerUrl = `/ugc/server/${req.file.filename}?v=${Date.now()}`;
   setSetting('server_banner', bannerUrl);
 
   // Broadcast update
