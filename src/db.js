@@ -136,13 +136,21 @@ db.exec(`
     value TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS role_categories (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
   CREATE TABLE IF NOT EXISTS roles (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     color       TEXT,
     permissions INTEGER NOT NULL DEFAULT 0,
     position    INTEGER NOT NULL DEFAULT 0,
-    is_default  INTEGER NOT NULL DEFAULT 0
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    category_id TEXT REFERENCES role_categories(id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS user_roles (
@@ -474,6 +482,14 @@ if (!channelColumns.includes('category_id')) {
 }
 
 const { ALL_PERMISSIONS } = require('./permissions');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS role_categories (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+  )
+`);
 const roleColumns = db.prepare('PRAGMA table_info(roles)').all().map((c) => c.name);
 const roleCount = db.prepare('SELECT COUNT(*) as c FROM roles').get().c;
 if (roleCount === 0) {
@@ -498,6 +514,16 @@ if (!roleColumns.includes('hoist')) {
 if (!roleColumns.includes('icon')) {
   db.prepare('ALTER TABLE roles ADD COLUMN icon TEXT').run();
   pteroLog('[CatRealm] Added roles.icon column');
+}
+if (!roleColumns.includes('category_id')) {
+  db.prepare('ALTER TABLE roles ADD COLUMN category_id TEXT').run();
+  pteroLog('[CatRealm] Added roles.category_id column');
+}
+try {
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_roles_category_id ON roles(category_id)').run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_role_categories_position ON role_categories(position, name)').run();
+} catch (_err) {
+  // Ignore if index creation fails in legacy environments.
 }
 
 // Ensure Admin role has all permissions
@@ -593,5 +619,4 @@ if (!adminExists && !tokenRow) {
 }
 
 module.exports = db;
-
 

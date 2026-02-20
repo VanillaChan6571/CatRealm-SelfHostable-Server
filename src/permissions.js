@@ -121,15 +121,10 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
 
   let permissions = basePermissions;
 
-  // Get all overwrites for this channel
+  // Get all overwrites for this channel.
   const overwrites = db.prepare(`
     SELECT * FROM channel_permission_overwrites
     WHERE channel_id = ?
-    ORDER BY
-      CASE
-        WHEN target_type = 'role' THEN 0
-        WHEN target_type = 'user' THEN 1
-      END
   `).all(channelId);
 
   // Get user's roles
@@ -140,27 +135,37 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
   // Get default role
   const defaultRole = db.prepare('SELECT id FROM roles WHERE is_default = 1').get();
 
-  // Apply overwrites in order
+  // Discord-style precedence:
+  // 1) @everyone overwrite
+  // 2) aggregate all role overwrites
+  // 3) user-specific overwrite
+  let everyoneAllow = 0;
+  let everyoneDeny = 0;
+  let rolesAllow = 0;
+  let rolesDeny = 0;
+  let userAllow = 0;
+  let userDeny = 0;
+
   for (const overwrite of overwrites) {
-    let applies = false;
-
+    const allow = Number(overwrite.allow || 0);
+    const deny = Number(overwrite.deny || 0);
     if (overwrite.target_type === 'role') {
-      // Check if user has this role
-      if (overwrite.target_id === defaultRole?.id || userRoles.includes(overwrite.target_id)) {
-        applies = true;
+      if (overwrite.target_id === defaultRole?.id) {
+        everyoneAllow |= allow;
+        everyoneDeny |= deny;
+      } else if (userRoles.includes(overwrite.target_id)) {
+        rolesAllow |= allow;
+        rolesDeny |= deny;
       }
-    } else if (overwrite.target_type === 'user') {
-      // Check if this is the user
-      if (overwrite.target_id === userId) {
-        applies = true;
-      }
-    }
-
-    if (applies) {
-      // Apply deny first, then allow
-      permissions = (permissions & ~overwrite.deny) | overwrite.allow;
+    } else if (overwrite.target_type === 'user' && overwrite.target_id === userId) {
+      userAllow |= allow;
+      userDeny |= deny;
     }
   }
+
+  permissions = (permissions & ~everyoneDeny) | everyoneAllow;
+  permissions = (permissions & ~rolesDeny) | rolesAllow;
+  permissions = (permissions & ~userDeny) | userAllow;
 
   return permissions;
 }

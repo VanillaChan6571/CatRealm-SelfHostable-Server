@@ -3,7 +3,7 @@ const db = require('../db');
 const { SERVER_MODE } = require('../middleware/auth');
 const { getSetting, setSetting } = require('../settings');
 const { PERMISSIONS, hasPermission } = require('../permissions');
-const { emitServerInfoUpdate } = require('../socket/handler');
+const { emitServerInfoUpdate, emitPermissionsChanged } = require('../socket/handler');
 const { randomUUID } = require('crypto');
 const multer = require('multer');
 const path = require('path');
@@ -290,18 +290,95 @@ router.get('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) =>
   res.json(roles);
 });
 
+// GET /api/admin/role-categories
+router.get('/role-categories', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) => {
+  const categories = db
+    .prepare('SELECT * FROM role_categories ORDER BY position ASC, name COLLATE NOCASE')
+    .all();
+  res.json(categories);
+});
+
+// POST /api/admin/role-categories
+router.post('/role-categories', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
+  const { name } = req.body ?? {};
+  if (typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 32) {
+    return res.status(400).json({ error: 'Category name must be 1-32 characters' });
+  }
+
+  const maxPos = db.prepare('SELECT MAX(position) as m FROM role_categories').get()?.m ?? 0;
+  const id = randomUUID();
+  db.prepare('INSERT INTO role_categories (id, name, position) VALUES (?, ?, ?)')
+    .run(id, name.trim(), Number(maxPos) + 1);
+  const category = db.prepare('SELECT * FROM role_categories WHERE id = ?').get(id);
+  res.status(201).json(category);
+});
+
+// PUT /api/admin/role-categories/:id
+router.put('/role-categories/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
+  const { id } = req.params;
+  const existing = db.prepare('SELECT * FROM role_categories WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: 'Role category not found' });
+
+  const { name, position } = req.body ?? {};
+  if (typeof name === 'string') {
+    if (name.trim().length < 1 || name.trim().length > 32) {
+      return res.status(400).json({ error: 'Category name must be 1-32 characters' });
+    }
+    db.prepare('UPDATE role_categories SET name = ? WHERE id = ?').run(name.trim(), id);
+  }
+  if (typeof position === 'number') {
+    db.prepare('UPDATE role_categories SET position = ? WHERE id = ?').run(position, id);
+  }
+
+  const category = db.prepare('SELECT * FROM role_categories WHERE id = ?').get(id);
+  res.json(category);
+});
+
+// DELETE /api/admin/role-categories/:id
+router.delete('/role-categories/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
+  const { id } = req.params;
+  const existing = db.prepare('SELECT * FROM role_categories WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: 'Role category not found' });
+
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE roles SET category_id = NULL WHERE category_id = ?').run(id);
+    db.prepare('DELETE FROM role_categories WHERE id = ?').run(id);
+  });
+  tx();
+
+  res.json({ success: true });
+});
+
 // POST /api/admin/roles
 router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
   const { randomUUID } = require('crypto');
-  const { name, permissions = 0, color = null, mentionable = 0, hoist = 0, icon = null } = req.body ?? {};
+  const {
+    name,
+    permissions = 0,
+    color = null,
+    mentionable = 0,
+    hoist = 0,
+    icon = null,
+    categoryId = null,
+  } = req.body ?? {};
   if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 32) {
     return res.status(400).json({ error: 'Role name must be 2-32 characters' });
   }
+  let normalizedCategoryId = null;
+  if (categoryId !== null && categoryId !== undefined) {
+    if (typeof categoryId !== 'string' || categoryId.trim().length === 0) {
+      return res.status(400).json({ error: 'Invalid categoryId' });
+    }
+    const categoryExists = db.prepare('SELECT id FROM role_categories WHERE id = ?').get(categoryId.trim());
+    if (!categoryExists) return res.status(400).json({ error: 'Role category not found' });
+    normalizedCategoryId = categoryId.trim();
+  }
   const maxPos = db.prepare('SELECT MAX(position) as m FROM roles').get().m || 0;
   const id = randomUUID();
-  db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(id, name.trim(), color, permissions, maxPos + 1, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon);
+  db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name.trim(), color, permissions, maxPos + 1, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon, normalizedCategoryId);
   const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
+  emitPermissionsChanged();
   res.status(201).json(role);
 });
 
@@ -310,7 +387,7 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   const { id } = req.params;
   const existing = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Role not found' });
-  const { name, permissions, color, position, mentionable, hoist, icon } = req.body ?? {};
+  const { name, permissions, color, position, mentionable, hoist, icon, categoryId } = req.body ?? {};
   if (typeof name === 'string') {
     if (name.trim().length < 2 || name.trim().length > 32) {
       return res.status(400).json({ error: 'Role name must be 2-32 characters' });
@@ -335,7 +412,20 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   if (typeof icon === 'string' || icon === null) {
     db.prepare('UPDATE roles SET icon = ? WHERE id = ?').run(icon, id);
   }
+  if (categoryId !== undefined) {
+    if (categoryId === null || categoryId === '') {
+      db.prepare('UPDATE roles SET category_id = NULL WHERE id = ?').run(id);
+    } else {
+      if (typeof categoryId !== 'string' || categoryId.trim().length === 0) {
+        return res.status(400).json({ error: 'Invalid categoryId' });
+      }
+      const categoryExists = db.prepare('SELECT id FROM role_categories WHERE id = ?').get(categoryId.trim());
+      if (!categoryExists) return res.status(400).json({ error: 'Role category not found' });
+      db.prepare('UPDATE roles SET category_id = ? WHERE id = ?').run(categoryId.trim(), id);
+    }
+  }
   const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
+  emitPermissionsChanged();
   res.json(role);
 });
 
@@ -346,6 +436,7 @@ router.delete('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, r
   if (!existing) return res.status(404).json({ error: 'Role not found' });
   if (existing.is_default) return res.status(400).json({ error: 'Cannot delete default role' });
   db.prepare('DELETE FROM roles WHERE id = ?').run(id);
+  emitPermissionsChanged();
   res.json({ success: true });
 });
 
@@ -490,6 +581,7 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
   });
   tx();
 
+  emitPermissionsChanged();
   res.json({ id, roleIds: filtered });
 });
 

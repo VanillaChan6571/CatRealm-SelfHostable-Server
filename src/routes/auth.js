@@ -82,6 +82,46 @@ router.post('/login', (req, res) => {
   });
 });
 
+// GET /api/auth/me - return current user with freshly computed permissions
+router.get('/me', authenticateToken, (req, res) => {
+  const current = db.prepare(`
+    SELECT id, username, role, is_owner, status, avatar, banner, bio, account_type
+    FROM users
+    WHERE id = ?
+  `).get(req.user.id);
+  if (!current) return res.status(404).json({ error: 'User not found' });
+
+  const permissions = computePermissionsForUser(current.id, current.role, current.is_owner, db);
+  const accountType = current.account_type === 'central' ? 'central' : 'local';
+  const tokenPayload = {
+    id: current.id,
+    username: current.username,
+    role: current.role,
+    is_owner: current.is_owner ? 1 : 0,
+    permissions,
+  };
+  if (accountType === 'central') {
+    tokenPayload.account_type = 'central';
+  }
+  const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+
+  res.json({
+    token,
+    user: {
+      id: current.id,
+      username: current.username,
+      role: current.role,
+      isOwner: !!current.is_owner,
+      permissions,
+      accountType,
+      status: current.status || 'online',
+      avatar: current.avatar || null,
+      banner: current.banner || null,
+      bio: current.bio || null,
+    },
+  });
+});
+
 // POST /api/auth/claim-admin  (one-time admin token claim)
 router.post('/claim-admin', authenticateToken, (req, res) => {
   const { token } = req.body;

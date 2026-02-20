@@ -24,6 +24,11 @@ function emitServerInfoUpdate(info) {
   ioInstance.emit('server:info', info);
 }
 
+function emitPermissionsChanged() {
+  if (!ioInstance) return;
+  ioInstance.emit('permissions:changed');
+}
+
 function emitServerImportStatus(status, data) {
   if (!ioInstance) return;
   ioInstance.emit('server:import:status', { status, ...data });
@@ -560,7 +565,7 @@ function broadcastChannelUpdate() {
   for (const [, socket] of ioInstance.sockets.sockets) {
     if (!socket.user) continue;
 
-    const userChannels = filterChannelsForUser(socket.user.id, allChannels);
+    const userChannels = filterChannelsForUser(socket.user, allChannels);
     socket.emit('channel:list', userChannels);
     socket.emit('category:list', categories);
 
@@ -576,6 +581,7 @@ module.exports.broadcastChannelUpdate = broadcastChannelUpdate;
 module.exports.emitMessage = emitMessage;
 module.exports.emitServerInfoUpdate = emitServerInfoUpdate;
 module.exports.emitServerImportStatus = emitServerImportStatus;
+module.exports.emitPermissionsChanged = emitPermissionsChanged;
 module.exports.updateOnlineUserAvatar = (userId, avatar) => {
   const entry = onlineUsers.get(userId);
   if (!entry || !ioInstance) return;

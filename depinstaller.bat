@@ -40,6 +40,8 @@ echo Some installers may trigger UAC and take several minutes.
 echo.
 
 call :install_if_missing "OpenJS.NodeJS.LTS" "Node.js LTS"
+call :ensure_node_installed
+call :ensure_node_in_path
 echo Install Python 3 now? Required for native module builds on Node 24.
 choice /c YN /n /m "Install Python [Y/N]: "
 if errorlevel 2 set "INSTALL_PYTHON=0"
@@ -55,6 +57,7 @@ echo.
 :after_python_install
 call :install_build_tools
 call :configure_npm_python
+call :ensure_npm_in_path
 call :install_node_gyp
 
 echo.
@@ -92,6 +95,34 @@ if errorlevel 1 (
     set "HAD_ERRORS=1"
 ) else (
     echo [SUCCESS] Installed !PKG_LABEL!.
+)
+echo.
+goto :eof
+
+:ensure_node_installed
+set "NODE_ROOT="
+call :detect_node_root
+if defined NODE_ROOT goto :eof
+
+echo [WARNING] Node.js LTS was not detected after install attempt.
+echo [INFO] Retrying Node.js LTS install...
+winget install --id "OpenJS.NodeJS.LTS" --source winget --silent --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    color 0E
+    echo [WARNING] Node.js LTS install retry failed.
+    set "HAD_ERRORS=1"
+    echo.
+    goto :eof
+)
+
+set "NODE_ROOT="
+call :detect_node_root
+if defined NODE_ROOT (
+    echo [SUCCESS] Node.js LTS detected after retry.
+) else (
+    color 0E
+    echo [WARNING] Node.js still not detected. Please install manually from https://nodejs.org/
+    set "HAD_ERRORS=1"
 )
 echo.
 goto :eof
@@ -213,8 +244,10 @@ echo.
 goto :eof
 
 :install_node_gyp
-where npm >nul 2>&1
-if errorlevel 1 (
+set "NPM_CMD="
+call :detect_npm_cmd
+
+if not defined NPM_CMD (
     color 0E
     echo [WARNING] npm was not found in PATH. Could not install node-gyp.
     set "HAD_ERRORS=1"
@@ -222,7 +255,7 @@ if errorlevel 1 (
     goto :eof
 )
 
-call npm install -g node-gyp >nul 2>&1
+call "!NPM_CMD!" install -g node-gyp >nul 2>&1
 if errorlevel 1 (
     color 0E
     echo [WARNING] Failed to install node-gyp globally.
@@ -231,4 +264,91 @@ if errorlevel 1 (
     echo [SUCCESS] node-gyp installed globally.
 )
 echo.
+goto :eof
+
+:ensure_npm_in_path
+set "NPM_CMD="
+call :detect_npm_cmd
+if defined NPM_CMD goto :eof
+
+set "NODE_ROOT="
+call :detect_node_root
+if not defined NODE_ROOT goto :eof
+
+if exist "!NODE_ROOT!\npm.cmd" (
+    set "PATH=!NODE_ROOT!;!PATH!"
+)
+goto :eof
+
+:ensure_node_in_path
+set "NODE_ROOT="
+call :detect_node_root
+if not defined NODE_ROOT goto :eof
+
+where node >nul 2>&1
+if not errorlevel 1 goto :eof
+
+set "PATH=!NODE_ROOT!;!PATH!"
+goto :eof
+
+:detect_npm_cmd
+for /f "delims=" %%p in ('node -p "process.execPath" 2^>nul') do (
+    if not defined NPM_CMD if exist "%%~dpnpm.cmd" set "NPM_CMD=%%~dpnpm.cmd"
+)
+if defined NPM_CMD goto :eof
+
+for /f "delims=" %%p in ('where npm 2^>nul') do (
+    if not defined NPM_CMD set "NPM_CMD=%%p"
+)
+if defined NPM_CMD goto :eof
+
+if defined NVM_SYMLINK if exist "%NVM_SYMLINK%\npm.cmd" set "NPM_CMD=%NVM_SYMLINK%\npm.cmd"
+if defined NPM_CMD goto :eof
+
+if exist "%ProgramW6432%\nodejs\npm.cmd" set "NPM_CMD=%ProgramW6432%\nodejs\npm.cmd"
+if defined NPM_CMD goto :eof
+
+if exist "%ProgramFiles%\nodejs\npm.cmd" set "NPM_CMD=%ProgramFiles%\nodejs\npm.cmd"
+if defined NPM_CMD goto :eof
+
+if exist "%ProgramFiles(x86)%\nodejs\npm.cmd" set "NPM_CMD=%ProgramFiles(x86)%\nodejs\npm.cmd"
+if defined NPM_CMD goto :eof
+
+if exist "%LocalAppData%\Programs\nodejs\npm.cmd" set "NPM_CMD=%LocalAppData%\Programs\nodejs\npm.cmd"
+if defined NPM_CMD goto :eof
+goto :eof
+
+:detect_node_root
+set "NODE_ROOT="
+for /f "delims=" %%p in ('node -p "process.execPath" 2^>nul') do (
+    if not defined NODE_ROOT set "NODE_ROOT=%%~dp"
+)
+if defined NODE_ROOT goto :eof
+
+for /f "delims=" %%p in ('where node 2^>nul') do (
+    if not defined NODE_ROOT set "NODE_ROOT=%%~dp"
+)
+if defined NODE_ROOT goto :eof
+
+for /f "tokens=2,*" %%a in ('reg query "HKLM\Software\Node.js" /v InstallPath 2^>nul ^| findstr /i "InstallPath"') do (
+    if not defined NODE_ROOT set "NODE_ROOT=%%b"
+)
+if defined NODE_ROOT goto :eof
+
+for /f "tokens=2,*" %%a in ('reg query "HKCU\Software\Node.js" /v InstallPath 2^>nul ^| findstr /i "InstallPath"') do (
+    if not defined NODE_ROOT set "NODE_ROOT=%%b"
+)
+if defined NODE_ROOT goto :eof
+
+if exist "%ProgramW6432%\nodejs\node.exe" set "NODE_ROOT=%ProgramW6432%\nodejs"
+if defined NODE_ROOT goto :eof
+
+if exist "%ProgramFiles%\nodejs\node.exe" set "NODE_ROOT=%ProgramFiles%\nodejs"
+if defined NODE_ROOT goto :eof
+
+if exist "%ProgramFiles(x86)%\nodejs\node.exe" set "NODE_ROOT=%ProgramFiles(x86)%\nodejs"
+if defined NODE_ROOT goto :eof
+
+if exist "%LocalAppData%\Programs\nodejs\node.exe" set "NODE_ROOT=%LocalAppData%\Programs\nodejs"
+if defined NODE_ROOT goto :eof
 goto :eof
