@@ -23,6 +23,7 @@ async function registerInviteWithAuth(inviteData) {
 
   const serverUrl = process.env.SERVER_URL || 'http://localhost:3001';
   const serverName = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_name')?.value || 'CatRealm Server';
+  const serverDescription = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_description')?.value || '';
   const serverIcon = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_icon')?.value || null;
   const serverBanner = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_banner')?.value || null;
   const memberCount = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
@@ -31,6 +32,7 @@ async function registerInviteWithAuth(inviteData) {
     code: inviteData.code,
     serverUrl,
     serverName,
+    serverDescription,
     serverIcon: serverIcon ? `${serverUrl}${serverIcon}` : null, // Full URL for icon
     serverBanner: serverBanner ? `${serverUrl}${serverBanner}` : null, // Full URL for banner
     memberCount,

@@ -73,7 +73,17 @@ PERMISSIONS.DELETE_MESSAGES = PERMISSIONS.MANAGE_MESSAGES;
 PERMISSIONS.CREATE_THREADS = PERMISSIONS.CREATE_PUBLIC_THREADS;
 PERMISSIONS.CREATE_INVITES = PERMISSIONS.CREATE_INVITE;
 
-const ALL_PERMISSIONS = Object.values(PERMISSIONS).reduce((acc, val) => acc | val, 0);
+function toPermissionBits(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0n;
+  const normalized = Math.trunc(value);
+  // Legacy signed-32 values should be interpreted as unsigned masks.
+  if (normalized < 0) return BigInt(normalized >>> 0);
+  return BigInt(normalized);
+}
+
+const ALL_PERMISSIONS = Number(
+  Object.values(PERMISSIONS).reduce((acc, val) => (acc | toPermissionBits(val)), 0n)
+);
 
 function computePermissionsForUser(userId, role, isOwner, db) {
   if (isOwner || role === 'owner' || role === 'admin') return ALL_PERMISSIONS;
@@ -84,24 +94,29 @@ function computePermissionsForUser(userId, role, isOwner, db) {
     WHERE ur.user_id = ?
   `).all(userId);
 
-  let permissions = 0;
+  let permissions = 0n;
+  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
+
   for (const r of roleRows) {
-    permissions |= r.permissions;
+    permissions |= toPermissionBits(r.permissions);
     // If user has ADMINISTRATOR permission, grant all permissions
-    if ((r.permissions & PERMISSIONS.ADMINISTRATOR) === PERMISSIONS.ADMINISTRATOR) {
+    if ((permissions & administratorMask) === administratorMask) {
       return ALL_PERMISSIONS;
     }
   }
 
-  return permissions;
+  return Number(permissions);
 }
 
 function hasPermission(user, permission) {
   if (!user) return false;
   if (user.is_owner || user.role === 'owner') return true;
+  const userBits = toPermissionBits(user.permissions);
+  const permissionBits = toPermissionBits(permission);
   // Check for ADMINISTRATOR permission which grants all
-  if ((user.permissions & PERMISSIONS.ADMINISTRATOR) === PERMISSIONS.ADMINISTRATOR) return true;
-  return (user.permissions & permission) === permission;
+  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
+  if ((userBits & administratorMask) === administratorMask) return true;
+  return (userBits & permissionBits) === permissionBits;
 }
 
 /**
@@ -117,9 +132,10 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
   // Owner and Administrator always have all permissions
   const user = db.prepare('SELECT is_owner, role FROM users WHERE id = ?').get(userId);
   if (user?.is_owner || user?.role === 'owner') return ALL_PERMISSIONS;
-  if ((basePermissions & PERMISSIONS.ADMINISTRATOR) === PERMISSIONS.ADMINISTRATOR) return ALL_PERMISSIONS;
+  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
+  if ((toPermissionBits(basePermissions) & administratorMask) === administratorMask) return ALL_PERMISSIONS;
 
-  let permissions = basePermissions;
+  let permissions = toPermissionBits(basePermissions);
 
   // Get all overwrites for this channel.
   const overwrites = db.prepare(`
@@ -139,16 +155,16 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
   // 1) @everyone overwrite
   // 2) aggregate all role overwrites
   // 3) user-specific overwrite
-  let everyoneAllow = 0;
-  let everyoneDeny = 0;
-  let rolesAllow = 0;
-  let rolesDeny = 0;
-  let userAllow = 0;
-  let userDeny = 0;
+  let everyoneAllow = 0n;
+  let everyoneDeny = 0n;
+  let rolesAllow = 0n;
+  let rolesDeny = 0n;
+  let userAllow = 0n;
+  let userDeny = 0n;
 
   for (const overwrite of overwrites) {
-    const allow = Number(overwrite.allow || 0);
-    const deny = Number(overwrite.deny || 0);
+    const allow = toPermissionBits(Number(overwrite.allow || 0));
+    const deny = toPermissionBits(Number(overwrite.deny || 0));
     if (overwrite.target_type === 'role') {
       if (overwrite.target_id === defaultRole?.id) {
         everyoneAllow |= allow;
@@ -167,7 +183,7 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
   permissions = (permissions & ~rolesDeny) | rolesAllow;
   permissions = (permissions & ~userDeny) | userAllow;
 
-  return permissions;
+  return Number(permissions);
 }
 
 module.exports = { PERMISSIONS, ALL_PERMISSIONS, hasPermission, computePermissionsForUser, computeChannelPermissions };
