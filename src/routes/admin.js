@@ -1042,10 +1042,10 @@ const iconBannerUpload = multer({
   },
 });
 
-function removeRealmAsset(baseName) {
+function removeRealmAsset(baseName, keepFilename = null) {
   const files = fs.readdirSync(UGC_SERVER_DIR);
   for (const file of files) {
-    if (file.startsWith(`${baseName}.`)) {
+    if (file.startsWith(`${baseName}.`) && file !== keepFilename) {
       const oldPath = path.join(UGC_SERVER_DIR, file);
       if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
     }
@@ -1056,7 +1056,7 @@ function removeRealmAsset(baseName) {
 router.post('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBannerUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'File required' });
 
-  removeRealmAsset('RealmIcon');
+  removeRealmAsset('RealmIcon', req.file.filename);
 
   const iconUrl = `/ugc/server/${req.file.filename}`;
   setSetting('server_icon', iconUrl);
@@ -1088,7 +1088,7 @@ router.delete('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), (req
 router.post('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBannerUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'File required' });
 
-  removeRealmAsset('RealmBanner');
+  removeRealmAsset('RealmBanner', req.file.filename);
 
   const bannerUrl = `/ugc/server/${req.file.filename}`;
   setSetting('server_banner', bannerUrl);
