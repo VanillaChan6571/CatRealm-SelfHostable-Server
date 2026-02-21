@@ -69,11 +69,20 @@ function ensureRepoReady(repoRoot, repo, branch) {
   const gitDir = path.join(repoRoot, '.git');
   if (!fs.existsSync(gitDir)) {
     pteroLog('[CatRealm] .git not found. Initializing repository from GIT_REPO...');
-    if (runGit(repoRoot, ['init']).status !== 0) return false;
-    runGit(repoRoot, ['remote', 'remove', 'origin']);
-    if (runGit(repoRoot, ['remote', 'add', 'origin', repo]).status !== 0) return false;
-    if (runGit(repoRoot, ['fetch', '--depth=1', 'origin', branch]).status !== 0) return false;
-    if (runGit(repoRoot, ['checkout', '-B', branch, `origin/${branch}`]).status !== 0) return false;
+    const steps = [
+      { args: ['init'], label: 'git init' },
+      { args: ['remote', 'remove', 'origin'], label: 'remove old origin', allowFail: true },
+      { args: ['remote', 'add', 'origin', repo], label: 'add origin' },
+      { args: ['fetch', '--depth=1', 'origin', branch], label: 'fetch' },
+      { args: ['checkout', '-f', '-B', branch, `origin/${branch}`], label: 'checkout' },
+    ];
+    for (const step of steps) {
+      const result = runGit(repoRoot, step.args);
+      if (result.status !== 0 && !step.allowFail) {
+        pteroLog(`[CatRealm <- GitHub]: "${step.label}" failed: ${(result.stderr || '').trim()}`);
+        return false;
+      }
+    }
     pteroLog('[CatRealm] Repository initialized from remote.');
     if (!runNpmInstall(repoRoot)) return false;
   }
@@ -90,12 +99,28 @@ function ensureRepoReady(repoRoot, repo, branch) {
 
 function getHashState(repoRoot, branch) {
   const localSha = runGit(repoRoot, ['rev-parse', 'HEAD']);
-  if (localSha.status !== 0) return null;
+  if (localSha.status !== 0) {
+    pteroLog(`[CatRealm <- GitHub]: rev-parse HEAD failed: ${(localSha.stderr || '').trim()}`);
+    return null;
+  }
 
-  if (runGit(repoRoot, ['fetch', '--all', '--prune']).status !== 0) return null;
+  let fetchResult = runGit(repoRoot, ['fetch', '--all', '--prune']);
+  if (fetchResult.status !== 0) {
+    pteroLog(`[CatRealm <- GitHub]: fetch --all failed: ${(fetchResult.stderr || '').trim()}`);
+    pteroLog('[CatRealm <- GitHub]: Retrying with unshallow fetch...');
+    runGit(repoRoot, ['fetch', '--unshallow', 'origin', branch]);
+    fetchResult = runGit(repoRoot, ['fetch', 'origin', branch]);
+    if (fetchResult.status !== 0) {
+      pteroLog(`[CatRealm <- GitHub]: fetch retry failed: ${(fetchResult.stderr || '').trim()}`);
+      return null;
+    }
+  }
 
   const remoteSha = runGit(repoRoot, ['rev-parse', `origin/${branch}`]);
-  if (remoteSha.status !== 0) return null;
+  if (remoteSha.status !== 0) {
+    pteroLog(`[CatRealm <- GitHub]: rev-parse origin/${branch} failed: ${(remoteSha.stderr || '').trim()}`);
+    return null;
+  }
 
   const local = (localSha.stdout || '').trim();
   const remote = (remoteSha.stdout || '').trim();

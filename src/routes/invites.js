@@ -6,8 +6,16 @@ const { hasPermission, PERMISSIONS } = require('../permissions');
 const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
+const net = require('net');
 const { URL } = require('url');
 const DEFAULT_AUTH_SERVER_URL = 'https://auth.catrealm.app';
+const PUBLIC_IP_LOOKUP_TIMEOUT_MS = 3500;
+const PUBLIC_IP_PROVIDERS = [
+  'https://api64.ipify.org?format=json',
+  'https://api.ipify.org?format=json',
+  'https://ifconfig.me/ip',
+  'https://checkip.amazonaws.com',
+];
 
 // Generate random invite code
 function generateInviteCode() {
@@ -71,7 +79,8 @@ function inferServerOrigin(req) {
 }
 
 function getPublicServerUrl(req) {
-  return normalizeOrigin(process.env.SERVER_URL)
+  return normalizeOrigin(process.env.PUBLIC_SERVER_URL)
+    || normalizeOrigin(process.env.SERVER_URL)
     || inferServerOrigin(req)
     || 'http://localhost:3001';
 }
@@ -84,6 +93,119 @@ function getPublicClientUrl(req) {
 
 function getAuthServerUrl() {
   return normalizeOrigin(process.env.AUTH_SERVER_URL) || DEFAULT_AUTH_SERVER_URL;
+}
+
+function isUnroutableHostname(hostname) {
+  const host = String(hostname || '').trim().toLowerCase();
+  if (!host) return true;
+
+  if (host === 'localhost' || host === '0.0.0.0' || host === '::' || host === '::1') return true;
+  if (host.endsWith('.local')) return true;
+
+  const ipVersion = net.isIP(host);
+  if (ipVersion === 4) {
+    const parts = host.split('.').map((v) => Number(v));
+    if (parts.length !== 4 || parts.some((v) => Number.isNaN(v))) return true;
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a >= 224) return true;
+    return false;
+  }
+
+  if (ipVersion === 6) {
+    if (host === '::1' || host === '::') return true;
+    if (host.startsWith('fe80:')) return true; // link-local
+    if (host.startsWith('fc') || host.startsWith('fd')) return true; // unique local
+    return false;
+  }
+
+  return false;
+}
+
+function parseIpFromLookupResponse(body) {
+  const raw = String(body || '').trim();
+  if (!raw) return null;
+
+  if (raw.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw);
+      const value = typeof parsed?.ip === 'string' ? parsed.ip.trim() : '';
+      return net.isIP(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const candidate = raw.split(/\s+/)[0].trim();
+  return net.isIP(candidate) ? candidate : null;
+}
+
+function requestText(url, timeoutMs = PUBLIC_IP_LOOKUP_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    try {
+      const target = new URL(url);
+      const httpLib = target.protocol === 'https:' ? https : http;
+      const req = httpLib.request({
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search || ''}`,
+        method: 'GET',
+        headers: {
+          Accept: 'application/json,text/plain;q=0.9,*/*;q=0.8',
+          'User-Agent': 'CatRealm-SelfHost-Invite/1.0',
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(data);
+          } else {
+            resolve(null);
+          }
+        });
+      });
+      req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+      req.on('error', () => resolve(null));
+      req.end();
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function resolvePublicIpAddress() {
+  for (const provider of PUBLIC_IP_PROVIDERS) {
+    const response = await requestText(provider);
+    if (!response) continue;
+    const ip = parseIpFromLookupResponse(response);
+    if (ip && !isUnroutableHostname(ip)) return ip;
+  }
+  return null;
+}
+
+async function resolvePublicServerUrl(req) {
+  const base = getPublicServerUrl(req);
+  try {
+    const parsed = new URL(base);
+    if (!isUnroutableHostname(parsed.hostname)) {
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+
+    const publicIp = await resolvePublicIpAddress();
+    if (!publicIp) return `${parsed.protocol}//${parsed.host}`;
+
+    const previousHost = parsed.hostname;
+    parsed.hostname = publicIp;
+    const resolved = `${parsed.protocol}//${parsed.host}`;
+    console.log(`[Invites] Resolved public host ${previousHost} -> ${publicIp} for invite registration`);
+    return resolved;
+  } catch {
+    return base;
+  }
 }
 
 // Register invite with central auth server
@@ -211,7 +333,7 @@ router.post('/', authenticateToken, async (req, res) => {
     }
   }
 
-  const serverUrl = getPublicServerUrl(req);
+  const serverUrl = await resolvePublicServerUrl(req);
   const authServerUrl = getAuthServerUrl();
   const clientUrl = getPublicClientUrl(req);
   const normalizedMaxUses = Number(maxUses) || 0;

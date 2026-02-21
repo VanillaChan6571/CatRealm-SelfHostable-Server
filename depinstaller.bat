@@ -9,28 +9,23 @@ echo ========================================
 echo.
 
 REM Check if winget is available
+set "HAS_WINGET=0"
 where winget >nul 2>&1
-if errorlevel 1 (
-    color 0C
-    echo [ERROR] Windows Package Manager ^(winget^) is not available!
+if not errorlevel 1 set "HAS_WINGET=1"
+
+if "!HAS_WINGET!"=="0" (
+    echo [INFO] Windows Package Manager ^(winget^) is not available.
+    echo [INFO] Using direct-download fallback ^(works on LTSC/IoT editions^).
     echo.
-    echo Winget is required for automatic installation.
-    echo It's included in Windows 10 ^(version 1809+^) and Windows 11.
-    echo.
-    echo Please install these manually:
-    echo - Node.js LTS: https://nodejs.org/
-    echo - Python 3: https://www.python.org/downloads/
-    echo - Visual Studio Build Tools ^(C++^): https://visualstudio.microsoft.com/visual-cpp-build-tools/
-    echo.
-    echo Press any key to exit...
-    pause >nul
-    exit /b 1
 )
 
 set "HAD_ERRORS=0"
 set "INSTALL_PYTHON=1"
+set "TEMP_DIR=%TEMP%\CatRealmInstall"
+if not exist "!TEMP_DIR!" mkdir "!TEMP_DIR!"
 
 echo [INFO] This installer will ensure these dependencies exist:
+echo - Git
 echo - Node.js LTS
 echo - Python 3
 echo - Visual Studio C++ Build Tools
@@ -39,7 +34,10 @@ echo.
 echo Some installers may trigger UAC and take several minutes.
 echo.
 
-call :install_if_missing "OpenJS.NodeJS.LTS" "Node.js LTS"
+call :install_git
+call :ensure_git_in_path
+call :clone_repo_if_needed
+call :install_node
 call :ensure_node_installed
 call :ensure_node_in_path
 echo Install Python 3 now? Required for native module builds on Node 24.
@@ -78,24 +76,207 @@ echo Press any key to exit...
 pause >nul
 exit /b 0
 
-:install_if_missing
-set "PKG_ID=%~1"
-set "PKG_LABEL=%~2"
-winget list --id "!PKG_ID!" --source winget >nul 2>&1
+:install_git
+where git >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] !PKG_LABEL! is already installed.
+    echo [OK] Git is already installed.
+    echo.
     goto :eof
 )
 
-echo [INFO] Installing !PKG_LABEL!...
-winget install --id "!PKG_ID!" --source winget --silent --accept-package-agreements --accept-source-agreements
+REM Check common Git install locations
+set "GIT_FOUND=0"
+for %%g in (
+    "%ProgramFiles%\Git\cmd\git.exe"
+    "%ProgramFiles(x86)%\Git\cmd\git.exe"
+    "%LocalAppData%\Programs\Git\cmd\git.exe"
+    "%ProgramW6432%\Git\cmd\git.exe"
+) do (
+    if exist "%%~g" set "GIT_FOUND=1"
+)
+if "!GIT_FOUND!"=="1" (
+    echo [OK] Git is already installed ^(not in PATH yet, will fix^).
+    echo.
+    goto :eof
+)
+
+if "!HAS_WINGET!"=="1" (
+    echo [INFO] Installing Git via winget...
+    winget install --id "Git.Git" --source winget --silent --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        echo [SUCCESS] Installed Git.
+        echo.
+        goto :eof
+    )
+    echo [WARNING] winget install failed, trying direct download...
+)
+
+echo [INFO] Downloading Git installer...
+set "GIT_INSTALLER=!TEMP_DIR!\git-installer.exe"
+powershell -NoProfile -Command "try { $url = 'https://github.com/git-for-windows/git/releases/latest'; $r = Invoke-WebRequest -Uri $url -UseBasicParsing -MaximumRedirection 0 -ErrorAction SilentlyContinue 2>$null; $loc = $r.Headers.Location; if (-not $loc) { $r2 = Invoke-WebRequest -Uri $url -UseBasicParsing; $loc = ($r2.Links | Where-Object { $_.href -match 'Git-.*64-bit\.exe$' } | Select-Object -First 1).href }; if ($loc -match '/tag/(.+)') { $tag = $Matches[1]; $ver = $tag -replace '^v',''; $ver = $ver -replace '\.windows\.\d+$',''; $dlUrl = \"https://github.com/git-for-windows/git/releases/download/$tag/Git-$ver-64-bit.exe\"; Write-Host \"Downloading $dlUrl\"; Invoke-WebRequest -Uri $dlUrl -OutFile '!GIT_INSTALLER!' -UseBasicParsing } else { exit 1 }; exit 0 } catch { Write-Host \"Error: $_\"; exit 1 }"
+if not exist "!GIT_INSTALLER!" (
+    echo [INFO] Dynamic URL failed, trying known-good Git v2.47.1...
+    powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe' -OutFile '!GIT_INSTALLER!' -UseBasicParsing"
+)
+if not exist "!GIT_INSTALLER!" (
+    color 0E
+    echo [WARNING] Failed to download Git installer.
+    echo [WARNING] Please install Git manually from: https://git-scm.com/download/win
+    set "HAD_ERRORS=1"
+    echo.
+    goto :eof
+)
+
+echo [INFO] Running Git installer...
+"!GIT_INSTALLER!" /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"
+if errorlevel 1 (
+    echo [INFO] Silent install failed, launching interactive installer...
+    "!GIT_INSTALLER!"
+)
+del "!GIT_INSTALLER!" >nul 2>&1
+echo.
+goto :eof
+
+:ensure_git_in_path
+where git >nul 2>&1
+if not errorlevel 1 goto :eof
+
+REM Try to find git and add it to PATH for this session
+for %%g in (
+    "%ProgramFiles%\Git\cmd"
+    "%ProgramFiles(x86)%\Git\cmd"
+    "%LocalAppData%\Programs\Git\cmd"
+    "%ProgramW6432%\Git\cmd"
+) do (
+    if exist "%%~g\git.exe" (
+        set "PATH=%%~g;!PATH!"
+        echo [INFO] Added Git to PATH for this session: %%~g
+        echo.
+        goto :eof
+    )
+)
+goto :eof
+
+:clone_repo_if_needed
+set "REPO_URL=https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git"
+set "REPO_BRANCH=main"
+
+where git >nul 2>&1
 if errorlevel 1 (
     color 0E
-    echo [WARNING] Failed to install !PKG_LABEL!.
+    echo [WARNING] Git is not available. Cannot clone or initialize the repository.
+    echo [WARNING] Please install Git from https://git-scm.com/download/win and re-run.
+    set "HAD_ERRORS=1"
+    echo.
+    goto :eof
+)
+
+REM Case 1: Files exist but .git is missing — init repo in-place
+if exist "%~dp0src\index.js" (
+    if exist "%~dp0.git" (
+        echo [OK] CatRealm server files and .git detected.
+        echo.
+        goto :eof
+    )
+    echo [INFO] Server files found but .git folder is missing. Initializing repository in-place...
+    git -C "%~dp0." init
+    if errorlevel 1 (
+        color 0E
+        echo [WARNING] git init failed.
+        set "HAD_ERRORS=1"
+        echo.
+        goto :eof
+    )
+    git -C "%~dp0." remote remove origin >nul 2>&1
+    git -C "%~dp0." remote add origin "!REPO_URL!"
+    if errorlevel 1 (
+        color 0E
+        echo [WARNING] Failed to add remote origin.
+        set "HAD_ERRORS=1"
+        echo.
+        goto :eof
+    )
+    git -C "%~dp0." fetch origin !REPO_BRANCH!
+    if errorlevel 1 (
+        color 0E
+        echo [WARNING] Failed to fetch from remote.
+        set "HAD_ERRORS=1"
+        echo.
+        goto :eof
+    )
+    git -C "%~dp0." checkout -f -B !REPO_BRANCH! origin/!REPO_BRANCH!
+    if errorlevel 1 (
+        color 0E
+        echo [WARNING] Failed to checkout remote branch.
+        set "HAD_ERRORS=1"
+        echo.
+        goto :eof
+    )
+    echo [SUCCESS] .git initialized and linked to remote.
+    echo.
+    goto :eof
+)
+
+REM Case 2: No files at all — full clone
+echo [INFO] CatRealm server files not found in: %~dp0
+echo [INFO] Cloning CatRealm repository...
+set "CLONE_DIR=%~dp0CatRealm-SelfHostable-Server"
+git clone "!REPO_URL!" "!CLONE_DIR!"
+if errorlevel 1 (
+    color 0E
+    echo [WARNING] Failed to clone repository.
+    echo [WARNING] Please clone manually: git clone !REPO_URL!
     set "HAD_ERRORS=1"
 ) else (
-    echo [SUCCESS] Installed !PKG_LABEL!.
+    echo [SUCCESS] Cloned CatRealm to: !CLONE_DIR!
+    echo [INFO] After this installer finishes, run Start.bat from that folder.
 )
+echo.
+goto :eof
+
+:install_node
+set "NODE_ROOT="
+call :detect_node_root
+if defined NODE_ROOT (
+    echo [OK] Node.js is already installed.
+    echo.
+    goto :eof
+)
+
+if "!HAS_WINGET!"=="1" (
+    echo [INFO] Installing Node.js LTS via winget...
+    winget install --id "OpenJS.NodeJS.LTS" --source winget --silent --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        echo [SUCCESS] Installed Node.js LTS.
+        echo.
+        goto :eof
+    )
+    echo [WARNING] winget install failed, trying direct download...
+)
+
+echo [INFO] Downloading Node.js LTS installer...
+set "NODE_MSI=!TEMP_DIR!\node-lts.msi"
+powershell -NoProfile -Command "try { $url = (Invoke-WebRequest -Uri 'https://nodejs.org/en/download/' -UseBasicParsing).Links | Where-Object { $_.href -match '\.msi$' -and $_.href -match 'x64' } | Select-Object -First 1 -ExpandProperty href; if (-not $url) { $url = 'https://nodejs.org/dist/v24.13.1/node-v24.13.1-x64.msi' }; if ($url -notmatch '^https?://') { $url = 'https://nodejs.org' + $url }; Write-Host \"Downloading $url\"; Invoke-WebRequest -Uri $url -OutFile '%NODE_MSI%' -UseBasicParsing; exit 0 } catch { Write-Host \"Download failed: $_\"; exit 1 }"
+if errorlevel 1 (
+    echo [INFO] Trying known-good Node.js v24.13.1 URL...
+    powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.13.1/node-v24.13.1-x64.msi' -OutFile '!NODE_MSI!' -UseBasicParsing"
+)
+if not exist "!NODE_MSI!" (
+    color 0E
+    echo [WARNING] Failed to download Node.js installer.
+    echo [WARNING] Please install Node.js LTS manually from: https://nodejs.org/
+    set "HAD_ERRORS=1"
+    echo.
+    goto :eof
+)
+
+echo [INFO] Running Node.js installer (may require admin privileges)...
+msiexec /i "!NODE_MSI!" /qn /norestart
+if errorlevel 1 (
+    echo [INFO] Silent install failed, launching interactive installer...
+    msiexec /i "!NODE_MSI!"
+)
+del "!NODE_MSI!" >nul 2>&1
 echo.
 goto :eof
 
@@ -106,44 +287,79 @@ if defined NODE_ROOT goto :eof
 
 echo [WARNING] Node.js LTS was not detected after install attempt.
 echo [INFO] Retrying Node.js LTS install...
-winget install --id "OpenJS.NodeJS.LTS" --source winget --silent --accept-package-agreements --accept-source-agreements
-if errorlevel 1 (
-    color 0E
-    echo [WARNING] Node.js LTS install retry failed.
-    set "HAD_ERRORS=1"
-    echo.
-    goto :eof
+
+if "!HAS_WINGET!"=="1" (
+    winget install --id "OpenJS.NodeJS.LTS" --source winget --silent --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        set "NODE_ROOT="
+        call :detect_node_root
+        if defined NODE_ROOT (
+            echo [SUCCESS] Node.js LTS detected after retry.
+            echo.
+            goto :eof
+        )
+    )
 )
 
-set "NODE_ROOT="
-call :detect_node_root
-if defined NODE_ROOT (
-    echo [SUCCESS] Node.js LTS detected after retry.
-) else (
-    color 0E
-    echo [WARNING] Node.js still not detected. Please install manually from https://nodejs.org/
-    set "HAD_ERRORS=1"
-)
+color 0E
+echo [WARNING] Node.js still not detected. Please install manually from https://nodejs.org/
+set "HAD_ERRORS=1"
 echo.
 goto :eof
 
 :install_build_tools
-winget list --id Microsoft.VisualStudio.2022.BuildTools --source winget >nul 2>&1
-if not errorlevel 1 (
+REM Check if cl.exe or VS Build Tools are present
+set "HAS_BUILD_TOOLS=0"
+if "!HAS_WINGET!"=="1" (
+    winget list --id Microsoft.VisualStudio.2022.BuildTools --source winget >nul 2>&1
+    if not errorlevel 1 set "HAS_BUILD_TOOLS=1"
+)
+if "!HAS_BUILD_TOOLS!"=="0" (
+    where cl >nul 2>&1
+    if not errorlevel 1 set "HAS_BUILD_TOOLS=1"
+)
+if "!HAS_BUILD_TOOLS!"=="0" (
+    if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" set "HAS_BUILD_TOOLS=1"
+)
+if "!HAS_BUILD_TOOLS!"=="0" (
+    if exist "%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" set "HAS_BUILD_TOOLS=1"
+)
+if "!HAS_BUILD_TOOLS!"=="1" (
     echo [OK] Visual Studio Build Tools is already installed.
     echo.
     goto :eof
 )
 
-echo [INFO] Installing Visual Studio Build Tools (C++ workload)...
-winget install --id Microsoft.VisualStudio.2022.BuildTools --source winget --silent --accept-package-agreements --accept-source-agreements --override "--wait --quiet --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-if errorlevel 1 (
-    color 0E
-    echo [WARNING] Failed to install Visual Studio Build Tools.
-    set "HAD_ERRORS=1"
-) else (
-    echo [SUCCESS] Installed Visual Studio Build Tools.
+if "!HAS_WINGET!"=="1" (
+    echo [INFO] Installing Visual Studio Build Tools via winget (C++ workload)...
+    winget install --id Microsoft.VisualStudio.2022.BuildTools --source winget --silent --accept-package-agreements --accept-source-agreements --override "--wait --quiet --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+    if not errorlevel 1 (
+        echo [SUCCESS] Installed Visual Studio Build Tools.
+        echo.
+        goto :eof
+    )
+    echo [WARNING] winget install failed, trying direct download...
 )
+
+echo [INFO] Downloading Visual Studio Build Tools installer...
+set "VS_INSTALLER=!TEMP_DIR!\vs_buildtools.exe"
+powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_buildtools.exe' -OutFile '!VS_INSTALLER!' -UseBasicParsing"
+if not exist "!VS_INSTALLER!" (
+    color 0E
+    echo [WARNING] Failed to download VS Build Tools installer.
+    echo [WARNING] Please install manually from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+    set "HAD_ERRORS=1"
+    echo.
+    goto :eof
+)
+
+echo [INFO] Running VS Build Tools installer (this may take several minutes)...
+"!VS_INSTALLER!" --wait --quiet --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended
+if errorlevel 1 (
+    echo [INFO] Silent install failed, launching interactive installer...
+    "!VS_INSTALLER!" --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended
+)
+del "!VS_INSTALLER!" >nul 2>&1
 echo.
 goto :eof
 
@@ -156,15 +372,40 @@ if defined PYTHON_EXE (
     goto :eof
 )
 
-echo [INFO] Installing Python 3.12...
-winget install --id "Python.Python.3.12" --source winget --silent --accept-package-agreements --accept-source-agreements
-if errorlevel 1 (
+if "!HAS_WINGET!"=="1" (
+    echo [INFO] Installing Python 3.12 via winget...
+    winget install --id "Python.Python.3.12" --source winget --silent --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        set "PYTHON_EXE="
+        call :detect_python_exe
+        if defined PYTHON_EXE (
+            echo [SUCCESS] Installed Python 3.12.
+            echo.
+            goto :eof
+        )
+    )
+    echo [WARNING] winget install failed, trying direct download...
+)
+
+echo [INFO] Downloading Python 3.12 installer...
+set "PY_INSTALLER=!TEMP_DIR!\python-3.12.msi"
+powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe' -OutFile '!PY_INSTALLER!' -UseBasicParsing; exit 0 } catch { exit 1 }"
+if not exist "!PY_INSTALLER!" (
     color 0E
-    echo [WARNING] Failed to install Python 3.12.
+    echo [WARNING] Failed to download Python installer.
+    echo [WARNING] Please install manually from: https://www.python.org/downloads/
     set "HAD_ERRORS=1"
     echo.
     goto :eof
 )
+
+echo [INFO] Running Python installer...
+"!PY_INSTALLER!" /quiet InstallAllUsers=1 PrependPath=1 Include_test=0
+if errorlevel 1 (
+    echo [INFO] Silent install failed, launching interactive installer...
+    "!PY_INSTALLER!" InstallAllUsers=1 PrependPath=1 Include_test=0
+)
+del "!PY_INSTALLER!" >nul 2>&1
 
 set "PYTHON_EXE="
 call :detect_python_exe
