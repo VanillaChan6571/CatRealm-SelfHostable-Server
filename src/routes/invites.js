@@ -10,6 +10,7 @@ const net = require('net');
 const { URL } = require('url');
 const DEFAULT_AUTH_SERVER_URL = 'https://auth.catrealm.app';
 const PUBLIC_IP_LOOKUP_TIMEOUT_MS = 3500;
+const DEFAULT_AUTH_REGISTER_TIMEOUT_MS = 30000;
 const PUBLIC_IP_PROVIDERS = [
   'https://api64.ipify.org?format=json',
   'https://api.ipify.org?format=json',
@@ -93,6 +94,42 @@ function getPublicClientUrl(req) {
 
 function getAuthServerUrl() {
   return normalizeOrigin(process.env.AUTH_SERVER_URL) || DEFAULT_AUTH_SERVER_URL;
+}
+
+function getAuthRegisterTimeoutMs() {
+  const configured = Number(process.env.AUTH_REGISTER_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_AUTH_REGISTER_TIMEOUT_MS;
+  return Math.max(5000, Math.min(120000, Math.floor(configured)));
+}
+
+function getHostPortFromUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    const port = parsed.port
+      ? Number(parsed.port)
+      : (parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : null);
+    return {
+      host: parsed.hostname || null,
+      port: Number.isFinite(port) ? Number(port) : null,
+    };
+  } catch {
+    return { host: null, port: null };
+  }
+}
+
+function formatInviteRegistrationError(registration, serverUrl) {
+  const raw = String(registration?.error || '').trim();
+  const { host, port } = getHostPortFromUrl(serverUrl);
+  const reachabilityPattern = /ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|timed out|socket hang up|connect\s+/i;
+
+  if (reachabilityPattern.test(raw)) {
+    const target = host && port ? `${host}:${port}` : (host || 'the configured server address');
+    const portLabel = port ? `port forwarding of ${port}` : 'port forwarding';
+    return `Server ${portLabel} is not reachable at ${target}. Invite failed to create.`;
+  }
+
+  if (raw) return raw;
+  return 'Invite creation rejected by central auth';
 }
 
 function isUnroutableHostname(hostname) {
@@ -211,6 +248,7 @@ async function resolvePublicServerUrl(req) {
 // Register invite with central auth server
 async function registerInviteWithAuth(inviteData) {
   const authServerUrl = getAuthServerUrl();
+  const authRegisterTimeoutMs = getAuthRegisterTimeoutMs();
 
   const serverUrl = inviteData.serverUrl;
   const serverName = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_name')?.value || 'CatRealm Server';
@@ -277,7 +315,7 @@ async function registerInviteWithAuth(inviteData) {
         });
       });
 
-      request.setTimeout(8000, () => {
+      request.setTimeout(authRegisterTimeoutMs, () => {
         request.destroy(new Error('Auth registration request timed out'));
       });
 
@@ -373,7 +411,7 @@ router.post('/', authenticateToken, async (req, res) => {
           continue;
         }
         return res.status(502).json({
-          error: registration.error || 'Invite creation rejected by central auth',
+          error: formatInviteRegistrationError(registration, serverUrl),
         });
       }
 
