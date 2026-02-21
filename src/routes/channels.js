@@ -13,18 +13,18 @@ router.get('/', (req, res) => {
 
   // Filter NSFW channels based on user preferences
   if (!canManageNsfwChannels) {
+    let allowNsfw = false;
     const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(req.user.id);
     if (prefs) {
       try {
         const parsed = JSON.parse(prefs.preferences);
-        if (!parsed.allowNsfw) {
-          // User doesn't allow NSFW, filter out NSFW channels
-          channels = channels.filter(ch => !ch.nsfw);
-        }
+        allowNsfw = parsed?.allowNsfw === true;
       } catch (_err) {
-        // Invalid JSON: do not hide channels unexpectedly.
+        // Keep secure default for malformed preferences.
+        allowNsfw = false;
       }
     }
+    if (!allowNsfw) channels = channels.filter(ch => !ch.nsfw);
   }
 
   res.json(channels);

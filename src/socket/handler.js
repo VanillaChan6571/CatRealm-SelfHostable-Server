@@ -39,18 +39,18 @@ function emitServerImportStatus(status, data) {
 function filterChannelsForUser(user, channels) {
   const canManageNsfwChannels = hasPermission(user, PERMISSIONS.MANAGE_CHANNELS);
   if (!canManageNsfwChannels) {
+    let allowNsfw = false;
     const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(user.id);
     if (prefs) {
       try {
         const parsed = JSON.parse(prefs.preferences);
-        if (!parsed.allowNsfw) {
-          // User doesn't allow NSFW, filter out NSFW channels
-          return channels.filter(ch => !ch.nsfw);
-        }
+        allowNsfw = parsed?.allowNsfw === true;
       } catch (_err) {
-        // Invalid JSON: do not hide channels unexpectedly.
+        // Keep secure default for malformed preferences.
+        allowNsfw = false;
       }
     }
+    if (!allowNsfw) return channels.filter(ch => !ch.nsfw);
   }
   return channels;
 }
