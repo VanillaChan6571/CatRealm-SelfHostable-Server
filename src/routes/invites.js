@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const DEFAULT_AUTH_SERVER_URL = 'https://auth.catrealm.app';
 
 // Generate random invite code
 function generateInviteCode() {
@@ -54,9 +55,24 @@ function inferRequestOrigin(req) {
   return null;
 }
 
+function inferServerOrigin(req) {
+  const forwardedHost = req.get('x-forwarded-host');
+  if (forwardedHost) {
+    const host = forwardedHost.split(',')[0].trim();
+    const forwardedProto = req.get('x-forwarded-proto');
+    const proto = forwardedProto ? forwardedProto.split(',')[0].trim() : (req.protocol || 'http');
+    if (host) return `${proto}://${host}`;
+  }
+
+  const host = req.get('host');
+  if (host) return `${req.protocol || 'http'}://${host}`;
+
+  return null;
+}
+
 function getPublicServerUrl(req) {
   return normalizeOrigin(process.env.SERVER_URL)
-    || inferRequestOrigin(req)
+    || inferServerOrigin(req)
     || 'http://localhost:3001';
 }
 
@@ -66,13 +82,13 @@ function getPublicClientUrl(req) {
     || 'http://localhost:5173';
 }
 
+function getAuthServerUrl() {
+  return normalizeOrigin(process.env.AUTH_SERVER_URL) || DEFAULT_AUTH_SERVER_URL;
+}
+
 // Register invite with central auth server
 async function registerInviteWithAuth(inviteData) {
-  const authServerUrl = process.env.AUTH_SERVER_URL;
-  if (!authServerUrl) {
-    console.log('[Invites] AUTH_SERVER_URL not configured, skipping central registration');
-    return { ok: false, status: 503, error: 'AUTH_SERVER_URL not configured' };
-  }
+  const authServerUrl = getAuthServerUrl();
 
   const serverUrl = inviteData.serverUrl;
   const serverName = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_name')?.value || 'CatRealm Server';
@@ -196,7 +212,7 @@ router.post('/', authenticateToken, async (req, res) => {
   }
 
   const serverUrl = getPublicServerUrl(req);
-  const authServerUrl = process.env.AUTH_SERVER_URL;
+  const authServerUrl = getAuthServerUrl();
   const clientUrl = getPublicClientUrl(req);
   const normalizedMaxUses = Number(maxUses) || 0;
   const normalizedExpiresIn = Number(expiresIn) || 0;
@@ -273,33 +289,31 @@ router.delete('/:code', authenticateToken, async (req, res) => {
   }
 
   // Delete from central auth server
-  const authServerUrl = process.env.AUTH_SERVER_URL;
-  if (authServerUrl) {
-    try {
-      const apiUrl = new URL(`${authServerUrl}/api/invites/${req.params.code}`);
-      const httpLib = apiUrl.protocol === 'https:' ? https : http;
+  const authServerUrl = getAuthServerUrl();
+  try {
+    const apiUrl = new URL(`${authServerUrl}/api/invites/${req.params.code}`);
+    const httpLib = apiUrl.protocol === 'https:' ? https : http;
 
-      await new Promise((resolve) => {
-        const req = httpLib.request({
-          hostname: apiUrl.hostname,
-          port: apiUrl.port,
-          path: apiUrl.pathname,
-          method: 'DELETE',
-        }, (res) => {
-          res.on('data', () => {});
-          res.on('end', () => resolve(true));
-        });
-
-        req.on('error', (err) => {
-          console.error('[Invites] Error deleting from auth server:', err.message);
-          resolve(false);
-        });
-
-        req.end();
+    await new Promise((resolve) => {
+      const req = httpLib.request({
+        hostname: apiUrl.hostname,
+        port: apiUrl.port,
+        path: apiUrl.pathname,
+        method: 'DELETE',
+      }, (res) => {
+        res.on('data', () => {});
+        res.on('end', () => resolve(true));
       });
-    } catch (err) {
-      console.error('[Invites] Error in deleteFromAuth:', err);
-    }
+
+      req.on('error', (err) => {
+        console.error('[Invites] Error deleting from auth server:', err.message);
+        resolve(false);
+      });
+
+      req.end();
+    });
+  } catch (err) {
+    console.error('[Invites] Error in deleteFromAuth:', err);
   }
 
   res.json({ success: true });
