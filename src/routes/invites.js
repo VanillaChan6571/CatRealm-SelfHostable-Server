@@ -13,15 +13,68 @@ function generateInviteCode() {
   return crypto.randomBytes(6).toString('base64url').slice(0, 8);
 }
 
+function normalizeOrigin(value) {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function inferRequestOrigin(req) {
+  const originHeader = normalizeOrigin(req.get('origin'));
+  if (originHeader) return originHeader;
+
+  const refererHeader = req.get('referer');
+  if (refererHeader) {
+    try {
+      const referer = new URL(refererHeader);
+      if (referer.protocol === 'http:' || referer.protocol === 'https:') {
+        return `${referer.protocol}//${referer.host}`;
+      }
+    } catch {
+      // ignore invalid referer values
+    }
+  }
+
+  const forwardedHost = req.get('x-forwarded-host');
+  if (forwardedHost) {
+    const host = forwardedHost.split(',')[0].trim();
+    const forwardedProto = req.get('x-forwarded-proto');
+    const proto = forwardedProto ? forwardedProto.split(',')[0].trim() : (req.protocol || 'http');
+    if (host) return `${proto}://${host}`;
+  }
+
+  const host = req.get('host');
+  if (host) return `${req.protocol || 'http'}://${host}`;
+
+  return null;
+}
+
+function getPublicServerUrl(req) {
+  return normalizeOrigin(process.env.SERVER_URL)
+    || inferRequestOrigin(req)
+    || 'http://localhost:3001';
+}
+
+function getPublicClientUrl(req) {
+  return normalizeOrigin(process.env.CLIENT_URL)
+    || inferRequestOrigin(req)
+    || 'http://localhost:5173';
+}
+
 // Register invite with central auth server
 async function registerInviteWithAuth(inviteData) {
   const authServerUrl = process.env.AUTH_SERVER_URL;
   if (!authServerUrl) {
     console.log('[Invites] AUTH_SERVER_URL not configured, skipping central registration');
-    return false;
+    return { ok: false, status: 503, error: 'AUTH_SERVER_URL not configured' };
   }
 
-  const serverUrl = process.env.SERVER_URL || 'http://localhost:3001';
+  const serverUrl = inviteData.serverUrl;
   const serverName = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_name')?.value || 'CatRealm Server';
   const serverDescription = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_description')?.value || '';
   const serverIcon = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_icon')?.value || null;
@@ -47,7 +100,7 @@ async function registerInviteWithAuth(inviteData) {
       const apiUrl = new URL(`${authServerUrl}/api/invites/register`);
       const httpLib = apiUrl.protocol === 'https:' ? https : http;
 
-      const req = httpLib.request({
+      const request = httpLib.request({
         hostname: apiUrl.hostname,
         port: apiUrl.port,
         path: apiUrl.pathname,
@@ -60,26 +113,46 @@ async function registerInviteWithAuth(inviteData) {
         let data = '';
         res.on('data', (chunk) => data += chunk);
         res.on('end', () => {
+          let parsed = null;
+          try {
+            parsed = data ? JSON.parse(data) : null;
+          } catch {
+            parsed = null;
+          }
+
           if (res.statusCode === 200) {
             console.log('[Invites] Successfully registered with central auth');
-            resolve(true);
+            resolve({
+              ok: true,
+              status: 200,
+              centralUrl: parsed?.centralUrl || null,
+            });
           } else {
-            console.error('[Invites] Failed to register with auth:', data);
-            resolve(false);
+            const errorMessage = parsed?.error || `Auth registration failed with status ${res.statusCode}`;
+            console.error('[Invites] Failed to register with auth:', errorMessage);
+            resolve({
+              ok: false,
+              status: Number(res.statusCode || 500),
+              error: errorMessage,
+            });
           }
         });
       });
 
-      req.on('error', (err) => {
-        console.error('[Invites] Error registering with auth:', err.message);
-        resolve(false);
+      request.setTimeout(8000, () => {
+        request.destroy(new Error('Auth registration request timed out'));
       });
 
-      req.write(payload);
-      req.end();
+      request.on('error', (err) => {
+        console.error('[Invites] Error registering with auth:', err.message);
+        resolve({ ok: false, status: 502, error: err.message });
+      });
+
+      request.write(payload);
+      request.end();
     } catch (err) {
       console.error('[Invites] Error in registerInviteWithAuth:', err);
-      resolve(false);
+      resolve({ ok: false, status: 500, error: err.message || 'Unknown auth registration error' });
     }
   });
 }
@@ -122,37 +195,68 @@ router.post('/', authenticateToken, async (req, res) => {
     }
   }
 
-  const code = generateInviteCode();
-  const expiresAt = expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : null;
+  const serverUrl = getPublicServerUrl(req);
+  const authServerUrl = process.env.AUTH_SERVER_URL;
+  const clientUrl = getPublicClientUrl(req);
+  const normalizedMaxUses = Number(maxUses) || 0;
+  const normalizedExpiresIn = Number(expiresIn) || 0;
+  const expiresAt = normalizedExpiresIn ? Math.floor(Date.now() / 1000) + normalizedExpiresIn : null;
+  const maxAttempts = authServerUrl ? 8 : 1;
+  let lastAuthError = null;
 
-  // Store locally
-  try {
-    db.prepare(`
-      INSERT INTO invites (code, channel_id, creator_user_id, max_uses, expires_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(code, channelId || null, req.user.id, maxUses || 0, expiresAt);
-  } catch (err) {
-    console.error('[Invites] Error creating invite:', err);
-    return res.status(500).json({ error: 'Failed to create invite' });
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const code = generateInviteCode();
+
+    try {
+      db.prepare(`
+        INSERT INTO invites (code, channel_id, creator_user_id, max_uses, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(code, channelId || null, req.user.id, normalizedMaxUses, expiresAt);
+    } catch (err) {
+      // Local duplicate, regenerate code and retry.
+      continue;
+    }
+
+    if (authServerUrl) {
+      const registration = await registerInviteWithAuth({
+        code,
+        serverUrl,
+        channelId,
+        creatorId: req.user.id,
+        maxUses: normalizedMaxUses,
+        expiresAt,
+      });
+
+      if (!registration.ok) {
+        db.prepare('DELETE FROM invites WHERE code = ?').run(code);
+        lastAuthError = registration;
+        // Duplicate/rejected code on auth, retry with another code.
+        if (registration.status === 409) {
+          continue;
+        }
+        return res.status(502).json({
+          error: registration.error || 'Invite creation rejected by central auth',
+        });
+      }
+
+      return res.json({
+        code,
+        centralUrl: registration.centralUrl || `${clientUrl}/invite/${code}`,
+        directUrl: `${serverUrl}/invite/${code}`,
+      });
+    }
+
+    return res.json({
+      code,
+      centralUrl: null,
+      directUrl: `${serverUrl}/invite/${code}`,
+    });
   }
 
-  // Register with central auth (async, don't block response)
-  registerInviteWithAuth({
-    code,
-    channelId,
-    creatorId: req.user.id,
-    maxUses: maxUses || 0,
-    expiresAt,
-  });
-
-  const authServerUrl = process.env.AUTH_SERVER_URL;
-  const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
-
-  res.json({
-    code,
-    centralUrl: authServerUrl ? `${clientUrl}/invite/${code}` : null,
-    directUrl: `${process.env.SERVER_URL || 'http://localhost:3001'}/invite/${code}`,
-  });
+  if (lastAuthError?.error) {
+    return res.status(500).json({ error: lastAuthError.error });
+  }
+  return res.status(500).json({ error: 'Failed to generate a unique invite code' });
 });
 
 // DELETE /api/invites/:code - Revoke invite
@@ -201,6 +305,33 @@ router.delete('/:code', authenticateToken, async (req, res) => {
   res.json({ success: true });
 });
 
+// GET /api/invites/:code/probe - Used by central auth to verify invite existence/metadata
+router.get('/:code/probe', (req, res) => {
+  const { code } = req.params;
+  const invite = db.prepare(`
+    SELECT code, channel_id, max_uses, expires_at
+    FROM invites
+    WHERE code = ?
+  `).get(code);
+
+  if (!invite) {
+    return res.status(404).json({ valid: false, error: 'Invite code not found' });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (invite.expires_at && invite.expires_at < now) {
+    return res.status(410).json({ valid: false, error: 'Invite expired' });
+  }
+
+  return res.json({
+    valid: true,
+    code: invite.code,
+    channelId: invite.channel_id || null,
+    maxUses: Number(invite.max_uses || 0),
+    expiresAt: invite.expires_at || null,
+  });
+});
+
 // POST /api/invites/:code/accept - Accept invite (used for direct server invites)
 router.post('/:code/accept', (req, res) => {
   const { code } = req.params;
@@ -226,10 +357,11 @@ router.post('/:code/accept', (req, res) => {
   db.prepare('UPDATE invites SET current_uses = current_uses + 1 WHERE code = ?').run(code);
 
   const serverName = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('server_name')?.value || 'CatRealm Server';
+  const serverUrl = getPublicServerUrl(req);
 
   res.json({
     success: true,
-    serverUrl: process.env.SERVER_URL || 'http://localhost:3001',
+    serverUrl,
     serverName,
     channelId: invite.channel_id,
   });
