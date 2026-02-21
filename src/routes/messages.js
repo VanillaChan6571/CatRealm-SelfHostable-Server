@@ -2,6 +2,26 @@ const router = require('express').Router();
 const db = require('../db');
 const { decryptMessageRows } = require('../messageCrypto');
 
+function attachNsfwTags(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const ids = messages.map((m) => m.id).filter(Boolean);
+  if (ids.length === 0) return messages;
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = db.prepare(
+    `SELECT message_id, tag FROM message_nsfw_tags WHERE message_id IN (${placeholders})`
+  ).all(...ids);
+  const tagMap = new Map();
+  for (const row of rows) {
+    const list = tagMap.get(row.message_id) || [];
+    list.push(row.tag);
+    tagMap.set(row.message_id, list);
+  }
+  return messages.map((message) => ({
+    ...message,
+    nsfw_tags: tagMap.get(message.id) || [],
+  }));
+}
+
 // GET /api/messages/:channelId?before=<timestamp>&limit=50
 router.get('/:channelId', (req, res) => {
   const { channelId } = req.params;
@@ -68,6 +88,7 @@ router.get('/:channelId', (req, res) => {
       username: m.reply_to_username,
     } : null
   }));
+  messages = attachNsfwTags(messages);
 
   res.json(messages.reverse()); // Return oldest-first
 });

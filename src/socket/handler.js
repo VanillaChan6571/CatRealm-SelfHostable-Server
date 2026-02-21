@@ -306,7 +306,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, threadId, replyToId, forwardFromId }) => {
+    socket.on('message:send', ({ channelId, content, attachment, threadId, replyToId, forwardFromId, nsfwTags }) => {
       const hasText = typeof content === 'string' && content.trim().length > 0;
       const hasAttachment = attachment && typeof attachment.url === 'string';
       if (!channelId || (!hasText && !hasAttachment)) return;
@@ -390,6 +390,14 @@ function setupSocketHandlers(io) {
       const attachmentUrl = hasAttachment ? attachment.url : null;
       const attachmentType = hasAttachment ? attachment.mime : null;
       const attachmentSize = hasAttachment ? attachment.size : null;
+      const normalizedNsfwTags = hasAttachment && Array.isArray(nsfwTags)
+        ? Array.from(new Set(
+          nsfwTags
+            .filter((tag) => typeof tag === 'string')
+            .map((tag) => String(tag).toLowerCase().trim())
+            .filter((tag) => ['blood', 'gore', 'violence', 'lewd', 'sexual', 'disturbing'].includes(tag))
+        ))
+        : [];
       db.prepare(`
         INSERT INTO messages (
           id, channel_id, user_id, content, created_at,
@@ -406,6 +414,12 @@ function setupSocketHandlers(io) {
         forwardFrom?.channel_name || null,
         canEmbedLinks ? 1 : 0
       );
+      if (normalizedNsfwTags.length > 0) {
+        const insertTagStmt = db.prepare('INSERT OR IGNORE INTO message_nsfw_tags (message_id, tag) VALUES (?, ?)');
+        for (const tag of normalizedNsfwTags) {
+          insertTagStmt.run(id, tag);
+        }
+      }
 
       const topRole = db.prepare(`
         SELECT r.color, r.hoist, r.icon FROM roles r
@@ -435,6 +449,7 @@ function setupSocketHandlers(io) {
         attachment_url: attachmentUrl,
         attachment_type: attachmentType,
         attachment_size: attachmentSize,
+        nsfw_tags: normalizedNsfwTags,
         message_type: 'user',
         thread_id: threadId || null,
         created_at: now,
