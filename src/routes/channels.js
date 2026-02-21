@@ -296,6 +296,104 @@ router.patch('/:id/settings', (req, res) => {
   });
 });
 
+// POST /api/channels/:id/permissions/sync-from-category
+router.post('/:id/permissions/sync-from-category', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_channels' });
+  }
+
+  const channel = db.prepare('SELECT id, category_id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (!channel.category_id) {
+    return res.status(400).json({ error: 'Channel is not inside a category' });
+  }
+
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(channel.category_id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+
+  const categoryOverwrites = db.prepare(`
+    SELECT target_type, target_id, allow, deny
+    FROM category_permission_overwrites
+    WHERE category_id = ?
+  `).all(channel.category_id);
+
+  const syncTransaction = db.transaction((channelId, overwrites) => {
+    db.prepare('DELETE FROM channel_permission_overwrites WHERE channel_id = ?').run(channelId);
+    const insert = db.prepare(`
+      INSERT INTO channel_permission_overwrites (id, channel_id, target_type, target_id, allow, deny)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const overwrite of overwrites) {
+      insert.run(
+        randomUUID(),
+        channelId,
+        overwrite.target_type,
+        overwrite.target_id,
+        Number(overwrite.allow || 0),
+        Number(overwrite.deny || 0)
+      );
+    }
+  });
+  syncTransaction(channel.id, categoryOverwrites);
+
+  const synced = db.prepare(`
+    SELECT * FROM channel_permission_overwrites
+    WHERE channel_id = ?
+    ORDER BY created_at
+  `).all(channel.id);
+  emitPermissionsChanged();
+  res.json({ synced: true, direction: 'from-category', count: synced.length, overwrites: synced });
+});
+
+// POST /api/channels/:id/permissions/sync-to-category
+router.post('/:id/permissions/sync-to-category', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_channels' });
+  }
+
+  const channel = db.prepare('SELECT id, category_id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (!channel.category_id) {
+    return res.status(400).json({ error: 'Channel is not inside a category' });
+  }
+
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(channel.category_id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+
+  const channelOverwrites = db.prepare(`
+    SELECT target_type, target_id, allow, deny
+    FROM channel_permission_overwrites
+    WHERE channel_id = ?
+  `).all(channel.id);
+
+  const syncTransaction = db.transaction((categoryId, overwrites) => {
+    db.prepare('DELETE FROM category_permission_overwrites WHERE category_id = ?').run(categoryId);
+    const insert = db.prepare(`
+      INSERT INTO category_permission_overwrites (id, category_id, target_type, target_id, allow, deny)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const overwrite of overwrites) {
+      insert.run(
+        randomUUID(),
+        categoryId,
+        overwrite.target_type,
+        overwrite.target_id,
+        Number(overwrite.allow || 0),
+        Number(overwrite.deny || 0)
+      );
+    }
+  });
+  syncTransaction(channel.category_id, channelOverwrites);
+
+  const synced = db.prepare(`
+    SELECT * FROM category_permission_overwrites
+    WHERE category_id = ?
+    ORDER BY created_at
+  `).all(channel.category_id);
+  emitPermissionsChanged();
+  res.json({ synced: true, direction: 'to-category', count: synced.length, overwrites: synced });
+});
+
 // GET /api/channels/:id/permissions - List all permission overwrites
 router.get('/:id/permissions', (req, res) => {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {

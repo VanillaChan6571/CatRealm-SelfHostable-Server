@@ -870,7 +870,7 @@ router.post('/import-template', requirePermission(PERMISSIONS.MANAGE_SERVER), as
       let catrealmPerms = 0;
 
       if (perms & DISCORD_PERMS.ADMINISTRATOR) {
-        return (1 << 20) - 1; // All permissions
+        return PERMISSIONS.ADMINISTRATOR;
       }
 
       if (perms & DISCORD_PERMS.VIEW_AUDIT_LOG) catrealmPerms |= PERMISSIONS.VIEW_AUDIT_LOG;

@@ -212,6 +212,19 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_overwrites_channel ON channel_permission_overwrites(channel_id);
   CREATE INDEX IF NOT EXISTS idx_overwrites_target ON channel_permission_overwrites(target_id);
+
+  CREATE TABLE IF NOT EXISTS category_permission_overwrites (
+    id TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK(target_type IN ('role', 'user')),
+    target_id TEXT NOT NULL,
+    allow INTEGER NOT NULL DEFAULT 0,
+    deny INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_category_overwrites_category ON category_permission_overwrites(category_id);
+  CREATE INDEX IF NOT EXISTS idx_category_overwrites_target ON category_permission_overwrites(target_id);
 `);
 
 const secureModeEnvRaw = getEnvValue(['SECURE_MODE', 'secure-mode']);
