@@ -1,33 +1,47 @@
 const router = require('express').Router();
 const { randomUUID } = require('crypto');
 const db = require('../db');
-const { PERMISSIONS, hasPermission } = require('../permissions');
-const { broadcastChannelUpdate, emitMessage } = require('../socket/handler');
+const {
+  PERMISSIONS,
+  hasPermission,
+  hasChannelPermission,
+  computeUserChannelPermissions,
+} = require('../permissions');
+const { broadcastChannelUpdate, emitMessage, emitPermissionsChanged } = require('../socket/handler');
 const { getSetting } = require('../settings');
 const { encryptMessageContent, decryptMessageRows } = require('../messageCrypto');
 
+function allowsNsfw(userId) {
+  const prefs = db.prepare('SELECT preferences FROM user_content_social_prefs WHERE user_id = ?').get(userId);
+  if (!prefs) return false;
+  try {
+    const parsed = JSON.parse(prefs.preferences);
+    return parsed?.allowNsfw === true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function visibleChannelListForUser(user, channels) {
+  const canManageNsfwChannels = hasPermission(user, PERMISSIONS.MANAGE_CHANNELS);
+  const allowNsfw = canManageNsfwChannels ? true : allowsNsfw(user.id);
+  const visible = [];
+  for (const channel of channels) {
+    const effectivePermissions = computeUserChannelPermissions(user, channel.id, db);
+    if (!hasChannelPermission(user, channel.id, PERMISSIONS.VIEW_CHANNELS, db)) continue;
+    if (!allowNsfw && channel.nsfw) continue;
+    visible.push({
+      ...channel,
+      effective_permissions: effectivePermissions,
+    });
+  }
+  return visible;
+}
+
 // GET /api/channels - list all channels
 router.get('/', (req, res) => {
-  let channels = db.prepare('SELECT * FROM channels ORDER BY position ASC').all();
-  const canManageNsfwChannels = hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS);
-
-  // Filter NSFW channels based on user preferences
-  if (!canManageNsfwChannels) {
-    let allowNsfw = false;
-    const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(req.user.id);
-    if (prefs) {
-      try {
-        const parsed = JSON.parse(prefs.preferences);
-        allowNsfw = parsed?.allowNsfw === true;
-      } catch (_err) {
-        // Keep secure default for malformed preferences.
-        allowNsfw = false;
-      }
-    }
-    if (!allowNsfw) channels = channels.filter(ch => !ch.nsfw);
-  }
-
-  res.json(channels);
+  const channels = db.prepare('SELECT * FROM channels ORDER BY position ASC').all();
+  res.json(visibleChannelListForUser(req.user, channels));
 });
 
 // POST /api/channels - create channel (admin only)
@@ -118,6 +132,14 @@ router.post('/:id/duplicate', (req, res) => {
 // GET /api/channels/:id/pins
 router.get('/:id/pins', (req, res) => {
   const { id } = req.params;
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (!hasChannelPermission(req.user, id, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, id, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
   const pins = db.prepare(`
     SELECT p.message_id, p.pinned_at, p.pinned_by, m.content, m.created_at, u.username
     FROM pins p
@@ -131,7 +153,7 @@ router.get('/:id/pins', (req, res) => {
 
 // POST /api/channels/:id/pins
 router.post('/:id/pins', (req, res) => {
-  if (!hasPermission(req.user, PERMISSIONS.PIN_MESSAGES)) {
+  if (!hasChannelPermission(req.user, req.params.id, PERMISSIONS.PIN_MESSAGES, db)) {
     return res.status(403).json({ error: 'Missing permission: pin_messages' });
   }
   const { messageId } = req.body ?? {};
@@ -176,7 +198,7 @@ router.post('/:id/pins', (req, res) => {
 
 // DELETE /api/channels/:id/pins/:messageId
 router.delete('/:id/pins/:messageId', (req, res) => {
-  if (!hasPermission(req.user, PERMISSIONS.PIN_MESSAGES)) {
+  if (!hasChannelPermission(req.user, req.params.id, PERMISSIONS.PIN_MESSAGES, db)) {
     return res.status(403).json({ error: 'Missing permission: pin_messages' });
   }
   db.prepare('DELETE FROM pins WHERE channel_id = ? AND message_id = ?')
@@ -189,6 +211,9 @@ router.patch('/:id/prefs', (req, res) => {
   const { muted, lastReadAt } = req.body ?? {};
   const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (!hasChannelPermission(req.user, req.params.id, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
   const current = db.prepare('SELECT * FROM channel_prefs WHERE user_id = ? AND channel_id = ?').get(req.user.id, req.params.id);
   const nextMuted = typeof muted === 'boolean' ? (muted ? 1 : 0) : (current?.muted ?? 0);
   const nextRead = typeof lastReadAt === 'number' ? lastReadAt : (current?.last_read_at ?? 0);
@@ -205,6 +230,9 @@ router.patch('/:id/prefs', (req, res) => {
 router.get('/:id/settings', (req, res) => {
   const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (!hasChannelPermission(req.user, req.params.id, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
 
   const settings = db.prepare('SELECT * FROM channel_settings WHERE channel_id = ?').get(req.params.id);
   res.json(settings || { channel_id: req.params.id, slowmode: 0, default_reaction: null });
@@ -310,6 +338,18 @@ router.post('/:id/permissions', (req, res) => {
   const id = randomUUID();
   const allowBits = typeof allow === 'number' ? allow : 0;
   const denyBits = typeof deny === 'number' ? deny : 0;
+  const existing = db.prepare(`
+    SELECT * FROM channel_permission_overwrites
+    WHERE channel_id = ? AND target_type = ? AND target_id = ?
+    LIMIT 1
+  `).get(req.params.id, targetType, targetId);
+  if (existing) {
+    db.prepare('UPDATE channel_permission_overwrites SET allow = ?, deny = ? WHERE id = ?')
+      .run(allowBits, denyBits, existing.id);
+    const updated = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(existing.id);
+    emitPermissionsChanged();
+    return res.json(updated);
+  }
 
   db.prepare(`
     INSERT INTO channel_permission_overwrites (id, channel_id, target_type, target_id, allow, deny)
@@ -317,6 +357,7 @@ router.post('/:id/permissions', (req, res) => {
   `).run(id, req.params.id, targetType, targetId, allowBits, denyBits);
 
   const overwrite = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(id);
+  emitPermissionsChanged();
   res.status(201).json(overwrite);
 });
 
@@ -338,6 +379,7 @@ router.patch('/:id/permissions/:overwriteId', (req, res) => {
   }
 
   const updated = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(req.params.overwriteId);
+  emitPermissionsChanged();
   res.json(updated);
 });
 
@@ -348,6 +390,7 @@ router.delete('/:id/permissions/:overwriteId', (req, res) => {
   }
 
   db.prepare('DELETE FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').run(req.params.overwriteId, req.params.id);
+  emitPermissionsChanged();
   res.json({ success: true });
 });
 

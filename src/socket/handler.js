@@ -4,9 +4,17 @@ const path = require('path');
 const fs = require('fs');
 const db = require('../db');
 const { JWT_SECRET } = require('../middleware/auth');
-const { PERMISSIONS, ALL_PERMISSIONS, computePermissionsForUser, hasPermission } = require('../permissions');
+const {
+  PERMISSIONS,
+  ALL_PERMISSIONS,
+  computePermissionsForUser,
+  hasPermission,
+  hasChannelPermission,
+  computeUserChannelPermissions,
+} = require('../permissions');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
+const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
 const onlineUsers = new Map();
@@ -26,13 +34,37 @@ function emitServerInfoUpdate(info) {
 
 function emitPermissionsChanged() {
   if (!ioInstance) return;
+  for (const [, socket] of ioInstance.sockets.sockets) {
+    if (!socket.user?.id) continue;
+    const dbUser = db.prepare('SELECT id, role, is_owner FROM users WHERE id = ?').get(socket.user.id);
+    if (!dbUser) continue;
+    socket.user.permissions = computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db);
+    socket.user.is_owner = dbUser.is_owner ? 1 : 0;
+    socket.user.role = dbUser.role;
+  }
   refreshAllOnlineRoleMetadata();
   ioInstance.emit('permissions:changed');
+  broadcastChannelUpdate();
 }
 
 function emitServerImportStatus(status, data) {
   if (!ioInstance) return;
   ioInstance.emit('server:import:status', { status, ...data });
+}
+
+function detectExternalExpressionUsage(text) {
+  if (typeof text !== 'string' || !text.includes(':')) {
+    return { usesExternalEmote: false, usesExternalSticker: false };
+  }
+  let usesExternalEmote = false;
+  let usesExternalSticker = false;
+  COMPACT_EXTERNAL_TOKEN_REGEX.lastIndex = 0;
+  for (const match of text.matchAll(COMPACT_EXTERNAL_TOKEN_REGEX)) {
+    if (match?.[2] === 'sticker') usesExternalSticker = true;
+    else usesExternalEmote = true;
+    if (usesExternalEmote && usesExternalSticker) break;
+  }
+  return { usesExternalEmote, usesExternalSticker };
 }
 
 // Helper function to filter channels based on user's NSFW preferences
@@ -50,9 +82,33 @@ function filterChannelsForUser(user, channels) {
         allowNsfw = false;
       }
     }
-    if (!allowNsfw) return channels.filter(ch => !ch.nsfw);
+    const visibleChannels = [];
+    for (const ch of channels) {
+      if (!hasChannelPermission(user, ch.id, PERMISSIONS.VIEW_CHANNELS, db)) continue;
+      if (!allowNsfw && ch.nsfw) continue;
+      visibleChannels.push({
+        ...ch,
+        effective_permissions: computeUserChannelPermissions(user, ch.id, db),
+      });
+    }
+    return visibleChannels;
   }
-  return channels;
+  return channels
+    .filter((ch) => hasChannelPermission(user, ch.id, PERMISSIONS.VIEW_CHANNELS, db))
+    .map((ch) => ({
+      ...ch,
+      effective_permissions: computeUserChannelPermissions(user, ch.id, db),
+    }));
+}
+
+function canSendToChannel(user, channelId, channelType, threadId) {
+  if (threadId) return hasChannelPermission(user, channelId, PERMISSIONS.SEND_MESSAGES_IN_THREADS, db);
+  if (channelType === 'forum') return hasChannelPermission(user, channelId, PERMISSIONS.SEND_MESSAGES_IN_POSTS, db);
+  return hasChannelPermission(user, channelId, PERMISSIONS.SEND_MESSAGES, db);
+}
+
+function canReadChannelHistory(user, channelId) {
+  return hasChannelPermission(user, channelId, PERMISSIONS.READ_CHAT_HISTORY, db);
 }
 
 function setupSocketHandlers(io) {
@@ -172,6 +228,21 @@ function setupSocketHandlers(io) {
         if (typeof ack === 'function') ack({ ok: false, channelId, error: 'Not a voice channel' });
         return socket.emit('voice:join:failed', { channelId, error: 'Not a voice channel' });
       }
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+        const error = 'Missing permission: view_channels';
+        if (typeof ack === 'function') ack({ ok: false, channelId, error });
+        return socket.emit('voice:join:failed', { channelId, error });
+      }
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.CONNECT_TO_VOICE, db)) {
+        const error = 'Missing permission: connect_to_voice';
+        if (typeof ack === 'function') ack({ ok: false, channelId, error });
+        return socket.emit('voice:join:failed', { channelId, error });
+      }
+      const canUseVoiceActivity = hasChannelPermission(user, channelId, PERMISSIONS.USE_VOICE_ACTIVITY, db);
+      const canUsePushToTalk = hasChannelPermission(user, channelId, PERMISSIONS.USE_PUSH_TO_TALK, db);
+      if (!canUseVoiceActivity && !canUsePushToTalk) {
+        muted = true;
+      }
 
       // Check user limit
       const channelSettings = db.prepare('SELECT user_limit FROM channel_settings WHERE channel_id = ?').get(channelId);
@@ -250,6 +321,13 @@ function setupSocketHandlers(io) {
       if (!room) return;
       const entry = room.get(user.id);
       if (!entry) return;
+      if (!muted) {
+        const canUseVoiceActivity = hasChannelPermission(user, channelId, PERMISSIONS.USE_VOICE_ACTIVITY, db);
+        const canUsePushToTalk = hasChannelPermission(user, channelId, PERMISSIONS.USE_PUSH_TO_TALK, db);
+        if (!canUseVoiceActivity && !canUsePushToTalk) {
+          muted = true;
+        }
+      }
       entry.muted = !!muted;
       entry.deafened = !!deafened;
       entry.user.muted = !!muted;
@@ -270,8 +348,21 @@ function setupSocketHandlers(io) {
 
     socket.on('voice:signal', ({ channelId, to, data }) => {
       if (!channelId || !to || !data) return;
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
+
+      const sdp = data && typeof data === 'object' && typeof data.sdp === 'string' ? data.sdp : '';
+      if (sdp && /\bm=video\b/i.test(sdp)) {
+        const canSendVideo = hasChannelPermission(user, channelId, PERMISSIONS.SCREENSHARE, db)
+          || hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db);
+        if (!canSendVideo) {
+          socket.emit('error', 'Missing permission: screenshare_or_camera');
+          return;
+        }
+      }
+
       const room = voiceRooms.get(channelId);
       if (!room) return;
+      if (!room.get(user.id)) return;
       const target = room.get(to);
       if (target && io.sockets.sockets.has(target.socketId)) {
         io.to(target.socketId).emit('voice:signal', {
@@ -297,12 +388,18 @@ function setupSocketHandlers(io) {
     socket.on('channel:join', (channelId) => {
       const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(channelId);
       if (!channel) return socket.emit('error', 'Channel not found');
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+        return socket.emit('error', 'Missing permission: view_channels');
+      }
       socket.currentChannel = channelId;
     });
 
     socket.on('thread:join', (threadId) => {
-      const thread = db.prepare('SELECT id FROM threads WHERE id = ?').get(threadId);
+      const thread = db.prepare('SELECT id, channel_id FROM threads WHERE id = ?').get(threadId);
       if (!thread) return socket.emit('error', 'Thread not found');
+      if (!hasChannelPermission(user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) {
+        return socket.emit('error', 'Missing permission: view_channels');
+      }
       socket.join(`thread:${threadId}`);
     });
 
@@ -312,13 +409,21 @@ function setupSocketHandlers(io) {
       const hasAttachment = attachment && typeof attachment.url === 'string';
       if (!channelId || (!hasText && !hasAttachment)) return;
       if (content && content.length > 2000) return socket.emit('error', 'Message too long (max 2000 chars)');
-      if (hasAttachment && !((user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.SEND_MEDIA) !== 0))) {
-        return socket.emit('error', 'Missing permission: send_media');
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+        return socket.emit('error', 'Missing permission: view_channels');
       }
-      const canEmbedLinks = (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.EMBED_LINKS) !== 0);
-
+      if (!canReadChannelHistory(user, channelId)) {
+        return socket.emit('error', 'Missing permission: read_chat_history');
+      }
       const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
       if (!channel) return socket.emit('error', 'Channel not found');
+      if (!canSendToChannel(user, channelId, channel.type, threadId)) {
+        return socket.emit('error', 'Missing permission: send_messages');
+      }
+      if (hasAttachment && !hasChannelPermission(user, channelId, PERMISSIONS.ATTACH_FILES, db)) {
+        return socket.emit('error', 'Missing permission: send_media');
+      }
+      const canEmbedLinks = hasChannelPermission(user, channelId, PERMISSIONS.EMBED_LINKS, db);
       if (threadId) {
         const thread = db.prepare('SELECT id, channel_id FROM threads WHERE id = ?').get(threadId);
         if (!thread || thread.channel_id !== channelId) return socket.emit('error', 'Thread not found');
@@ -330,7 +435,7 @@ function setupSocketHandlers(io) {
       // Check slowmode
       const channelSettings = db.prepare('SELECT slowmode FROM channel_settings WHERE channel_id = ?').get(channelId);
       if (channelSettings && channelSettings.slowmode > 0) {
-        const hasBypass = (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.BYPASS_SLOWMODE) !== 0);
+        const hasBypass = hasChannelPermission(user, channelId, PERMISSIONS.BYPASS_SLOWMODE, db);
         if (!hasBypass) {
           const lastMessage = db.prepare(`
             SELECT created_at FROM messages
@@ -387,6 +492,14 @@ function setupSocketHandlers(io) {
           if (!u?.username) return match;
           return `@${u.username}`;
         });
+
+        const externalUse = detectExternalExpressionUsage(trimmed);
+        if (externalUse.usesExternalEmote && !hasChannelPermission(user, channelId, PERMISSIONS.USE_EXTERNAL_EMOTES, db)) {
+          return socket.emit('error', 'Missing permission: use_external_emotes');
+        }
+        if (externalUse.usesExternalSticker && !hasChannelPermission(user, channelId, PERMISSIONS.USE_EXTERNAL_STICKERS, db)) {
+          return socket.emit('error', 'Missing permission: use_external_stickers');
+        }
       }
       const attachmentUrl = hasAttachment ? attachment.url : null;
       const attachmentType = hasAttachment ? attachment.mime : null;
@@ -487,9 +600,10 @@ function setupSocketHandlers(io) {
       if (!content?.trim()) return;
       const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
       if (!msg) return socket.emit('error', 'Message not found');
-      const canEdit = msg.user_id === user.id || (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.EDIT_MESSAGES) !== 0);
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
+      const canEdit = msg.user_id === user.id || hasChannelPermission(user, msg.channel_id, PERMISSIONS.EDIT_MESSAGES, db);
       if (!canEdit) return socket.emit('error', 'Not allowed');
-      const canEmbedLinks = (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.EMBED_LINKS) !== 0);
+      const canEmbedLinks = hasChannelPermission(user, msg.channel_id, PERMISSIONS.EMBED_LINKS, db);
       const channel = db.prepare('SELECT type FROM channels WHERE id = ?').get(msg.channel_id);
       if (channel?.type === 'media') {
         return socket.emit('error', 'Media channels do not allow text edits');
@@ -508,7 +622,8 @@ function setupSocketHandlers(io) {
     socket.on('message:delete', ({ messageId }) => {
       const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
       if (!msg) return socket.emit('error', 'Message not found');
-      const canDelete = msg.user_id === user.id || (user.is_owner || user.role === 'owner') || ((user.permissions & PERMISSIONS.DELETE_MESSAGES) !== 0);
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
+      const canDelete = msg.user_id === user.id || hasChannelPermission(user, msg.channel_id, PERMISSIONS.DELETE_MESSAGES, db);
       if (!canDelete) return socket.emit('error', 'Not allowed');
 
       db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
@@ -526,10 +641,13 @@ function setupSocketHandlers(io) {
 
     // ── Typing indicator ───────────────────────────────────────────────────────
     socket.on('typing:start', ({ channelId }) => {
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
+      if (!canSendToChannel(user, channelId, db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId)?.type, null)) return;
       socket.to(channelId).emit('typing:update', { userId: user.id, username: user.username, typing: true });
     });
 
     socket.on('typing:stop', ({ channelId }) => {
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
       socket.to(channelId).emit('typing:update', { userId: user.id, username: user.username, typing: false });
     });
 

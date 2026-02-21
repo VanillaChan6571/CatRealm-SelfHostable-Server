@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const db = require('../db');
+const { PERMISSIONS, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows } = require('../messageCrypto');
 
 function attachNsfwTags(messages) {
@@ -30,6 +31,12 @@ router.get('/:channelId', (req, res) => {
 
   const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(channelId);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
 
   let messages;
   if (before) {

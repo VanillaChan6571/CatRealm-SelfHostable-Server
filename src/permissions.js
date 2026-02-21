@@ -64,6 +64,10 @@ const PERMISSIONS = {
   ADMINISTRATOR: 1 << 43,
 };
 
+// External expression usage (kept aligned with current client role editor values).
+PERMISSIONS.USE_EXTERNAL_EMOTES = 0x40000;
+PERMISSIONS.USE_EXTERNAL_STICKERS = 0x2000000000;
+
 // Backward-compatible aliases used across older routes/components.
 PERMISSIONS.SEND_MEDIA = PERMISSIONS.ATTACH_FILES;
 PERMISSIONS.MANAGE_SERVER = PERMISSIONS.MANAGE_ROLES;
@@ -72,6 +76,7 @@ PERMISSIONS.EDIT_MESSAGES = PERMISSIONS.MANAGE_MESSAGES;
 PERMISSIONS.DELETE_MESSAGES = PERMISSIONS.MANAGE_MESSAGES;
 PERMISSIONS.CREATE_THREADS = PERMISSIONS.CREATE_PUBLIC_THREADS;
 PERMISSIONS.CREATE_INVITES = PERMISSIONS.CREATE_INVITE;
+PERMISSIONS.USE_EXTERNAL_EMOJIS = PERMISSIONS.USE_EXTERNAL_EMOTES;
 
 function toPermissionBits(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0n;
@@ -186,4 +191,28 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
   return Number(permissions);
 }
 
-module.exports = { PERMISSIONS, ALL_PERMISSIONS, hasPermission, computePermissionsForUser, computeChannelPermissions };
+function computeUserChannelPermissions(user, channelId, db) {
+  if (!user) return 0;
+  if (user.is_owner || user.role === 'owner') return ALL_PERMISSIONS;
+  return computeChannelPermissions(user.id, channelId, user.permissions || 0, db);
+}
+
+function hasChannelPermission(user, channelId, permission, db) {
+  if (!user) return false;
+  if (user.is_owner || user.role === 'owner') return true;
+  const channelBits = toPermissionBits(computeUserChannelPermissions(user, channelId, db));
+  const permissionBits = toPermissionBits(permission);
+  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
+  if ((channelBits & administratorMask) === administratorMask) return true;
+  return (channelBits & permissionBits) === permissionBits;
+}
+
+module.exports = {
+  PERMISSIONS,
+  ALL_PERMISSIONS,
+  hasPermission,
+  computePermissionsForUser,
+  computeChannelPermissions,
+  computeUserChannelPermissions,
+  hasChannelPermission,
+};

@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const { randomUUID } = require('crypto');
 const db = require('../db');
-const { PERMISSIONS, hasPermission } = require('../permissions');
+const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows } = require('../messageCrypto');
 
 function attachNsfwTags(messages) {
@@ -28,6 +28,12 @@ function attachNsfwTags(messages) {
 router.get('/', (req, res) => {
   const { channelId } = req.query;
   if (!channelId) return res.status(400).json({ error: 'channelId required' });
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
   const threads = db.prepare('SELECT * FROM threads WHERE channel_id = ? ORDER BY created_at DESC').all(channelId);
   res.json(threads);
 });
@@ -39,6 +45,9 @@ router.post('/', (req, res) => {
   }
   const { channelId, messageId, name } = req.body ?? {};
   if (!channelId || !messageId) return res.status(400).json({ error: 'channelId and messageId required' });
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
   const msg = db.prepare('SELECT id, channel_id FROM messages WHERE id = ?').get(messageId);
   if (!msg || msg.channel_id !== channelId) {
     return res.status(400).json({ error: 'Message not in channel' });
@@ -115,6 +124,12 @@ router.get('/:id/messages', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 100);
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(id);
   if (!thread) return res.status(404).json({ error: 'Thread not found' });
+  if (!hasChannelPermission(req.user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, thread.channel_id, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
 
   let messages;
   if (before) {
