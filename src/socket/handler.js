@@ -26,6 +26,7 @@ function emitServerInfoUpdate(info) {
 
 function emitPermissionsChanged() {
   if (!ioInstance) return;
+  refreshAllOnlineRoleMetadata();
   ioInstance.emit('permissions:changed');
 }
 
@@ -569,6 +570,58 @@ function buildOnlineList() {
     accountType: info.account_type || 'local',
     verified: info.verified || false,
   }));
+}
+
+function refreshAllOnlineRoleMetadata() {
+  if (!ioInstance) return;
+  if (onlineUsers.size === 0) return;
+
+  const topRoleStmt = db.prepare(`
+    SELECT r.color, r.hoist, r.icon, r.name, r.position
+    FROM roles r
+    JOIN user_roles ur ON ur.role_id = r.id
+    WHERE ur.user_id = ?
+    ORDER BY r.position DESC
+    LIMIT 1
+  `);
+  const userStmt = db.prepare(`
+    SELECT
+      u.username,
+      u.role,
+      u.is_owner,
+      u.avatar,
+      u.status,
+      u.activity_type,
+      u.activity_text,
+      u.account_type,
+      COALESCE(dno.display_name, u.display_name) as effective_display_name
+    FROM users u
+    LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+    WHERE u.id = ?
+  `);
+
+  for (const [userId, entry] of onlineUsers.entries()) {
+    const topRole = topRoleStmt.get(userId);
+    const userRow = userStmt.get(userId);
+    if (!userRow) continue;
+    entry.username = userRow.username || entry.username;
+    entry.role = userRow.role || entry.role;
+    entry.is_owner = userRow.is_owner ? 1 : 0;
+    entry.role_color = topRole?.color || null;
+    entry.role_hoist = topRole?.hoist || 0;
+    entry.role_icon = topRole?.icon || null;
+    entry.role_name = topRole?.name || null;
+    entry.role_position = topRole?.position || 0;
+    entry.avatar = userRow.avatar || null;
+    entry.status = userRow.status || 'online';
+    entry.display_name = userRow.effective_display_name || null;
+    entry.activity_type = userRow.activity_type || null;
+    entry.activity_text = userRow.activity_text || null;
+    entry.account_type = userRow.account_type || entry.account_type || 'local';
+    onlineUsers.set(userId, entry);
+  }
+
+  ioInstance.emit('presence:update', buildOnlineList());
 }
 // Broadcast channel list changes to all connected clients
 function broadcastChannelUpdate() {
