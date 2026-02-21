@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 const { hasPermission, PERMISSIONS } = require('../permissions');
+const { getSetting, setSetting } = require('../settings');
 const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
@@ -17,6 +18,12 @@ const PUBLIC_IP_PROVIDERS = [
   'https://ifconfig.me/ip',
   'https://checkip.amazonaws.com',
 ];
+const DISCOVERY_INVITE_SETTING_KEY = 'discovery_invite_code';
+
+function isOwnerLevelUser(user) {
+  if (!user) return false;
+  return Boolean(user.is_owner) || user.role === 'owner';
+}
 
 // Generate random invite code
 function generateInviteCode() {
@@ -333,6 +340,150 @@ async function registerInviteWithAuth(inviteData) {
   });
 }
 
+function requestToAuthServer({ path, method, payload = null, timeoutMs = 10000 }) {
+  return new Promise((resolve) => {
+    try {
+      const authServerUrl = getAuthServerUrl();
+      const apiUrl = new URL(`${authServerUrl}${path}`);
+      const httpLib = apiUrl.protocol === 'https:' ? https : http;
+      const body = payload ? JSON.stringify(payload) : null;
+
+      const request = httpLib.request({
+        hostname: apiUrl.hostname,
+        port: apiUrl.port,
+        path: `${apiUrl.pathname}${apiUrl.search || ''}`,
+        method,
+        headers: body ? {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        } : {},
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          let parsed = null;
+          try {
+            parsed = data ? JSON.parse(data) : null;
+          } catch {
+            parsed = null;
+          }
+          const ok = Number(res.statusCode || 500) >= 200 && Number(res.statusCode || 500) < 300;
+          resolve({
+            ok,
+            status: Number(res.statusCode || 500),
+            data: parsed,
+            error: parsed?.error || (!ok ? `Auth request failed with status ${res.statusCode}` : null),
+          });
+        });
+      });
+
+      request.setTimeout(timeoutMs, () => {
+        request.destroy(new Error('Auth request timed out'));
+      });
+
+      request.on('error', (err) => {
+        resolve({ ok: false, status: 502, data: null, error: err.message || 'Auth request failed' });
+      });
+
+      if (body) request.write(body);
+      request.end();
+    } catch (err) {
+      resolve({ ok: false, status: 500, data: null, error: err.message || 'Invalid auth request' });
+    }
+  });
+}
+
+async function deleteInviteFromAuth(code) {
+  return requestToAuthServer({
+    path: `/api/invites/${encodeURIComponent(code)}`,
+    method: 'DELETE',
+  });
+}
+
+async function deleteDiscoveryFromAuth(code) {
+  return requestToAuthServer({
+    path: `/api/discovery/by-invite/${encodeURIComponent(code)}`,
+    method: 'DELETE',
+  });
+}
+
+async function registerDiscoveryWithAuth(code, publishedBy) {
+  return requestToAuthServer({
+    path: '/api/discovery/register',
+    method: 'POST',
+    payload: {
+      inviteCode: code,
+      publishedBy: publishedBy || null,
+    },
+  });
+}
+
+async function createInviteAndRegister(req, inviteInput) {
+  const serverUrl = await resolvePublicServerUrl(req);
+  const authServerUrl = getAuthServerUrl();
+  const clientUrl = getPublicClientUrl(req);
+  const channelId = inviteInput.channelId || null;
+  const normalizedMaxUses = Number(inviteInput.maxUses) || 0;
+  const normalizedExpiresIn = Number(inviteInput.expiresIn) || 0;
+  const expiresAt = normalizedExpiresIn > 0 ? Math.floor(Date.now() / 1000) + normalizedExpiresIn : null;
+  const maxAttempts = authServerUrl ? 8 : 1;
+  let lastAuthError = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const code = generateInviteCode();
+    try {
+      db.prepare(`
+        INSERT INTO invites (code, channel_id, creator_user_id, max_uses, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(code, channelId, inviteInput.creatorId, normalizedMaxUses, expiresAt);
+    } catch {
+      continue;
+    }
+
+    if (authServerUrl) {
+      const registration = await registerInviteWithAuth({
+        code,
+        serverUrl,
+        channelId,
+        creatorId: inviteInput.creatorId,
+        maxUses: normalizedMaxUses,
+        expiresAt,
+      });
+      if (!registration.ok) {
+        db.prepare('DELETE FROM invites WHERE code = ?').run(code);
+        lastAuthError = registration;
+        if (registration.status === 409) continue;
+        return {
+          ok: false,
+          status: 502,
+          error: formatInviteRegistrationError(registration, serverUrl),
+        };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        code,
+        centralUrl: registration.centralUrl || `${clientUrl}/invite/${code}`,
+        directUrl: `${serverUrl}/invite/${code}`,
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      code,
+      centralUrl: null,
+      directUrl: `${serverUrl}/invite/${code}`,
+    };
+  }
+
+  if (lastAuthError?.error) {
+    return { ok: false, status: 500, error: lastAuthError.error };
+  }
+  return { ok: false, status: 500, error: 'Failed to generate a unique invite code' };
+}
+
 // GET /api/invites - List all invites (admin only)
 router.get('/', authenticateToken, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
@@ -371,68 +522,125 @@ router.post('/', authenticateToken, async (req, res) => {
     }
   }
 
-  const serverUrl = await resolvePublicServerUrl(req);
-  const authServerUrl = getAuthServerUrl();
+  const created = await createInviteAndRegister(req, {
+    channelId: channelId || null,
+    maxUses: maxUses || 0,
+    expiresIn: expiresIn || 0,
+    creatorId: req.user.id,
+  });
+  if (!created.ok) {
+    return res.status(created.status || 500).json({ error: created.error || 'Failed to create invite' });
+  }
+  return res.json({
+    code: created.code,
+    centralUrl: created.centralUrl,
+    directUrl: created.directUrl,
+  });
+});
+
+// GET /api/invites/discovery/status - Owner-only discovery publication status
+router.get('/discovery/status', authenticateToken, (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!isOwnerLevelUser(user)) {
+    return res.status(403).json({ error: 'Only server owner can manage discovery publication', owner: false });
+  }
+
+  const inviteCode = String(getSetting(DISCOVERY_INVITE_SETTING_KEY, '') || '').trim();
+  if (!inviteCode) {
+    return res.json({ owner: true, published: false });
+  }
+
+  const invite = db.prepare('SELECT code, max_uses, expires_at FROM invites WHERE code = ?').get(inviteCode);
+  if (!invite) {
+    setSetting(DISCOVERY_INVITE_SETTING_KEY, '');
+    return res.json({ owner: true, published: false });
+  }
+
   const clientUrl = getPublicClientUrl(req);
-  const normalizedMaxUses = Number(maxUses) || 0;
-  const normalizedExpiresIn = Number(expiresIn) || 0;
-  const expiresAt = normalizedExpiresIn ? Math.floor(Date.now() / 1000) + normalizedExpiresIn : null;
-  const maxAttempts = authServerUrl ? 8 : 1;
-  let lastAuthError = null;
+  return res.json({
+    owner: true,
+    published: true,
+    inviteCode,
+    inviteUrl: `${clientUrl}/invite/${encodeURIComponent(inviteCode)}`,
+    permanent: Number(invite.max_uses || 0) === 0 && invite.expires_at === null,
+  });
+});
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const code = generateInviteCode();
+// POST /api/invites/discovery/publish - Owner-only publish using permanent invite
+router.post('/discovery/publish', authenticateToken, async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!isOwnerLevelUser(user)) {
+    return res.status(403).json({ error: 'Only server owner can publish server discovery' });
+  }
 
-    try {
-      db.prepare(`
-        INSERT INTO invites (code, channel_id, creator_user_id, max_uses, expires_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(code, channelId || null, req.user.id, normalizedMaxUses, expiresAt);
-    } catch (err) {
-      // Local duplicate, regenerate code and retry.
-      continue;
-    }
-
-    if (authServerUrl) {
-      const registration = await registerInviteWithAuth({
-        code,
-        serverUrl,
-        channelId,
-        creatorId: req.user.id,
-        maxUses: normalizedMaxUses,
-        expiresAt,
-      });
-
-      if (!registration.ok) {
-        db.prepare('DELETE FROM invites WHERE code = ?').run(code);
-        lastAuthError = registration;
-        // Duplicate/rejected code on auth, retry with another code.
-        if (registration.status === 409) {
-          continue;
-        }
-        return res.status(502).json({
-          error: formatInviteRegistrationError(registration, serverUrl),
-        });
+  const existingCode = String(getSetting(DISCOVERY_INVITE_SETTING_KEY, '') || '').trim();
+  if (existingCode) {
+    const existingInvite = db.prepare('SELECT code, max_uses, expires_at FROM invites WHERE code = ?').get(existingCode);
+    if (existingInvite && Number(existingInvite.max_uses || 0) === 0 && existingInvite.expires_at === null) {
+      const discoveryRegistration = await registerDiscoveryWithAuth(existingCode, req.user.id);
+      if (!discoveryRegistration.ok) {
+        return res.status(502).json({ error: discoveryRegistration.error || 'Failed to refresh discovery registration' });
       }
-
+      const clientUrl = getPublicClientUrl(req);
       return res.json({
-        code,
-        centralUrl: registration.centralUrl || `${clientUrl}/invite/${code}`,
-        directUrl: `${serverUrl}/invite/${code}`,
+        success: true,
+        inviteCode: existingCode,
+        inviteUrl: `${clientUrl}/invite/${encodeURIComponent(existingCode)}`,
+        published: true,
       });
     }
-
-    return res.json({
-      code,
-      centralUrl: null,
-      directUrl: `${serverUrl}/invite/${code}`,
-    });
+    setSetting(DISCOVERY_INVITE_SETTING_KEY, '');
   }
 
-  if (lastAuthError?.error) {
-    return res.status(500).json({ error: lastAuthError.error });
+  const created = await createInviteAndRegister(req, {
+    channelId: null,
+    maxUses: 0,
+    expiresIn: 0,
+    creatorId: req.user.id,
+  });
+  if (!created.ok || !created.code) {
+    return res.status(created.status || 500).json({ error: created.error || 'Failed to create permanent invite for discovery' });
   }
-  return res.status(500).json({ error: 'Failed to generate a unique invite code' });
+
+  const discoveryRegistration = await registerDiscoveryWithAuth(created.code, req.user.id);
+  if (!discoveryRegistration.ok) {
+    db.prepare('DELETE FROM invites WHERE code = ?').run(created.code);
+    await deleteInviteFromAuth(created.code);
+    return res.status(502).json({ error: discoveryRegistration.error || 'Failed to publish discovery entry' });
+  }
+
+  setSetting(DISCOVERY_INVITE_SETTING_KEY, created.code);
+  return res.json({
+    success: true,
+    inviteCode: created.code,
+    inviteUrl: created.centralUrl || created.directUrl,
+    published: true,
+  });
+});
+
+// DELETE /api/invites/discovery/unpublish - Owner-only unpublish (revokes discovery invite)
+router.delete('/discovery/unpublish', authenticateToken, async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!isOwnerLevelUser(user)) {
+    return res.status(403).json({ error: 'Only server owner can unpublish server discovery' });
+  }
+
+  const inviteCode = String(
+    req.body?.inviteCode
+    || getSetting(DISCOVERY_INVITE_SETTING_KEY, '')
+    || ''
+  ).trim();
+
+  if (!inviteCode) {
+    return res.json({ success: true, published: false });
+  }
+
+  db.prepare('DELETE FROM invites WHERE code = ?').run(inviteCode);
+  setSetting(DISCOVERY_INVITE_SETTING_KEY, '');
+  await deleteInviteFromAuth(inviteCode);
+  await deleteDiscoveryFromAuth(inviteCode);
+
+  return res.json({ success: true, published: false });
 });
 
 // DELETE /api/invites/:code - Revoke invite
@@ -442,39 +650,19 @@ router.delete('/:code', authenticateToken, async (req, res) => {
     return res.status(403).json({ error: 'Missing permission: MANAGE_SERVER' });
   }
 
-  const result = db.prepare('DELETE FROM invites WHERE code = ?').run(req.params.code);
+  const code = String(req.params.code || '').trim();
+  const result = db.prepare('DELETE FROM invites WHERE code = ?').run(code);
 
   if (result.changes === 0) {
     return res.status(404).json({ error: 'Invite not found' });
   }
 
-  // Delete from central auth server
-  const authServerUrl = getAuthServerUrl();
-  try {
-    const apiUrl = new URL(`${authServerUrl}/api/invites/${req.params.code}`);
-    const httpLib = apiUrl.protocol === 'https:' ? https : http;
-
-    await new Promise((resolve) => {
-      const req = httpLib.request({
-        hostname: apiUrl.hostname,
-        port: apiUrl.port,
-        path: apiUrl.pathname,
-        method: 'DELETE',
-      }, (res) => {
-        res.on('data', () => {});
-        res.on('end', () => resolve(true));
-      });
-
-      req.on('error', (err) => {
-        console.error('[Invites] Error deleting from auth server:', err.message);
-        resolve(false);
-      });
-
-      req.end();
-    });
-  } catch (err) {
-    console.error('[Invites] Error in deleteFromAuth:', err);
+  if (String(getSetting(DISCOVERY_INVITE_SETTING_KEY, '') || '').trim() === code) {
+    setSetting(DISCOVERY_INVITE_SETTING_KEY, '');
   }
+
+  await deleteInviteFromAuth(code);
+  await deleteDiscoveryFromAuth(code);
 
   res.json({ success: true });
 });
