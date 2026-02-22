@@ -266,7 +266,7 @@ function setupSocketHandlers(io) {
       const online = onlineUsers.get(user.id);
       const voiceUser = {
         id: user.id,
-        username: user.username,
+        username: online?.display_name || user.display_name || user.username,
         role: user.role,
         isOwner: !!user.is_owner,
         roleColor: online?.role_color || null,
@@ -428,6 +428,144 @@ function setupSocketHandlers(io) {
           data,
         });
       }
+    });
+
+    socket.on('voice:mod:state', ({ channelId, userId, muted, deafened }, ack) => {
+      if (!channelId || !userId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId or userId' });
+        return;
+      }
+      const room = voiceRooms.get(channelId);
+      if (!room) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Voice room not found' });
+        return;
+      }
+      const entry = room.get(userId);
+      if (!entry) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Member is not in this voice channel' });
+        return;
+      }
+
+      const nextMuted = typeof muted === 'boolean' ? muted : entry.muted;
+      const nextDeafened = typeof deafened === 'boolean' ? deafened : entry.deafened;
+      if (nextMuted === entry.muted && nextDeafened === entry.deafened) {
+        if (typeof ack === 'function') ack({ ok: true, unchanged: true });
+        return;
+      }
+
+      if (nextMuted !== entry.muted && !hasChannelPermission(user, channelId, PERMISSIONS.SERVER_MUTE_MEMBERS, db)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: server_mute_members' });
+        return;
+      }
+      if (nextDeafened !== entry.deafened && !hasChannelPermission(user, channelId, PERMISSIONS.SERVER_DEAFEN_MEMBERS, db)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: server_deafen_members' });
+        return;
+      }
+
+      entry.muted = !!nextMuted;
+      entry.deafened = !!nextDeafened;
+      entry.user.muted = !!nextMuted;
+      entry.user.deafened = !!nextDeafened;
+      room.set(userId, entry);
+
+      io.to(`voice:${channelId}`).emit('voice:user-state', {
+        channelId,
+        userId,
+        muted: !!nextMuted,
+        deafened: !!nextDeafened,
+      });
+      io.to(`voice:${channelId}`).emit('voice:sync', {
+        channelId,
+        users: Array.from(room.values()).map((e) => e.user),
+      });
+      emitVoiceRoomSync(io, channelId);
+      if (typeof ack === 'function') ack({ ok: true });
+    });
+
+    socket.on('voice:mod:move', ({ fromChannelId, toChannelId, userId }, ack) => {
+      if (!fromChannelId || !toChannelId || !userId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing fromChannelId, toChannelId, or userId' });
+        return;
+      }
+      if (fromChannelId === toChannelId) {
+        if (typeof ack === 'function') ack({ ok: true, unchanged: true });
+        return;
+      }
+
+      const fromChannel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(fromChannelId);
+      const toChannel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(toChannelId);
+      if (!fromChannel || !toChannel || fromChannel.type !== 'voice' || toChannel.type !== 'voice') {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Invalid voice channel target' });
+        return;
+      }
+      if (!hasChannelPermission(user, fromChannelId, PERMISSIONS.MOVE_VOICE_MEMBERS, db) || !hasChannelPermission(user, toChannelId, PERMISSIONS.MOVE_VOICE_MEMBERS, db)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: move_voice_members' });
+        return;
+      }
+
+      const fromRoom = voiceRooms.get(fromChannelId);
+      if (!fromRoom) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Source voice room not found' });
+        return;
+      }
+      const sourceEntry = fromRoom.get(userId);
+      if (!sourceEntry) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Member is not in the source voice channel' });
+        return;
+      }
+      const targetSocket = io.sockets.sockets.get(sourceEntry.socketId);
+      if (!targetSocket) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Target client is no longer connected' });
+        return;
+      }
+
+      const targetSettings = db.prepare('SELECT user_limit FROM channel_settings WHERE channel_id = ?').get(toChannelId);
+      const existingTargetRoom = voiceRooms.get(toChannelId);
+      const targetCount = existingTargetRoom ? existingTargetRoom.size : 0;
+      const alreadyInTarget = !!existingTargetRoom?.has(userId);
+      if (targetSettings && targetSettings.user_limit > 0 && !alreadyInTarget && targetCount >= targetSettings.user_limit) {
+        if (typeof ack === 'function') ack({ ok: false, error: `Target voice channel is full (${targetCount}/${targetSettings.user_limit})` });
+        return;
+      }
+
+      const online = onlineUsers.get(userId);
+      const movedVoiceUser = {
+        ...sourceEntry.user,
+        username: online?.display_name || sourceEntry.user.username,
+        roleColor: online?.role_color || sourceEntry.user.roleColor || null,
+        avatar: online?.avatar || sourceEntry.user.avatar || null,
+        status: online?.status || sourceEntry.user.status || 'online',
+        muted: !!sourceEntry.muted,
+        deafened: !!sourceEntry.deafened,
+      };
+
+      leaveVoiceRoom(io, targetSocket, fromChannelId, userId);
+
+      let targetRoom = voiceRooms.get(toChannelId);
+      if (!targetRoom) {
+        targetRoom = new Map();
+        voiceRooms.set(toChannelId, targetRoom);
+      }
+      targetRoom.set(userId, {
+        socketId: sourceEntry.socketId,
+        muted: !!sourceEntry.muted,
+        deafened: !!sourceEntry.deafened,
+        user: movedVoiceUser,
+      });
+      targetSocket.currentVoiceChannel = toChannelId;
+      targetSocket.join(`voice:${toChannelId}`);
+
+      const payload = {
+        channelId: toChannelId,
+        users: Array.from(targetRoom.values()).map((entry) => entry.user),
+        you: userId,
+      };
+      targetSocket.emit('voice:users', payload);
+      targetSocket.emit('voice:join:ok', payload);
+      targetSocket.to(`voice:${toChannelId}`).emit('voice:user-joined', { channelId: toChannelId, user: movedVoiceUser });
+      emitVoiceRoomCount(io, toChannelId);
+      emitVoiceRoomSync(io, toChannelId);
+      if (typeof ack === 'function') ack({ ok: true });
     });
 
     // ── Set active channel (for typing indicators only) ────────────────────────
