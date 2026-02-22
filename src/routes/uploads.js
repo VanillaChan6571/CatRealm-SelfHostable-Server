@@ -2,7 +2,7 @@ const router = require('express').Router();
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { PERMISSIONS, hasPermission } = require('../permissions');
+const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { getSetting } = require('../settings');
 
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
@@ -39,16 +39,28 @@ const upload = multer({
 });
 
 // POST /api/uploads/chat
-router.post('/chat', (req, res, next) => {
-  if (!hasPermission(req.user, PERMISSIONS.SEND_MEDIA)) {
+router.post('/chat', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'File required' });
+
+  const cleanupUploadedFile = () => {
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
+  };
+
+  const channelId = typeof req.body?.channelId === 'string' ? req.body.channelId.trim() : '';
+  if (channelId) {
+    if (!hasChannelPermission(req.user, channelId, PERMISSIONS.ATTACH_FILES, req.db)) {
+      cleanupUploadedFile();
+      return res.status(403).json({ error: 'Missing permission: send_media' });
+    }
+  } else if (!hasPermission(req.user, PERMISSIONS.SEND_MEDIA)) {
+    // Backward-compatible fallback for older clients that do not send channelId.
+    cleanupUploadedFile();
     return res.status(403).json({ error: 'Missing permission: send_media' });
   }
-  next();
-}, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'File required' });
+
   const maxBytes = Number(getSetting('media_max_mb', '20')) * 1024 * 1024;
   if (req.file.size > maxBytes) {
-    fs.unlink(req.file.path, () => {});
+    cleanupUploadedFile();
     return res.status(400).json({ error: `File exceeds ${getSetting('media_max_mb', '20')}MB limit` });
   }
   res.json({
