@@ -282,6 +282,50 @@ function setupSocketHandlers(io) {
         room = new Map();
         voiceRooms.set(channelId, room);
       }
+      const existingInTargetRoom = room.get(user.id);
+      const replacedExistingSession = !!existingInTargetRoom && existingInTargetRoom.socketId !== socket.id;
+
+      // Enforce one active voice session per account across all clients/devices.
+      for (const [otherChannelId, otherRoom] of voiceRooms.entries()) {
+        if (otherChannelId === channelId) continue;
+        const otherEntry = otherRoom.get(user.id);
+        if (!otherEntry || otherEntry.socketId === socket.id) continue;
+        const otherSocket = io.sockets.sockets.get(otherEntry.socketId);
+        if (otherSocket) {
+          otherSocket.emit('voice:force-disconnect', {
+            channelId: otherChannelId,
+            reason: 'duplicate_client',
+            message: 'Meow! You were disconnected because you connected on a different cat client!',
+          });
+          leaveVoiceRoom(io, otherSocket, otherChannelId, user.id);
+        } else {
+          otherRoom.delete(user.id);
+          if (otherRoom.size === 0) {
+            voiceRooms.delete(otherChannelId);
+            emitVoiceRoomCount(io, otherChannelId);
+            io.emit('voice:room-sync', { channelId: otherChannelId, users: [] });
+          } else {
+            io.to(`voice:${otherChannelId}`).emit('voice:user-left', { channelId: otherChannelId, userId: user.id });
+            emitVoiceRoomCount(io, otherChannelId);
+            emitVoiceRoomSync(io, otherChannelId);
+          }
+        }
+      }
+
+      if (replacedExistingSession) {
+        const previousSocket = io.sockets.sockets.get(existingInTargetRoom.socketId);
+        if (previousSocket) {
+          previousSocket.emit('voice:force-disconnect', {
+            channelId,
+            reason: 'duplicate_client',
+            message: 'Meow! You were disconnected because you connected on a different cat client!',
+          });
+          previousSocket.leave(`voice:${channelId}`);
+          if (previousSocket.currentVoiceChannel === channelId) {
+            previousSocket.currentVoiceChannel = null;
+          }
+        }
+      }
       room.set(user.id, { socketId: socket.id, muted: !!muted, deafened: !!deafened, user: voiceUser });
       socket.currentVoiceChannel = channelId;
       socket.join(`voice:${channelId}`);
@@ -296,7 +340,9 @@ function setupSocketHandlers(io) {
       if (typeof ack === 'function') {
         ack({ ok: true, ...payload });
       }
-      socket.to(`voice:${channelId}`).emit('voice:user-joined', { channelId, user: voiceUser });
+      if (!replacedExistingSession) {
+        socket.to(`voice:${channelId}`).emit('voice:user-joined', { channelId, user: voiceUser });
+      }
       emitVoiceRoomCount(io, channelId);
       emitVoiceRoomSync(io, channelId);
     });
