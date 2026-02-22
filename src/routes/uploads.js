@@ -2,6 +2,7 @@ const router = require('express').Router();
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { getSetting } = require('../settings');
 
@@ -48,7 +49,7 @@ router.post('/chat', upload.single('file'), (req, res) => {
 
   const channelId = typeof req.body?.channelId === 'string' ? req.body.channelId.trim() : '';
   if (channelId) {
-    if (!hasChannelPermission(req.user, channelId, PERMISSIONS.ATTACH_FILES, req.db)) {
+    if (!hasChannelPermission(req.user, channelId, PERMISSIONS.ATTACH_FILES, db)) {
       cleanupUploadedFile();
       return res.status(403).json({ error: 'Missing permission: send_media' });
     }
