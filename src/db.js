@@ -2,11 +2,24 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
 const pteroLog = require('./logger');
-
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../data/catrealm.db');
-
-// Make sure data directory exists
 const fs = require('fs');
+
+function resolveDbPath() {
+  const raw = process.env.DB_PATH || path.join(__dirname, '../data/catrealm.db');
+  if (
+    typeof raw === 'string' &&
+    raw.startsWith('/mnt/server/') &&
+    !fs.existsSync('/mnt/server') &&
+    fs.existsSync('/home/container')
+  ) {
+    const remapped = raw.replace(/^\/mnt\/server(?=\/|$)/, '/home/container');
+    pteroLog(`[CatRealm] DB_PATH fallback: ${raw} -> ${remapped} (missing /mnt/server mount)`);
+    return remapped;
+  }
+  return raw;
+}
+
+const DB_PATH = resolveDbPath();
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
