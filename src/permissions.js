@@ -76,9 +76,9 @@ const PERMISSIONS = {
   ...FLAT_PERMISSIONS,
 };
 
-// External expression usage (kept aligned with current client role editor values).
-PERMISSIONS.USE_EXTERNAL_EMOTES = 0x40000;
-PERMISSIONS.USE_EXTERNAL_STICKERS = 0x2000000000;
+// External expression usage. These must not collide with grouped permission bits.
+PERMISSIONS.USE_EXTERNAL_EMOTES = bit(44);
+PERMISSIONS.USE_EXTERNAL_STICKERS = bit(45);
 
 // Backward-compatible aliases used across older routes/components.
 PERMISSIONS.SEND_MEDIA = USER_GENERAL.ATTACH_FILES;

@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # CatRealm self-hosted startup with optional git auto-update.
 # Safe defaults:
@@ -7,7 +7,7 @@ set -euo pipefail
 # - GIT_BRANCH=main
 # - GIT_REPO can be omitted; origin remote is used when available.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 AUTO_UPDATE="${AUTO_UPDATE:-true}"
@@ -18,7 +18,8 @@ echo "[CatRealm] Startup launcher"
 echo "[CatRealm] Root: $ROOT_DIR"
 
 normalize_bool() {
-  case "${1,,}" in
+  value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
     1|true|yes|on) return 0 ;;
     *) return 1 ;;
   esac

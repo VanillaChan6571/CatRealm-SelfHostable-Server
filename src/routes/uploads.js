@@ -5,9 +5,19 @@ const multer = require('multer');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { getSetting } = require('../settings');
+const {
+  classifyChatUploadForCompression,
+  compressChatImageInline,
+  enqueueChatVideoCompression,
+} = require('../mediaCompression');
 
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
 if (!fs.existsSync(UGC_IMAGES_DIR)) fs.mkdirSync(UGC_IMAGES_DIR, { recursive: true });
+
+const MEDIA_REMOVE_LIMITS = (() => {
+  const value = String(process.env.MEDIA_REMOVE_LIMITS || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+})();
 
 const MIME_TO_EXT = {
   'image/png': '.png',
@@ -30,9 +40,14 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: {
-    fileSize: 200 * 1024 * 1024,
-  },
+  ...(MEDIA_REMOVE_LIMITS
+    ? {}
+    : {
+        limits: {
+          // Hard ceiling matches owner-configurable media_max_mb upper bound.
+          fileSize: 980 * 1024 * 1024,
+        },
+      }),
   fileFilter: (_req, file, cb) => {
     if (!MIME_TO_EXT[file.mimetype]) return cb(new Error('Invalid file type'));
     cb(null, true);
@@ -40,7 +55,7 @@ const upload = multer({
 });
 
 // POST /api/uploads/chat
-router.post('/chat', upload.single('file'), (req, res) => {
+router.post('/chat', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'File required' });
 
   const cleanupUploadedFile = () => {
@@ -59,15 +74,28 @@ router.post('/chat', upload.single('file'), (req, res) => {
     return res.status(403).json({ error: 'Missing permission: send_media' });
   }
 
-  const maxBytes = Number(getSetting('media_max_mb', '20')) * 1024 * 1024;
+  const mediaMaxMb = Number(getSetting('media_max_mb', '50'));
+  const maxBytes = mediaMaxMb * 1024 * 1024;
   if (req.file.size > maxBytes) {
     cleanupUploadedFile();
-    return res.status(400).json({ error: `File exceeds ${getSetting('media_max_mb', '20')}MB limit` });
+    return res.status(400).json({ error: `File exceeds ${mediaMaxMb}MB limit` });
   }
+
+  let finalSize = req.file.size;
+  const compressionType = classifyChatUploadForCompression(req.file);
+  if (compressionType.kind === 'image') {
+    const result = await compressChatImageInline(req.file);
+    if (typeof result?.sizeAfter === 'number' && Number.isFinite(result.sizeAfter) && result.sizeAfter > 0) {
+      finalSize = result.sizeAfter;
+    }
+  } else if (compressionType.kind === 'video') {
+    enqueueChatVideoCompression(req.file);
+  }
+
   res.json({
     url: `/ugc/images/${req.file.filename}`,
     mime: req.file.mimetype,
-    size: req.file.size,
+    size: finalSize,
   });
 });
 

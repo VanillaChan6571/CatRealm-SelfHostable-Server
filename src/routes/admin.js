@@ -131,6 +131,11 @@ function logAuditAction(actionType, moderatorId, targetId = null, details = null
   `).run(id, actionType, moderatorId, targetId, details ? JSON.stringify(details) : null);
 }
 
+function isMediaHardLimitRemoved() {
+  const value = String(process.env.MEDIA_REMOVE_LIMITS || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
 // GET /api/admin/settings
 router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   const name = getSetting('server_name', process.env.SERVER_NAME || 'CatRealm Server');
@@ -142,7 +147,7 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     'registration_open',
     process.env.REGISTRATION_OPEN !== 'false' ? 'true' : 'false'
   );
-  const mediaMaxMb = Number(getSetting('media_max_mb', '20'));
+  const mediaMaxMb = Number(getSetting('media_max_mb', '50'));
   const maxPins = Number(getSetting('max_pins', '300'));
   const avatarMaxMb = Number(getSetting('avatar_max_mb', '10'));
   const mentionAlias = getSetting('mention_alias', '@everyone');
@@ -152,6 +157,7 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
   const maxAnimatedEmotes = Number(getSetting('max_animated_emotes', '50'));
   const maxStickers = Number(getSetting('max_stickers', '100'));
   const maxAnimatedStickers = Number(getSetting('max_animated_stickers', '50'));
+  const mediaRemoveLimits = isMediaHardLimitRemoved();
 
   res.json({
     name,
@@ -167,6 +173,7 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     maxAnimatedEmotes,
     maxStickers,
     maxAnimatedStickers,
+    mediaRemoveLimits,
   });
 });
 
@@ -194,8 +201,11 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
   }
 
   if (req.user?.is_owner) {
-    if (typeof req.body?.mediaMaxMb === 'number' && req.body.mediaMaxMb >= 1 && req.body.mediaMaxMb <= 200) {
-      setSetting('media_max_mb', String(req.body.mediaMaxMb));
+    const mediaMaxMb = Number(req.body?.mediaMaxMb);
+    if (Number.isFinite(mediaMaxMb) && mediaMaxMb >= 1 && Number.isInteger(mediaMaxMb)) {
+      if (isMediaHardLimitRemoved() || mediaMaxMb <= 980) {
+        setSetting('media_max_mb', String(mediaMaxMb));
+      }
     }
     if (typeof req.body?.maxPins === 'number' && req.body.maxPins >= 50 && req.body.maxPins <= 1000) {
       setSetting('max_pins', String(req.body.maxPins));
@@ -221,7 +231,7 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     name: getSetting('server_name', name.trim()),
     description: getSetting('server_description', ''),
     registrationOpen: getSetting('registration_open', 'true') === 'true',
-    mediaMaxMb: Number(getSetting('media_max_mb', '20')),
+    mediaMaxMb: Number(getSetting('media_max_mb', '50')),
     maxPins: Number(getSetting('max_pins', '300')),
     avatarMaxMb: Number(getSetting('avatar_max_mb', '10')),
     mentionAlias: getSetting('mention_alias', '@everyone'),
@@ -231,6 +241,7 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     maxAnimatedEmotes: Number(getSetting('max_animated_emotes', '50')),
     maxStickers: Number(getSetting('max_stickers', '100')),
     maxAnimatedStickers: Number(getSetting('max_animated_stickers', '50')),
+    mediaRemoveLimits: isMediaHardLimitRemoved(),
   };
 
   // Push live server-info updates to all connected clients.
