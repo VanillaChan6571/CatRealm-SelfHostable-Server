@@ -3,7 +3,13 @@ const db = require('../db');
 
 // GET /api/users
 router.get('/', (_req, res) => {
-  const users = db.prepare('SELECT id, username, role, avatar, is_owner FROM users ORDER BY username COLLATE NOCASE').all();
+  const users = db.prepare(`
+    SELECT u.id, u.username, u.role, u.avatar, u.is_owner
+    FROM users u
+    WHERE COALESCE(u.is_member, 1) = 1
+      AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.user_id = u.id)
+    ORDER BY u.username COLLATE NOCASE
+  `).all();
   res.json(users.map((u) => {
     const topRole = db.prepare(`
       SELECT r.color FROM roles r

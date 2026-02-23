@@ -3,7 +3,7 @@ const db = require('../db');
 const { SERVER_MODE } = require('../middleware/auth');
 const { getSetting, setSetting } = require('../settings');
 const { PERMISSIONS, hasPermission } = require('../permissions');
-const { emitServerInfoUpdate, emitPermissionsChanged } = require('../socket/handler');
+const { emitServerInfoUpdate, emitPermissionsChanged, kickUserFromServer } = require('../socket/handler');
 const { randomUUID } = require('crypto');
 const multer = require('multer');
 const path = require('path');
@@ -248,7 +248,13 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
 
 // GET /api/admin/users
 router.get('/users', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) => {
-  const users = db.prepare('SELECT id, username, role, avatar, bio, is_owner FROM users ORDER BY username COLLATE NOCASE').all();
+  const users = db.prepare(`
+    SELECT u.id, u.username, u.role, u.avatar, u.bio, u.is_owner
+    FROM users u
+    WHERE COALESCE(u.is_member, 1) = 1
+      AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.user_id = u.id)
+    ORDER BY u.username COLLATE NOCASE
+  `).all();
   const roleRows = db.prepare('SELECT user_id, role_id FROM user_roles').all();
   const rolesByUser = new Map();
   for (const row of roleRows) {
@@ -590,19 +596,25 @@ router.post('/users/:id/kick', requirePermission(PERMISSIONS.KICK_MEMBER), (req,
   const { id } = req.params;
   const { reason } = req.body || {};
 
-  const user = db.prepare('SELECT id, username, is_owner FROM users WHERE id = ?').get(id);
+  const user = db.prepare('SELECT id, username, is_owner, is_member FROM users WHERE id = ?').get(id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (user.is_owner) return res.status(400).json({ error: 'Cannot kick the server owner' });
+  if (Number(user.is_member ?? 1) !== 1) {
+    return res.status(400).json({ error: 'User is not currently a server member' });
+  }
 
-  // For kick, we'll just disconnect them (they can rejoin)
-  // In a real implementation, you might want to temporarily block reconnection
+  db.prepare('UPDATE users SET is_member = 0 WHERE id = ?').run(id);
+
   logAuditAction('MEMBER_KICK', req.user.id, id, {
     username: user.username,
     reason
   });
 
-  // Emit socket event to disconnect the user (handled by socket handler)
-  // For now, just log it
+  emitPermissionsChanged();
+  kickUserFromServer(id, {
+    reason: typeof reason === 'string' ? reason : '',
+    message: `Meow! You were kicked from this server.`
+  });
   res.json({ success: true, kicked: user.username });
 });
 
@@ -625,10 +637,17 @@ router.post('/users/:id/ban', requirePermission(PERMISSIONS.BAN_MEMBER), (req, r
     INSERT INTO bans (user_id, banned_by, reason, created_at)
     VALUES (?, ?, ?, unixepoch())
   `).run(id, req.user.id, reason || null);
+  db.prepare('UPDATE users SET is_member = 0 WHERE id = ?').run(id);
 
   logAuditAction('MEMBER_BAN', req.user.id, id, {
     username: user.username,
     reason
+  });
+
+  emitPermissionsChanged();
+  kickUserFromServer(id, {
+    reason: typeof reason === 'string' ? reason : '',
+    message: 'Meow! You were banned from this server.'
   });
 
   res.json({ success: true, banned: user.username });

@@ -52,6 +52,25 @@ function emitServerImportStatus(status, data) {
   ioInstance.emit('server:import:status', { status, ...data });
 }
 
+function kickUserFromServer(userId, payload = {}) {
+  if (!ioInstance || !userId) return 0;
+  const entry = onlineUsers.get(userId);
+  if (!entry?.sockets?.size) return 0;
+  let count = 0;
+  for (const socketId of Array.from(entry.sockets)) {
+    const socket = ioInstance.sockets.sockets.get(socketId);
+    if (!socket) continue;
+    try {
+      socket.emit('server:kicked', { removeServer: true, ...payload });
+    } catch (_err) {
+      // Best-effort notify before disconnect.
+    }
+    socket.disconnect(true);
+    count += 1;
+  }
+  return count;
+}
+
 function detectExternalExpressionUsage(text) {
   if (typeof text !== 'string' || !text.includes(':')) {
     return { usesExternalEmote: false, usesExternalSticker: false };
@@ -119,7 +138,14 @@ function setupSocketHandlers(io) {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('No token'));
     try {
-      socket.user = jwt.verify(token, JWT_SECRET);
+      const payload = jwt.verify(token, JWT_SECRET);
+      const dbUser = db.prepare('SELECT id, is_member FROM users WHERE id = ?').get(payload.id);
+      if (!dbUser) return next(new Error('Invalid token'));
+      if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(dbUser.id)) {
+        return next(new Error('Banned from server'));
+      }
+      if (Number(dbUser.is_member ?? 1) !== 1) return next(new Error('Removed from server'));
+      socket.user = payload;
       next();
     } catch {
       next(new Error('Invalid token'));
@@ -952,6 +978,7 @@ module.exports.emitMessage = emitMessage;
 module.exports.emitServerInfoUpdate = emitServerInfoUpdate;
 module.exports.emitServerImportStatus = emitServerImportStatus;
 module.exports.emitPermissionsChanged = emitPermissionsChanged;
+module.exports.kickUserFromServer = kickUserFromServer;
 module.exports.updateOnlineUserAvatar = (userId, avatar) => {
   const entry = onlineUsers.get(userId);
   if (!entry || !ioInstance) return;

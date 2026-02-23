@@ -69,6 +69,13 @@ router.post('/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password)) {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
+  if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(user.id)) {
+    return res.status(403).json({ error: 'You are banned from this server' });
+  }
+  if (Number(user.is_member ?? 1) !== 1) {
+    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(user.id);
+    user.is_member = 1;
+  }
 
   const permissions = computePermissionsForUser(user.id, user.role, user.is_owner, db);
   const token = jwt.sign(
@@ -219,6 +226,13 @@ router.post('/central', async (req, res) => {
     }
 
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  } else if (Number(localUser.is_member ?? 1) !== 1) {
+    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(localUser.id);
+    localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
+  }
+
+  if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(localUser.id)) {
+    return res.status(403).json({ error: 'You are banned from this server' });
   }
 
   // Sync central avatar into local record when no server-specific avatar is set

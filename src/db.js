@@ -399,6 +399,10 @@ if (!userColumns.includes('central_id')) {
   db.prepare('ALTER TABLE users ADD COLUMN central_id TEXT').run();
   pteroLog('[CatRealm] Added users.central_id column');
 }
+if (!userColumns.includes('is_member')) {
+  db.prepare('ALTER TABLE users ADD COLUMN is_member INTEGER NOT NULL DEFAULT 1').run();
+  pteroLog('[CatRealm] Added users.is_member column');
+}
 if (!userColumns.includes('account_type')) {
   db.prepare("ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'local'").run();
   pteroLog('[CatRealm] Added users.account_type column');
