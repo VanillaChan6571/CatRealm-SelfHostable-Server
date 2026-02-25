@@ -594,6 +594,35 @@ function setupSocketHandlers(io) {
       if (typeof ack === 'function') ack({ ok: true });
     });
 
+    socket.on('voice:mod:disconnect', ({ channelId, userId }, ack) => {
+      if (!channelId || !userId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId or userId' });
+        return;
+      }
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.MOVE_VOICE_MEMBERS, db)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: move_voice_members' });
+        return;
+      }
+      const room = voiceRooms.get(channelId);
+      if (!room) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Voice room not found' });
+        return;
+      }
+      const entry = room.get(userId);
+      if (!entry) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Member is not in this voice channel' });
+        return;
+      }
+      const targetSocket = io.sockets.sockets.get(entry.socketId);
+      if (!targetSocket) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Target client is no longer connected' });
+        return;
+      }
+      leaveVoiceRoom(io, targetSocket, channelId, userId);
+      targetSocket.emit('voice:force-disconnect', { channelId, reason: 'mod-disconnect', message: 'You were disconnected from voice by a moderator.' });
+      if (typeof ack === 'function') ack({ ok: true });
+    });
+
     // ── Set active channel (for typing indicators only) ────────────────────────
     socket.on('channel:join', (channelId) => {
       const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(channelId);

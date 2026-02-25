@@ -339,9 +339,14 @@ router.post('/:type', authenticateToken, (req, res) => {
       for (const localPath of processed.cleanupPaths || []) {
         fs.unlink(localPath, () => {});
       }
-      if (String(insertErr.message || '').includes('idx_expressions_name_type')) {
+      const insertMsg = String(insertErr?.message || '');
+      if (
+        insertMsg.includes('idx_expressions_name_type') ||
+        insertMsg.includes('UNIQUE constraint failed: expressions.name, expressions.type')
+      ) {
         return res.status(409).json({ error: `An expression named "${req.expressionMeta.name}" already exists in ${type}` });
       }
+      console.error('[Expressions] Failed to save expression:', insertErr);
       return res.status(500).json({ error: 'Failed to save expression' });
     }
 
@@ -367,9 +372,14 @@ router.patch('/:id', authenticateToken, (req, res) => {
   try {
     db.prepare('UPDATE expressions SET name = ? WHERE id = ?').run(nextName, req.params.id);
   } catch (err) {
-    if (String(err.message || '').includes('idx_expressions_name_type')) {
+    const errMsg = String(err?.message || '');
+    if (
+      errMsg.includes('idx_expressions_name_type') ||
+      errMsg.includes('UNIQUE constraint failed: expressions.name, expressions.type')
+    ) {
       return res.status(409).json({ error: `An expression named "${nextName}" already exists in ${row.type}` });
     }
+    console.error('[Expressions] Failed to rename expression:', err);
     return res.status(500).json({ error: 'Failed to rename expression' });
   }
 
