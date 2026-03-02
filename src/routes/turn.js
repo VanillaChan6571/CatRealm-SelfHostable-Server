@@ -35,6 +35,31 @@ function buildFallbackIceServers() {
   ];
 }
 
+function normalizeUrls(urls) {
+  if (!urls) return [];
+  return Array.isArray(urls) ? urls : [urls];
+}
+
+function mergeIceServers(primary = [], fallback = []) {
+  const merged = [];
+  const seen = new Set();
+
+  const add = (server) => {
+    const urlsKey = normalizeUrls(server.urls).sort().join('|');
+    if (!urlsKey) return;
+    const username = server.username || '';
+    const credential = typeof server.credential === 'string' ? server.credential : '';
+    const key = `${urlsKey}::${username}::${credential}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(server);
+  };
+
+  primary.forEach(add);
+  fallback.forEach(add);
+  return merged;
+}
+
 // GET /api/turn/credentials
 // Returns TURN server credentials for WebRTC
 router.get('/credentials', (req, res) => {
@@ -121,7 +146,7 @@ router.get('/credentials', (req, res) => {
   }
 
   res.json({
-    iceServers,
+    iceServers: mergeIceServers(iceServers, buildFallbackIceServers()),
     ttl: 86400, // Credentials valid for 24 hours
     usingFallback: false,
     mode,
