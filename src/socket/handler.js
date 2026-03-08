@@ -840,8 +840,8 @@ function setupSocketHandlers(io) {
       const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
       if (!msg) return socket.emit('error', 'Message not found');
       if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
-      const canEdit = msg.user_id === user.id || hasChannelPermission(user, msg.channel_id, PERMISSIONS.EDIT_MESSAGES, db);
-      if (!canEdit) return socket.emit('error', 'Not allowed');
+      // Message edits are sender-only. Moderation permissions allow delete, not content rewrite.
+      if (msg.user_id !== user.id) return socket.emit('error', 'Not allowed');
       const canEmbedLinks = hasChannelPermission(user, msg.channel_id, PERMISSIONS.EMBED_LINKS, db);
       const channel = db.prepare('SELECT type FROM channels WHERE id = ?').get(msg.channel_id);
       if (channel?.type === 'media') {
