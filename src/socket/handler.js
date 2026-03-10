@@ -643,9 +643,15 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, threadId, replyToId, forwardFromId, nsfwTags }) => {
+    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, nsfwTags }) => {
+      // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
+      const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
+        .filter((a) => a && typeof a.url === 'string');
+      if (attachmentsArray.length === 0 && attachment && typeof attachment.url === 'string') {
+        attachmentsArray.push(attachment);
+      }
       const hasText = typeof content === 'string' && content.trim().length > 0;
-      const hasAttachment = attachment && typeof attachment.url === 'string';
+      const hasAttachment = attachmentsArray.length > 0;
       if (!channelId || (!hasText && !hasAttachment)) return;
       if (content && content.length > 2000) return socket.emit('error', 'Message too long (max 2000 chars)');
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
@@ -740,9 +746,11 @@ function setupSocketHandlers(io) {
           return socket.emit('error', 'Missing permission: use_external_stickers');
         }
       }
-      const attachmentUrl = hasAttachment ? attachment.url : null;
-      const attachmentType = hasAttachment ? attachment.mime : null;
-      const attachmentSize = hasAttachment ? attachment.size : null;
+      const firstAtt = attachmentsArray[0] ?? null;
+      const attachmentUrl = firstAtt ? firstAtt.url : null;
+      const attachmentType = firstAtt ? firstAtt.mime : null;
+      const attachmentSize = firstAtt ? firstAtt.size : null;
+      const attachmentsJson = attachmentsArray.length > 0 ? JSON.stringify(attachmentsArray) : null;
       const normalizedNsfwTags = hasAttachment && Array.isArray(nsfwTags)
         ? Array.from(new Set(
           nsfwTags
@@ -754,13 +762,13 @@ function setupSocketHandlers(io) {
       db.prepare(`
         INSERT INTO messages (
           id, channel_id, user_id, content, created_at,
-          attachment_url, attachment_type, attachment_size, message_type, thread_id,
+          attachment_url, attachment_type, attachment_size, attachments, message_type, thread_id,
           reply_to_id, forward_from_id, forward_from_user, forward_from_channel, embeds_enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, channelId, user.id, encryptMessageContent(trimmed), now,
-        attachmentUrl, attachmentType, attachmentSize, 'user', threadId || null,
+        attachmentUrl, attachmentType, attachmentSize, attachmentsJson, 'user', threadId || null,
         replyToId || null,
         forwardFrom?.id || null,
         forwardFrom?.username || null,
@@ -802,6 +810,7 @@ function setupSocketHandlers(io) {
         attachment_url: attachmentUrl,
         attachment_type: attachmentType,
         attachment_size: attachmentSize,
+        attachments: attachmentsArray,
         nsfw_tags: normalizedNsfwTags,
         message_type: 'user',
         thread_id: threadId || null,
