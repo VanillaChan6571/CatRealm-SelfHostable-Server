@@ -606,7 +606,6 @@ const { randomUUID } = require('crypto');
 db.prepare(`UPDATE channels SET type = 'basic' WHERE type IN ('text', 'announcement')`).run();
 
 // Add attachments JSON column to messages
-const messageColumns = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
 if (!messageColumns.includes('attachments')) {
   db.prepare('ALTER TABLE messages ADD COLUMN attachments TEXT').run();
   pteroLog('[CatRealm] Added messages.attachments column');
