@@ -470,19 +470,41 @@ function setupConsoleCommands(db) {
   }
 
   let stdinBuffer = '';
+  let pendingSingleCommandTimer = null;
+
+  function flushPendingSingleCommand() {
+    if (pendingSingleCommandTimer) {
+      clearTimeout(pendingSingleCommandTimer);
+      pendingSingleCommandTimer = null;
+    }
+    const single = stdinBuffer.trim();
+    stdinBuffer = '';
+    if (single.length > 0) {
+      handleCommand(single);
+    }
+  }
+
   process.stdin.on('data', (chunk) => {
     const text = String(chunk || '');
     if (!text) return;
     stdinBuffer += text;
 
     if (!/[\r\n]/.test(stdinBuffer)) {
-      // Pterodactyl may deliver one full command without newline.
-      const single = stdinBuffer.trim();
-      if (single.length > 0) {
-        handleCommand(single);
-        stdinBuffer = '';
+      // Some hosts deliver a full command without a newline, while others
+      // stream one keystroke at a time. Debounce briefly so both work.
+      if (pendingSingleCommandTimer) {
+        clearTimeout(pendingSingleCommandTimer);
       }
+      pendingSingleCommandTimer = setTimeout(() => {
+        pendingSingleCommandTimer = null;
+        flushPendingSingleCommand();
+      }, 120);
       return;
+    }
+
+    if (pendingSingleCommandTimer) {
+      clearTimeout(pendingSingleCommandTimer);
+      pendingSingleCommandTimer = null;
     }
 
     const lines = stdinBuffer.split(/\r?\n/);
