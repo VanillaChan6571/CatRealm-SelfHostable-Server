@@ -2,6 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const readline = require('readline');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 
@@ -347,6 +348,9 @@ function setupConsoleCommands(db) {
 
   try {
     process.stdin.setEncoding('utf8');
+    if (typeof process.stdin.setRawMode === 'function') {
+      process.stdin.setRawMode(false);
+    }
     process.stdin.resume();
   } catch {
     return;
@@ -471,6 +475,7 @@ function setupConsoleCommands(db) {
 
   let stdinBuffer = '';
   let pendingSingleCommandTimer = null;
+  let sawAnyConsoleInput = false;
 
   function flushPendingSingleCommand() {
     if (pendingSingleCommandTimer) {
@@ -484,9 +489,21 @@ function setupConsoleCommands(db) {
     }
   }
 
+  const rl = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+    terminal: false,
+  });
+
+  rl.on('line', (line) => {
+    sawAnyConsoleInput = true;
+    handleCommand(line);
+  });
+
   process.stdin.on('data', (chunk) => {
     const text = String(chunk || '');
     if (!text) return;
+    sawAnyConsoleInput = true;
     stdinBuffer += text;
 
     if (!/[\r\n]/.test(stdinBuffer)) {
@@ -509,12 +526,15 @@ function setupConsoleCommands(db) {
 
     const lines = stdinBuffer.split(/\r?\n/);
     stdinBuffer = lines.pop() || '';
-    for (const line of lines) {
-      handleCommand(line);
-    }
   });
 
   pteroLog('[CatRealm] Console command support enabled. Type "help" for commands.');
+  pteroLog(`[CatRealm] Console stdin state: isTTY=${process.stdin.isTTY ? 1 : 0} readable=${process.stdin.readable ? 1 : 0} fd=${typeof process.stdin.fd === 'number' ? process.stdin.fd : 'n/a'}`);
+  setTimeout(() => {
+    if (!sawAnyConsoleInput) {
+      pteroLog('[CatRealm] Console stdin diagnostic: no input received yet.');
+    }
+  }, 15_000).unref?.();
 }
 
 ensureJwtSecret();
