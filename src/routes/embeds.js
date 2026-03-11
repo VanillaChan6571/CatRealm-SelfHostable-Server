@@ -373,6 +373,7 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
               type: 'media',
               url: toEmbedMediaProxyUrl(mediaUrl),
               mime: 'video/mp4',
+              animated: mediaType === 'gif',
               siteName: 'X',
               title,
               description,
