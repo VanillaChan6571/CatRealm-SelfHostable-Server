@@ -194,6 +194,8 @@ function setupSocketHandlers(io) {
         role_icon: topRole?.icon || null,
         role_name: topRole?.name || null,
         role_position: topRole?.position || 0,
+        role_style_type: topRole?.style_type || 'solid',
+        role_style_colors: topRole?.style_colors || null,
         avatar: userRow?.avatar || null,
         status: userRow?.status || 'online',
         display_name: userRow?.effective_display_name || null,
@@ -928,6 +930,8 @@ function buildOnlineList() {
     roleIcon: info.role_icon || null,
     roleName: info.role_name || null,
     rolePosition: info.role_position || 0,
+    roleStyleType: info.role_style_type || 'solid',
+    roleStyleColors: info.role_style_colors || null,
     avatar: info.avatar || null,
     status: info.status || 'online',
     displayName: info.display_name || null,
@@ -943,7 +947,7 @@ function refreshAllOnlineRoleMetadata() {
   if (onlineUsers.size === 0) return;
 
   const topRoleStmt = db.prepare(`
-    SELECT r.color, r.hoist, r.icon, r.name, r.position
+    SELECT r.color, r.hoist, r.icon, r.name, r.position, r.style_type, r.style_colors
     FROM roles r
     JOIN user_roles ur ON ur.role_id = r.id
     WHERE ur.user_id = ?
@@ -978,6 +982,8 @@ function refreshAllOnlineRoleMetadata() {
     entry.role_icon = topRole?.icon || null;
     entry.role_name = topRole?.name || null;
     entry.role_position = topRole?.position || 0;
+    entry.role_style_type = topRole?.style_type || 'solid';
+    entry.role_style_colors = topRole?.style_colors || null;
     entry.avatar = userRow.avatar || null;
     entry.status = userRow.status || 'online';
     entry.display_name = userRow.effective_display_name || null;

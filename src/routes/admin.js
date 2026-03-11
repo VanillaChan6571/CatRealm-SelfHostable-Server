@@ -377,6 +377,8 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
     hoist = 0,
     icon = null,
     categoryId = null,
+    style_type = 'solid',
+    style_colors = null,
   } = req.body ?? {};
   if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 32) {
     return res.status(400).json({ error: 'Role name must be 2-32 characters' });
@@ -392,8 +394,9 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
   }
   const maxPos = db.prepare('SELECT MAX(position) as m FROM roles').get().m || 0;
   const id = randomUUID();
-  db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(id, name.trim(), color, permissions, maxPos + 1, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon, normalizedCategoryId);
+  const normalizedStyleColors = Array.isArray(style_colors) ? JSON.stringify(style_colors) : (style_colors || null);
+  db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon, category_id, style_type, style_colors) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name.trim(), color, permissions, maxPos + 1, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon, normalizedCategoryId, style_type || 'solid', normalizedStyleColors);
   const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
   emitPermissionsChanged();
   res.status(201).json(role);
@@ -404,7 +407,7 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   const { id } = req.params;
   const existing = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Role not found' });
-  const { name, permissions, color, position, mentionable, hoist, icon, categoryId } = req.body ?? {};
+  const { name, permissions, color, position, mentionable, hoist, icon, categoryId, style_type, style_colors } = req.body ?? {};
   if (typeof name === 'string') {
     if (name.trim().length < 2 || name.trim().length > 32) {
       return res.status(400).json({ error: 'Role name must be 2-32 characters' });
@@ -428,6 +431,13 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   }
   if (typeof icon === 'string' || icon === null) {
     db.prepare('UPDATE roles SET icon = ? WHERE id = ?').run(icon, id);
+  }
+  if (typeof style_type === 'string') {
+    db.prepare('UPDATE roles SET style_type = ? WHERE id = ?').run(style_type, id);
+  }
+  if (style_colors !== undefined) {
+    const normalizedStyleColors = Array.isArray(style_colors) ? JSON.stringify(style_colors) : (style_colors === null ? null : String(style_colors));
+    db.prepare('UPDATE roles SET style_colors = ? WHERE id = ?').run(normalizedStyleColors, id);
   }
   if (categoryId !== undefined) {
     if (categoryId === null || categoryId === '') {

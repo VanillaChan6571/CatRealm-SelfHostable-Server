@@ -556,6 +556,14 @@ if (!roleColumns.includes('category_id')) {
   db.prepare('ALTER TABLE roles ADD COLUMN category_id TEXT').run();
   pteroLog('[CatRealm] Added roles.category_id column');
 }
+if (!roleColumns.includes('style_type')) {
+  db.prepare("ALTER TABLE roles ADD COLUMN style_type TEXT DEFAULT 'solid'").run();
+  pteroLog('[CatRealm] Added roles.style_type column');
+}
+if (!roleColumns.includes('style_colors')) {
+  db.prepare('ALTER TABLE roles ADD COLUMN style_colors TEXT').run();
+  pteroLog('[CatRealm] Added roles.style_colors column');
+}
 try {
   db.prepare('CREATE INDEX IF NOT EXISTS idx_roles_category_id ON roles(category_id)').run();
   db.prepare('CREATE INDEX IF NOT EXISTS idx_role_categories_position ON role_categories(position, name)').run();

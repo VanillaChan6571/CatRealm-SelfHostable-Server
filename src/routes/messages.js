@@ -48,6 +48,21 @@ router.get('/:channelId', (req, res) => {
          WHERE ur.user_id = u.id
          ORDER BY r.position DESC
          LIMIT 1) AS role_color,
+        (SELECT r.icon FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY r.position DESC
+         LIMIT 1) AS role_icon,
+        (SELECT r.style_type FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY r.position DESC
+         LIMIT 1) AS role_style_type,
+        (SELECT r.style_colors FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY r.position DESC
+         LIMIT 1) AS role_style_colors,
         rm.id as reply_to_msg_id,
         rm.user_id as reply_to_user_id,
         rm.content as reply_to_content,
@@ -69,6 +84,21 @@ router.get('/:channelId', (req, res) => {
          WHERE ur.user_id = u.id
          ORDER BY r.position DESC
          LIMIT 1) AS role_color,
+        (SELECT r.icon FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY r.position DESC
+         LIMIT 1) AS role_icon,
+        (SELECT r.style_type FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY r.position DESC
+         LIMIT 1) AS role_style_type,
+        (SELECT r.style_colors FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY r.position DESC
+         LIMIT 1) AS role_style_colors,
         rm.id as reply_to_msg_id,
         rm.user_id as reply_to_user_id,
         rm.content as reply_to_content,
@@ -119,7 +149,19 @@ const SEARCH_SELECT = `
     (SELECT r.color FROM roles r
      JOIN user_roles ur ON ur.role_id = r.id
      WHERE ur.user_id = u.id
-     ORDER BY r.position DESC LIMIT 1) AS role_color
+     ORDER BY r.position DESC LIMIT 1) AS role_color,
+    (SELECT r.icon FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY r.position DESC LIMIT 1) AS role_icon,
+    (SELECT r.style_type FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY r.position DESC LIMIT 1) AS role_style_type,
+    (SELECT r.style_colors FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY r.position DESC LIMIT 1) AS role_style_colors
   FROM messages m
   JOIN users u ON u.id = m.user_id
   LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
