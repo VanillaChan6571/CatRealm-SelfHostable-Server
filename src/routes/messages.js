@@ -114,7 +114,6 @@ router.get('/:channelId', (req, res) => {
 
 const SEARCH_SELECT = `
   SELECT m.id, m.content, m.created_at, m.user_id,
-    m.attachment_url, m.attachment_type, m.attachments, m.forward_from_id,
     u.username, u.avatar,
     COALESCE(dno.display_name, u.display_name) as display_name,
     (SELECT r.color FROM roles r
@@ -269,16 +268,24 @@ router.get('/:channelId/search', (req, res) => {
     const paginationSql    = before ? ` AND m.created_at < ?` : '';
     const paginationParams = before ? [before] : [];
 
+    const needsJsFilter = hasTypes.includes('link') || hasTypes.includes('embed');
+    const fetchLimit = needsJsFilter ? limit * 3 + 1 : limit + 1;
+
     const fullSql = `${SEARCH_SELECT} ${WHERE_BASE}${filterSql}${contentSql}${paginationSql} ${ORDER_LIMIT}`;
-    const allParams = [channelId, ...filterParams, ...contentParams, ...paginationParams, limit + 1];
-    // Fetch extra to account for link/embed JS post-filter trimming
-    const fetchLimit = hasTypes.includes('link') || hasTypes.includes('embed') ? limit * 3 + 1 : limit + 1;
-    const rows = db.prepare(fullSql).all(...[...allParams.slice(0, -1), fetchLimit]);
+    const allParams = [channelId, ...filterParams, ...contentParams, ...paginationParams, fetchLimit];
+    const rows = db.prepare(fullSql).all(...allParams);
     const decrypted = decryptMessageRows(rows);
-    const filtered = decrypted.filter(jsFilter);
-    const hasMore = filtered.length > limit;
-    if (hasMore) filtered.pop();
-    return res.json({ results: filtered, hasMore });
+
+    if (needsJsFilter) {
+      const filtered = decrypted.filter(jsFilter);
+      const hasMore = filtered.length > limit;
+      if (hasMore) filtered.pop();
+      return res.json({ results: filtered, hasMore });
+    }
+
+    const hasMore = decrypted.length > limit;
+    if (hasMore) decrypted.pop();
+    return res.json({ results: decrypted, hasMore });
   }
 
   // Secure mode: SQL for non-content filters, then decrypt + JS filter
