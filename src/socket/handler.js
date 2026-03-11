@@ -172,7 +172,7 @@ function setupSocketHandlers(io) {
       existingEntry.sockets.add(socket.id);
     } else {
       const topRole = db.prepare(`
-        SELECT r.color, r.hoist, r.icon, r.name, r.position FROM roles r
+        SELECT r.color, r.hoist, r.icon, r.name, r.position, r.style_type, r.style_colors FROM roles r
         JOIN user_roles ur ON ur.role_id = r.id
         WHERE ur.user_id = ?
         ORDER BY r.position DESC
