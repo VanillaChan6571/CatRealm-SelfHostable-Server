@@ -37,19 +37,13 @@ function renderLandingPage(info) {
   const escapedDesc = description.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const escapedServerUrl = serverUrl.replace(/"/g, '&quot;');
 
-  // Full-page background: blurred banner or dark gradient fallback
-  const bgStyle = bannerUrl
-    ? `background-image: url('${bannerUrl.replace(/'/g, "\\'")}');`
-    : '';
-  const bgClass = bannerUrl ? 'has-banner' : 'no-banner';
-
   const bannerHtml = bannerUrl
-    ? `<div class="card-banner" style="background-image:url('${bannerUrl.replace(/'/g, "\\'")}')"></div>`
-    : `<div class="card-banner card-banner-placeholder"></div>`;
+    ? `<div style="width:100%;height:128px;background:url('${bannerUrl.replace(/'/g, "\\'")}') center/cover no-repeat;"></div>`
+    : `<div style="width:100%;height:128px;background:linear-gradient(135deg,#2d1f4e 0%,#1a2d4e 50%,#1f3d2d 100%);"></div>`;
 
   const iconHtml = iconUrl
-    ? `<img class="icon" src="${iconUrl.replace(/"/g, '&quot;')}" alt="${escapedName} icon">`
-    : `<div class="icon icon-placeholder"><span>🐱</span></div>`;
+    ? `<img src="${iconUrl.replace(/"/g, '&quot;')}" alt="${escapedName}" style="width:96px;height:96px;border-radius:50%;border:4px solid #1e1b2e;object-fit:cover;background:#2a2438;">`
+    : `<div style="width:96px;height:96px;border-radius:50%;border:4px solid #1e1b2e;background:#3d2f6e;display:flex;align-items:center;justify-content:center;font-size:42px;">🐱</div>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -67,132 +61,197 @@ function renderLandingPage(info) {
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      color: #e0e0e8;
+      color: #e0e0f0;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 24px 16px;
-      position: relative;
+      padding: 24px 16px 48px;
       overflow-x: hidden;
     }
 
-    /* ── Full-page background ── */
-    .bg {
-      position: fixed;
+    /* ── Backdrop (exact match to client) ── */
+    .invite-backdrop {
+      background:
+        radial-gradient(1200px 560px at 12% -10%, rgba(124, 92, 255, 0.18), transparent 60%),
+        radial-gradient(900px 460px at 92% 8%, rgba(103, 232, 249, 0.08), transparent 60%),
+        #171225;
+    }
+
+    /* ── Orbs ── */
+    .invite-orb-a {
+      background: radial-gradient(circle at 35% 35%, rgba(124, 92, 255, 0.34), rgba(124, 92, 255, 0.08) 55%, transparent 72%);
+      animation: inviteDriftOrbA 20s ease-in-out infinite alternate;
+    }
+    .invite-orb-b {
+      background: radial-gradient(circle at 45% 45%, rgba(103, 232, 249, 0.2), rgba(103, 232, 249, 0.06) 54%, transparent 74%);
+      animation: inviteDriftOrbB 23s ease-in-out infinite alternate;
+    }
+
+    /* ── Stars ── */
+    .invite-stars {
+      opacity: 0.86;
+      mix-blend-mode: screen;
+      background-image:
+        radial-gradient(1.4px 1.4px at 14px 26px, rgba(255,255,255,0.9), transparent 62%),
+        radial-gradient(1px 1px at 42px 82px, rgba(222,229,255,0.84), transparent 60%),
+        radial-gradient(1.8px 1.8px at 88px 36px, rgba(214,195,255,0.78), transparent 64%),
+        radial-gradient(2.8px 2.8px at 110px 18px, rgba(255,255,255,0.78), transparent 68%),
+        radial-gradient(1.2px 1.2px at 124px 104px, rgba(197,241,255,0.74), transparent 62%),
+        radial-gradient(1px 1px at 168px 60px, rgba(255,255,255,0.84), transparent 60%),
+        radial-gradient(1.6px 1.6px at 202px 20px, rgba(215,201,255,0.74), transparent 64%),
+        radial-gradient(2.4px 2.4px at 228px 72px, rgba(198,239,255,0.76), transparent 67%),
+        radial-gradient(1px 1px at 236px 96px, rgba(186,245,255,0.76), transparent 60%),
+        radial-gradient(1.4px 1.4px at 264px 52px, rgba(255,255,255,0.8), transparent 62%);
+      background-size: 280px 140px;
+      animation: inviteTwinkle1 7.4s ease-in-out infinite;
+    }
+    .invite-stars::before,
+    .invite-stars::after {
+      content: '';
+      position: absolute;
       inset: 0;
-      z-index: -2;
+      pointer-events: none;
+      background-repeat: repeat;
     }
-    .bg.no-banner {
-      background: linear-gradient(135deg, #1a0e2e 0%, #0e1a2e 40%, #0e2018 100%);
+    .invite-stars::before {
+      opacity: 0.84;
+      background-image:
+        radial-gradient(1.4px 1.4px at 22px 48px, rgba(255,255,255,0.78), transparent 62%),
+        radial-gradient(1px 1px at 58px 20px, rgba(189,168,255,0.72), transparent 60%),
+        radial-gradient(1.8px 1.8px at 102px 84px, rgba(194,240,255,0.8), transparent 64%),
+        radial-gradient(2.6px 2.6px at 132px 26px, rgba(213,198,255,0.76), transparent 68%),
+        radial-gradient(1px 1px at 144px 56px, rgba(255,255,255,0.72), transparent 60%),
+        radial-gradient(1.6px 1.6px at 182px 10px, rgba(205,188,255,0.72), transparent 64%),
+        radial-gradient(2.3px 2.3px at 214px 92px, rgba(189,239,255,0.74), transparent 67%),
+        radial-gradient(1px 1px at 226px 72px, rgba(194,240,255,0.7), transparent 60%),
+        radial-gradient(1.2px 1.2px at 268px 38px, rgba(255,255,255,0.72), transparent 62%);
+      background-size: 300px 120px;
+      animation: inviteTwinkle2 6.1s ease-in-out infinite reverse;
     }
-    .bg.has-banner {
-      background-size: cover;
-      background-position: center;
-      filter: blur(24px);
-      transform: scale(1.08); /* hide blur edges */
+    .invite-stars::after {
+      opacity: 0.72;
+      background-image:
+        radial-gradient(1.2px 1.2px at 34px 18px, rgba(255,255,255,0.74), transparent 62%),
+        radial-gradient(1.7px 1.7px at 74px 68px, rgba(179,154,255,0.72), transparent 64%),
+        radial-gradient(2.5px 2.5px at 96px 42px, rgba(255,255,255,0.72), transparent 67%),
+        radial-gradient(1px 1px at 114px 42px, rgba(197,232,255,0.68), transparent 60%),
+        radial-gradient(1.4px 1.4px at 154px 90px, rgba(255,255,255,0.7), transparent 62%),
+        radial-gradient(2.2px 2.2px at 176px 14px, rgba(198,237,255,0.7), transparent 67%),
+        radial-gradient(1px 1px at 198px 28px, rgba(197,232,255,0.66), transparent 60%),
+        radial-gradient(1.6px 1.6px at 234px 78px, rgba(179,154,255,0.68), transparent 64%),
+        radial-gradient(2.4px 2.4px at 254px 96px, rgba(201,186,255,0.68), transparent 68%),
+        radial-gradient(1px 1px at 272px 50px, rgba(255,255,255,0.72), transparent 60%);
+      background-size: 290px 110px;
+      animation: inviteTwinkle3 8.9s ease-in-out infinite;
     }
-    /* Dark overlay on top of background */
-    .bg-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: -1;
-      background: rgba(6, 6, 12, 0.72);
+
+    /* ── Card breathe ── */
+    .invite-card-breathe {
+      animation: inviteCardBreathe 3.2s ease-in-out infinite;
+    }
+
+    /* ── Keyframes ── */
+    @keyframes inviteDriftOrbA {
+      0%   { transform: translate3d(0,0,0) scale(1); }
+      100% { transform: translate3d(32px,-34px,0) scale(1.08); }
+    }
+    @keyframes inviteDriftOrbB {
+      0%   { transform: translate3d(0,0,0) scale(1); }
+      100% { transform: translate3d(-30px,26px,0) scale(1.06); }
+    }
+    @keyframes inviteTwinkle1 {
+      0%,100% { opacity:0.62; filter:none; transform:scale(1); }
+      26%     { opacity:0.82; filter:drop-shadow(0 0 4px rgba(212,198,255,0.2)); }
+      34%     { opacity:0.98; filter:drop-shadow(0 0 7px rgba(186,245,255,0.28)); transform:scale(1.01); }
+      64%     { opacity:0.76; }
+      81%     { opacity:0.92; filter:drop-shadow(0 0 6px rgba(255,255,255,0.26)); transform:scale(1.005); }
+    }
+    @keyframes inviteTwinkle2 {
+      0%,100% { opacity:0.56; transform:scale(1); }
+      22%     { opacity:0.74; }
+      28%     { opacity:0.9; transform:scale(1.012); }
+      64%     { opacity:0.7; }
+      86%     { opacity:0.84; transform:scale(1.006); }
+    }
+    @keyframes inviteTwinkle3 {
+      0%,100% { opacity:0.5; transform:scale(1); }
+      18%     { opacity:0.62; }
+      45%     { opacity:0.84; transform:scale(1.01); }
+      70%     { opacity:0.64; }
+      91%     { opacity:0.78; transform:scale(1.004); }
+    }
+    @keyframes inviteCardBreathe {
+      0%,100% {
+        border-color: rgba(255,255,255,0.20);
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 18px 38px rgba(0,0,0,0.38);
+      }
+      50% {
+        border-color: rgba(255,255,255,0.62);
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.32), 0 0 24px rgba(255,255,255,0.28), 0 20px 44px rgba(0,0,0,0.42);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .invite-orb-a, .invite-orb-b,
+      .invite-stars, .invite-stars::before, .invite-stars::after,
+      .invite-card-breathe { animation: none !important; }
     }
 
     /* ── Card ── */
     .card {
-      background: #1a1a26;
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 16px;
+      background: #1e1b2e;
+      border: 1px solid rgba(255,255,255,0.20);
+      border-radius: 12px;
       overflow: hidden;
       width: 100%;
-      max-width: 460px;
-      box-shadow: 0 16px 60px rgba(0,0,0,0.7);
+      max-width: 480px;
     }
 
-    .card-banner {
-      width: 100%;
-      height: 140px;
-      background-size: cover;
-      background-position: center;
-    }
-    .card-banner-placeholder {
-      background: linear-gradient(135deg, #2d1f4e 0%, #1a2d4e 50%, #1f3d2d 100%);
-    }
+    .card-body { padding: 32px; }
 
-    .header {
-      padding: 0 24px 20px;
-      position: relative;
-    }
-
-    .icon {
-      width: 80px;
-      height: 80px;
-      border-radius: 20px;
-      border: 4px solid #1a1a26;
-      margin-top: -40px;
-      display: block;
-      object-fit: cover;
-      background: #2a2a38;
-    }
-    .icon-placeholder {
-      width: 80px;
-      height: 80px;
-      border-radius: 20px;
-      border: 4px solid #1a1a26;
-      margin-top: -40px;
-      background: #2a2a38;
+    .icon-wrap {
       display: flex;
-      align-items: center;
       justify-content: center;
-      font-size: 36px;
+      margin-top: -48px;
+      margin-bottom: 24px;
     }
 
     .server-name {
-      font-size: 22px;
+      text-align: center;
+      font-size: 24px;
       font-weight: 700;
-      color: #f0f0f8;
-      margin-top: 12px;
+      color: #f0eeff;
+      margin-bottom: 8px;
     }
-
-    .server-description {
-      color: #9090a8;
+    .server-desc {
+      text-align: center;
       font-size: 14px;
+      color: #9090b8;
       line-height: 1.5;
-      margin-top: 6px;
+      margin-bottom: 8px;
+    }
+    .server-tagline {
+      text-align: center;
+      font-size: 14px;
+      color: #9090b8;
+      margin-bottom: 24px;
     }
 
-    .stats {
-      display: flex;
-      gap: 16px;
-      margin-top: 14px;
-    }
-
-    .stat {
+    .stats-box {
+      background: #171225;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
       display: flex;
       align-items: center;
-      gap: 6px;
-      font-size: 13px;
-      color: #7878a0;
+      justify-content: space-between;
+      font-size: 14px;
+      color: #9090b8;
     }
-    .stat-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-    }
+    .stat { display: flex; align-items: center; gap: 6px; }
+    .stat-dot { width: 8px; height: 8px; border-radius: 50%; }
     .dot-green { background: #3ba55c; }
     .dot-gray  { background: #72767d; }
-
-    .divider {
-      border: none;
-      border-top: 1px solid #2a2a38;
-      margin: 0 24px;
-    }
-
-    .url-section {
-      padding: 16px 24px;
-    }
 
     .url-label {
       font-size: 11px;
@@ -202,16 +261,15 @@ function renderLandingPage(info) {
       letter-spacing: 0.08em;
       margin-bottom: 8px;
     }
-
     .url-row {
       display: flex;
       align-items: center;
-      background: #12121a;
-      border: 1px solid #2a2a38;
+      background: #0f0d1a;
+      border: 1px solid #2a2448;
       border-radius: 8px;
       overflow: hidden;
+      margin-bottom: 20px;
     }
-
     .url-text {
       flex: 1;
       padding: 9px 12px;
@@ -222,46 +280,44 @@ function renderLandingPage(info) {
       overflow: hidden;
       text-overflow: ellipsis;
     }
-
     .copy-btn {
       padding: 9px 14px;
-      background: #2a2a3a;
+      background: #2a2448;
       border: none;
-      border-left: 1px solid #2a2a38;
+      border-left: 1px solid #2a2448;
       color: #9090b8;
       font-size: 12px;
       cursor: pointer;
       transition: background 0.15s, color 0.15s;
       white-space: nowrap;
     }
-    .copy-btn:hover { background: #33334a; color: #c0c0e0; }
+    .copy-btn:hover { background: #332d5a; color: #c0c0e0; }
     .copy-btn.copied { color: #3ba55c; }
-
-    .actions {
-      padding: 0 24px 24px;
-    }
 
     .btn-join {
       display: block;
       width: 100%;
       padding: 13px;
-      background: #5865f2;
+      background: #7c5cff;
       color: #fff;
       font-size: 15px;
       font-weight: 600;
       text-align: center;
       text-decoration: none;
-      border-radius: 10px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
       transition: background 0.15s, transform 0.1s;
+      margin-bottom: 10px;
     }
-    .btn-join:hover { background: #4752c4; transform: translateY(-1px); }
+    .btn-join:hover { background: #6a4de0; transform: translateY(-1px); }
     .btn-join:active { transform: translateY(0); }
 
     .hint {
       text-align: center;
       font-size: 12px;
       color: #50507a;
-      margin-top: 10px;
+      margin-top: 2px;
     }
     .hint a { color: #6868a8; text-decoration: none; }
     .hint a:hover { text-decoration: underline; }
@@ -272,54 +328,51 @@ function renderLandingPage(info) {
       width: 100%;
       text-align: center;
       font-size: 11px;
-      color: rgba(255,255,255,0.2);
+      color: rgba(255,255,255,0.18);
     }
-    .powered-by a {
-      color: rgba(255,255,255,0.28);
-      text-decoration: none;
-    }
+    .powered-by a { color: rgba(255,255,255,0.26); text-decoration: none; }
     .powered-by a:hover { color: rgba(255,255,255,0.5); }
   </style>
 </head>
-<body>
-  <div class="bg ${bgClass}" style="${bgStyle}"></div>
-  <div class="bg-overlay"></div>
+<body class="invite-backdrop">
+  <!-- Orbs -->
+  <div aria-hidden="true" class="invite-orb-a" style="pointer-events:none;position:fixed;left:-160px;bottom:-190px;height:460px;width:460px;border-radius:50%;opacity:0.80;filter:blur(8px);"></div>
+  <div aria-hidden="true" class="invite-orb-b" style="pointer-events:none;position:fixed;right:-130px;top:88px;height:390px;width:390px;border-radius:50%;opacity:0.70;filter:blur(7px);"></div>
+  <!-- Stars -->
+  <div aria-hidden="true" class="invite-stars" style="pointer-events:none;position:fixed;inset:0;background-repeat:repeat;"></div>
 
-  <div class="card">
-    ${bannerHtml}
-    <div class="header">
-      ${iconHtml}
-      <div class="server-name">${escapedName}</div>
-      <div class="server-description">${escapedDesc}</div>
-      <div class="stats">
-        <div class="stat">
-          <div class="stat-dot dot-green"></div>
-          <span>${memberCount} member${memberCount !== 1 ? 's' : ''}</span>
+  <!-- Card -->
+  <div style="position:relative;z-index:10;width:100%;display:flex;align-items:center;justify-content:center;">
+    <div class="card invite-card-breathe">
+      ${bannerHtml}
+      <div class="card-body">
+        <div class="icon-wrap">${iconHtml}</div>
+        <div class="server-name">${escapedName}</div>
+        ${description ? `<div class="server-desc">${escapedDesc}</div>` : ''}
+        <div class="server-tagline">🐱 You've found a self-hosted CatRealm server</div>
+
+        <div class="stats-box">
+          <div class="stat">
+            <div class="stat-dot dot-green"></div>
+            <span>${memberCount} member${memberCount !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="stat">
+            <div class="stat-dot ${registrationOpen ? 'dot-green' : 'dot-gray'}"></div>
+            <span>Registration ${registrationOpen ? 'open' : 'closed'}</span>
+          </div>
         </div>
-        <div class="stat">
-          <div class="stat-dot ${registrationOpen ? 'dot-green' : 'dot-gray'}"></div>
-          <span>Registration ${registrationOpen ? 'open' : 'closed'}</span>
+
+        <div class="url-label">Server Address</div>
+        <div class="url-row">
+          <div class="url-text" id="serverUrl">${escapedServerUrl}</div>
+          <button class="copy-btn" id="copyBtn" onclick="copyUrl()">Copy</button>
         </div>
-      </div>
-    </div>
 
-    <hr class="divider">
-
-    <div class="url-section">
-      <div class="url-label">Server Address</div>
-      <div class="url-row">
-        <div class="url-text" id="serverUrl">${escapedServerUrl}</div>
-        <button class="copy-btn" id="copyBtn" onclick="copyUrl()">Copy</button>
-      </div>
-    </div>
-
-    <div class="actions">
-      <a class="btn-join" href="https://catrealm.app" target="_blank" rel="noopener">
-        Open CatRealm
-      </a>
-      <div class="hint">
-        Open <a href="https://catrealm.app" target="_blank" rel="noopener">catrealm.app</a>,
-        then paste the server address above to connect.
+        <a class="btn-join" href="https://catrealm.app" target="_blank" rel="noopener">Open CatRealm</a>
+        <div class="hint">
+          Open <a href="https://catrealm.app" target="_blank" rel="noopener">catrealm.app</a>,
+          then paste the server address above to connect.
+        </div>
       </div>
     </div>
   </div>
