@@ -591,6 +591,7 @@ const invitesRoutes = require('./routes/invites');
 const expressionsRoutes = require('./routes/expressions');
 const embedsRoutes = require('./routes/embeds');
 const embedMediaRoutes = require('./routes/embedMedia');
+const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
 
@@ -613,6 +614,9 @@ app.use('/ugc/server', express.static(UGC_SERVER_DIR));
 const UGC_EXPRESSIONS_DIR = process.env.UGC_EXPRESSIONS_DIR || path.join(__dirname, '../data/ugc/expressions');
 if (!fs.existsSync(UGC_EXPRESSIONS_DIR)) fs.mkdirSync(UGC_EXPRESSIONS_DIR, { recursive: true });
 app.use('/ugc/expressions', express.static(UGC_EXPRESSIONS_DIR));
+
+// ── Landing page ───────────────────────────────────────────────────────────────
+app.use('/', landingRoutes);
 
 // ── REST Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRoutes);
