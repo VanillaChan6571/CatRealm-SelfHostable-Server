@@ -37,9 +37,15 @@ function renderLandingPage(info) {
   const escapedDesc = description.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const escapedServerUrl = serverUrl.replace(/"/g, '&quot;');
 
+  // Full-page background: blurred banner or dark gradient fallback
+  const bgStyle = bannerUrl
+    ? `background-image: url('${bannerUrl.replace(/'/g, "\\'")}');`
+    : '';
+  const bgClass = bannerUrl ? 'has-banner' : 'no-banner';
+
   const bannerHtml = bannerUrl
-    ? `<div class="banner" style="background-image:url('${bannerUrl.replace(/'/g, "\\'")}')"></div>`
-    : `<div class="banner banner-placeholder"></div>`;
+    ? `<div class="card-banner" style="background-image:url('${bannerUrl.replace(/'/g, "\\'")}')"></div>`
+    : `<div class="card-banner card-banner-placeholder"></div>`;
 
   const iconHtml = iconUrl
     ? `<img class="icon" src="${iconUrl.replace(/"/g, '&quot;')}" alt="${escapedName} icon">`
@@ -50,6 +56,7 @@ function renderLandingPage(info) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="https://catrealm.app/app/CatRealm.png">
   <title>${escapedName} — CatRealm Server</title>
   <meta name="description" content="${escapedDesc}">
   <meta property="og:title" content="${escapedName}">
@@ -60,32 +67,57 @@ function renderLandingPage(info) {
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0f0f14;
       color: #e0e0e8;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 24px 16px;
+      position: relative;
+      overflow-x: hidden;
     }
 
+    /* ── Full-page background ── */
+    .bg {
+      position: fixed;
+      inset: 0;
+      z-index: -2;
+    }
+    .bg.no-banner {
+      background: linear-gradient(135deg, #1a0e2e 0%, #0e1a2e 40%, #0e2018 100%);
+    }
+    .bg.has-banner {
+      background-size: cover;
+      background-position: center;
+      filter: blur(24px);
+      transform: scale(1.08); /* hide blur edges */
+    }
+    /* Dark overlay on top of background */
+    .bg-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background: rgba(6, 6, 12, 0.72);
+    }
+
+    /* ── Card ── */
     .card {
-      background: #1a1a24;
-      border: 1px solid #2a2a38;
+      background: #1a1a26;
+      border: 1px solid rgba(255,255,255,0.07);
       border-radius: 16px;
       overflow: hidden;
       width: 100%;
       max-width: 460px;
-      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+      box-shadow: 0 16px 60px rgba(0,0,0,0.7);
     }
 
-    .banner {
+    .card-banner {
       width: 100%;
       height: 140px;
       background-size: cover;
       background-position: center;
     }
-    .banner-placeholder {
+    .card-banner-placeholder {
       background: linear-gradient(135deg, #2d1f4e 0%, #1a2d4e 50%, #1f3d2d 100%);
     }
 
@@ -98,7 +130,7 @@ function renderLandingPage(info) {
       width: 80px;
       height: 80px;
       border-radius: 20px;
-      border: 4px solid #1a1a24;
+      border: 4px solid #1a1a26;
       margin-top: -40px;
       display: block;
       object-fit: cover;
@@ -108,7 +140,7 @@ function renderLandingPage(info) {
       width: 80px;
       height: 80px;
       border-radius: 20px;
-      border: 4px solid #1a1a24;
+      border: 4px solid #1a1a26;
       margin-top: -40px;
       background: #2a2a38;
       display: flex;
@@ -234,18 +266,25 @@ function renderLandingPage(info) {
     .hint a { color: #6868a8; text-decoration: none; }
     .hint a:hover { text-decoration: underline; }
 
-    .footer {
+    .powered-by {
+      position: fixed;
+      bottom: 14px;
+      width: 100%;
       text-align: center;
-      padding: 16px;
       font-size: 11px;
-      color: #404060;
-      border-top: 1px solid #1e1e2a;
+      color: rgba(255,255,255,0.2);
     }
-    .footer a { color: #505080; text-decoration: none; }
-    .footer a:hover { color: #7070a8; }
+    .powered-by a {
+      color: rgba(255,255,255,0.28);
+      text-decoration: none;
+    }
+    .powered-by a:hover { color: rgba(255,255,255,0.5); }
   </style>
 </head>
 <body>
+  <div class="bg ${bgClass}" style="${bgStyle}"></div>
+  <div class="bg-overlay"></div>
+
   <div class="card">
     ${bannerHtml}
     <div class="header">
@@ -285,8 +324,8 @@ function renderLandingPage(info) {
     </div>
   </div>
 
-  <div style="position:fixed;bottom:14px;width:100%;text-align:center;font-size:11px;color:#30304a;">
-    Powered by <a href="https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server" target="_blank" rel="noopener" style="color:#40407a;text-decoration:none;">CatRealm Self-Hosted</a>
+  <div class="powered-by">
+    Powered by <a href="https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server" target="_blank" rel="noopener">CatRealm Self-Hosted</a>
   </div>
 
   <script>
@@ -298,11 +337,9 @@ function renderLandingPage(info) {
         btn.classList.add('copied');
         setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
       }).catch(() => {
-        // Fallback for non-secure contexts
         const ta = document.createElement('textarea');
         ta.value = url;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
+        ta.style.cssText = 'position:fixed;opacity:0';
         document.body.appendChild(ta);
         ta.select();
         document.execCommand('copy');
