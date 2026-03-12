@@ -619,6 +619,12 @@ if (!messageColumns.includes('attachments')) {
   pteroLog('[CatRealm] Added messages.attachments column');
 }
 
+// Add voice_expires_at column to messages
+if (!messageColumns.includes('voice_expires_at')) {
+  db.prepare('ALTER TABLE messages ADD COLUMN voice_expires_at INTEGER NULL').run();
+  pteroLog('[CatRealm] Added messages.voice_expires_at column');
+}
+
 // Add NSFW column to channels
 const channelColumns2 = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
 if (!channelColumns2.includes('nsfw')) {

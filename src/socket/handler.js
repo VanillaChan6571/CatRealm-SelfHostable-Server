@@ -21,6 +21,30 @@ const onlineUsers = new Map();
 // Track voice rooms: channelId -> Map<userId, { socketId, muted, deafened, user }>
 const voiceRooms = new Map();
 
+// Cleanup expired voice messages hourly
+setInterval(() => {
+  try {
+    const now = Date.now();
+    const expiredMessages = db.prepare(
+      'SELECT id, attachment_url FROM messages WHERE voice_expires_at IS NOT NULL AND voice_expires_at < ?'
+    ).all(now);
+    if (expiredMessages.length === 0) return;
+    const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
+    for (const msg of expiredMessages) {
+      if (msg.attachment_url && msg.attachment_url.startsWith('/ugc/images/')) {
+        const filePath = path.join(UGC_IMAGES_DIR, msg.attachment_url.replace('/ugc/images/', ''));
+        fs.unlink(filePath, () => {});
+      }
+    }
+    const ids = expiredMessages.map((m) => m.id);
+    const placeholders = ids.map(() => '?').join(', ');
+    db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids);
+    pteroLog(`[CatRealm] Cleaned up ${ids.length} expired voice message(s)`);
+  } catch (err) {
+    pteroLog(`[CatRealm] Voice message cleanup error: ${err}`);
+  }
+}, 60 * 60 * 1000);
+
 let ioInstance = null;
 function emitMessage(channelId, message) {
   if (!ioInstance) return;
@@ -645,7 +669,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, nsfwTags }) => {
+    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, nsfwTags, voice_expires_at }) => {
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
         .filter((a) => a && typeof a.url === 'string');
@@ -761,13 +785,17 @@ function setupSocketHandlers(io) {
             .filter((tag) => ['blood', 'gore', 'violence', 'lewd', 'sexual', 'disturbing'].includes(tag))
         ))
         : [];
+      const normalizedVoiceExpiresAt = (typeof voice_expires_at === 'number' && Number.isFinite(voice_expires_at))
+        ? voice_expires_at
+        : null;
       db.prepare(`
         INSERT INTO messages (
           id, channel_id, user_id, content, created_at,
           attachment_url, attachment_type, attachment_size, attachments, message_type, thread_id,
-          reply_to_id, forward_from_id, forward_from_user, forward_from_channel, embeds_enabled
+          reply_to_id, forward_from_id, forward_from_user, forward_from_channel, embeds_enabled,
+          voice_expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, channelId, user.id, encryptMessageContent(trimmed), now,
         attachmentUrl, attachmentType, attachmentSize, attachmentsJson, 'user', threadId || null,
@@ -775,7 +803,8 @@ function setupSocketHandlers(io) {
         forwardFrom?.id || null,
         forwardFrom?.username || null,
         forwardFrom?.channel_name || null,
-        canEmbedLinks ? 1 : 0
+        canEmbedLinks ? 1 : 0,
+        normalizedVoiceExpiresAt
       );
       if (normalizedNsfwTags.length > 0) {
         const insertTagStmt = db.prepare('INSERT OR IGNORE INTO message_nsfw_tags (message_id, tag) VALUES (?, ?)');
@@ -829,6 +858,7 @@ function setupSocketHandlers(io) {
         forward_from_user: forwardFrom?.username || null,
         forward_from_channel: forwardFrom?.channel_name || null,
         embeds_enabled: canEmbedLinks ? 1 : 0,
+        voice_expires_at: normalizedVoiceExpiresAt,
       };
 
       if (threadId) {

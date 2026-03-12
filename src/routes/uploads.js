@@ -25,6 +25,10 @@ const MIME_TO_EXT = {
   'image/webp': '.webp',
   'image/gif': '.gif',
   'video/mp4': '.mp4',
+  'audio/webm': '.webm',
+  'audio/ogg': '.ogg',
+  'audio/mpeg': '.mp3',
+  'audio/wav': '.wav',
 };
 
 const storage = multer.diskStorage({
@@ -82,7 +86,8 @@ router.post('/chat', upload.single('file'), async (req, res) => {
   }
 
   let finalSize = req.file.size;
-  const compressionType = classifyChatUploadForCompression(req.file);
+  const isAudio = req.file.mimetype.startsWith('audio/');
+  const compressionType = isAudio ? { kind: 'none' } : classifyChatUploadForCompression(req.file);
   if (compressionType.kind === 'image') {
     const result = await compressChatImageInline(req.file);
     if (typeof result?.sizeAfter === 'number' && Number.isFinite(result.sizeAfter) && result.sizeAfter > 0) {

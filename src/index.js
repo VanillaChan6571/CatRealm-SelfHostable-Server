@@ -276,6 +276,31 @@ function ensurePortSync() {
   }
 }
 
+function ensureServerUrl(scheme, domain) {
+  const port = process.env.PORT || '3000';
+  const host = domain || '0.0.0.0';
+  const newUrl = `${scheme}://${host}:${port}`;
+
+  const envPath = path.join(__dirname, '../.env');
+  let envContents = '';
+  if (fs.existsSync(envPath)) {
+    envContents = fs.readFileSync(envPath, 'utf8');
+  }
+
+  process.env.SERVER_URL = newUrl;
+
+  if (/^SERVER_URL=.*$/m.test(envContents)) {
+    const current = ((envContents.match(/^SERVER_URL=(.*)$/m) || [])[1] || '').trim();
+    if (current === newUrl) return;
+    envContents = envContents.replace(/^SERVER_URL=.*$/m, `SERVER_URL=${newUrl}`);
+  } else {
+    envContents = `${envContents.trimEnd()}\nSERVER_URL=${newUrl}\n`;
+  }
+
+  fs.writeFileSync(envPath, envContents, 'utf8');
+  pteroLog(`[CatRealm] Updated SERVER_URL to ${newUrl}`);
+}
+
 function ensureTurnSecretIfPlaceholder() {
   const modeRaw = (process.env.TURN_MODE || '').trim().toLowerCase();
   if (modeRaw && modeRaw !== 'custom') return;
@@ -631,6 +656,7 @@ async function start() {
       const { cert, key } = await initAutoSSL(sslDomain, sslEmail, dnsOpts);
       httpServer = https.createServer({ cert, key }, app);
       pteroLog('[CatRealm] Auto-SSL enabled — serving over HTTPS');
+      ensureServerUrl('https', sslDomain);
     } catch (err) {
       pteroLog(`[CatRealm] Auto-SSL failed: ${err.message}`);
       pteroLog('[CatRealm] Falling back to HTTP');
