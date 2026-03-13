@@ -669,7 +669,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, nsfwTags, voice_expires_at }) => {
+    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at }) => {
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
         .filter((a) => a && typeof a.url === 'string');
@@ -738,7 +738,7 @@ function setupSocketHandlers(io) {
         replyTo.content = decryptMessageContent(replyTo.content);
       }
 
-      // Validate forwardFromId
+      // Validate forwardFromId / forwardMeta
       let forwardFrom = null;
       if (forwardFromId) {
         forwardFrom = db.prepare(`
@@ -750,6 +750,14 @@ function setupSocketHandlers(io) {
         `).get(forwardFromId);
         if (!forwardFrom) return socket.emit('error', 'Forward source not found');
         forwardFrom.content = decryptMessageContent(forwardFrom.content);
+      } else if (forwardMeta && typeof forwardMeta.serverName === 'string') {
+        // Media-only forward: no message ID lookup required
+        forwardFrom = {
+          id: null,
+          username: null,
+          channel_name: String(forwardMeta.serverName).substring(0, 100),
+          forwarded_at: typeof forwardMeta.at === 'number' ? Math.floor(forwardMeta.at) : null,
+        };
       }
 
       const id = randomUUID();
@@ -792,10 +800,10 @@ function setupSocketHandlers(io) {
         INSERT INTO messages (
           id, channel_id, user_id, content, created_at,
           attachment_url, attachment_type, attachment_size, attachments, message_type, thread_id,
-          reply_to_id, forward_from_id, forward_from_user, forward_from_channel, embeds_enabled,
+          reply_to_id, forward_from_id, forward_from_user, forward_from_channel, forward_from_at, embeds_enabled,
           voice_expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, channelId, user.id, encryptMessageContent(trimmed), now,
         attachmentUrl, attachmentType, attachmentSize, attachmentsJson, 'user', threadId || null,
@@ -803,6 +811,7 @@ function setupSocketHandlers(io) {
         forwardFrom?.id || null,
         forwardFrom?.username || null,
         forwardFrom?.channel_name || null,
+        forwardFrom?.forwarded_at ?? null,
         canEmbedLinks ? 1 : 0,
         normalizedVoiceExpiresAt
       );
@@ -857,6 +866,7 @@ function setupSocketHandlers(io) {
         forward_from_id: forwardFrom?.id || null,
         forward_from_user: forwardFrom?.username || null,
         forward_from_channel: forwardFrom?.channel_name || null,
+        forward_from_at: forwardFrom?.forwarded_at ?? null,
         embeds_enabled: canEmbedLinks ? 1 : 0,
         voice_expires_at: normalizedVoiceExpiresAt,
       };
@@ -908,9 +918,20 @@ function setupSocketHandlers(io) {
 
       db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
       if (msg.attachment_url && msg.attachment_url.startsWith('/ugc/images/')) {
-        const baseDir = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
-        const filePath = path.join(baseDir, msg.attachment_url.replace('/ugc/images/', ''));
-        fs.unlink(filePath, () => {});
+        // Only delete the file if no other messages still reference it
+        // (forwarded copies store the same attachment_url or embed the URL in content)
+        const refByAttachment = db.prepare(
+          'SELECT COUNT(*) AS c FROM messages WHERE attachment_url = ?'
+        ).get(msg.attachment_url).c;
+        const urlSuffix = msg.attachment_url.replace('/ugc/images/', '');
+        const refByContent = db.prepare(
+          "SELECT COUNT(*) AS c FROM messages WHERE content LIKE ?"
+        ).get(`%/ugc/images/${urlSuffix}%`).c;
+        if (refByAttachment === 0 && refByContent === 0) {
+          const baseDir = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
+          const filePath = path.join(baseDir, urlSuffix);
+          fs.unlink(filePath, () => {});
+        }
       }
       if (msg.thread_id) {
         io.to(`thread:${msg.thread_id}`).emit('message:deleted', { messageId, channelId: msg.channel_id, threadId: msg.thread_id });

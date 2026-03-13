@@ -625,6 +625,13 @@ if (!messageColumns.includes('voice_expires_at')) {
   pteroLog('[CatRealm] Added messages.voice_expires_at column');
 }
 
+// Add forward_from_at column to messages (original timestamp for media-only forwards)
+const messageColumnsV2 = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+if (!messageColumnsV2.includes('forward_from_at')) {
+  db.prepare('ALTER TABLE messages ADD COLUMN forward_from_at INTEGER NULL').run();
+  pteroLog('[CatRealm] Added messages.forward_from_at column');
+}
+
 // Add NSFW column to channels
 const channelColumns2 = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
 if (!channelColumns2.includes('nsfw')) {

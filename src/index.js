@@ -605,15 +605,15 @@ const CLIENT_URL = process.env.CLIENT_URL || '*';
 app.use(cors({ origin: CLIENT_URL }));
 app.use(express.json());
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../data/uploads');
-app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '7d', etag: true }));
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../data/ugc/images');
-app.use('/ugc/images', express.static(UGC_IMAGES_DIR));
+app.use('/ugc/images', express.static(UGC_IMAGES_DIR, { maxAge: '7d', etag: true }));
 const UGC_SERVER_DIR = process.env.UGC_SERVER_DIR || path.join(__dirname, '../data/ugc/server');
 if (!fs.existsSync(UGC_SERVER_DIR)) fs.mkdirSync(UGC_SERVER_DIR, { recursive: true });
-app.use('/ugc/server', express.static(UGC_SERVER_DIR));
+app.use('/ugc/server', express.static(UGC_SERVER_DIR, { maxAge: '7d', etag: true }));
 const UGC_EXPRESSIONS_DIR = process.env.UGC_EXPRESSIONS_DIR || path.join(__dirname, '../data/ugc/expressions');
 if (!fs.existsSync(UGC_EXPRESSIONS_DIR)) fs.mkdirSync(UGC_EXPRESSIONS_DIR, { recursive: true });
-app.use('/ugc/expressions', express.static(UGC_EXPRESSIONS_DIR));
+app.use('/ugc/expressions', express.static(UGC_EXPRESSIONS_DIR, { maxAge: '7d', etag: true }));
 
 // ── Landing page ───────────────────────────────────────────────────────────────
 app.use('/', landingRoutes);
