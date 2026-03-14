@@ -4,7 +4,7 @@ const fs = require('fs');
 const multer = require('multer');
 const db = require('../db');
 const { SERVER_MODE } = require('../middleware/auth');
-const { updateOnlineUserAvatar, updateOnlineUserStatus, updateOnlineUserDisplayName, updateOnlineUserActivity } = require('../socket/handler');
+const { updateOnlineUserAvatar, updateOnlineUserStatus, updateOnlineUserDisplayName, updateOnlineUserActivity, updateOnlineUserCustomStatus } = require('../socket/handler');
 const { getSetting } = require('../settings');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../data/uploads');
@@ -43,6 +43,8 @@ const upload = multer({
   },
 });
 
+const USER_PROFILE_SELECT = 'SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, custom_status_text, activity_type, activity_text, activity_started_at, pronouns, created_at FROM users WHERE id = ?';
+
 function ensureProfileAllowed(req, res, next) {
   if (SERVER_MODE === 'decentral_only' && req.user?.accountType !== 'local') {
     return res.status(403).json({ error: 'Profiles are only available for local accounts on this server' });
@@ -59,7 +61,7 @@ function isUuid(value) {
 
 // GET /api/profile/me
 router.get('/me', (req, res) => {
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   // For central accounts, check if there's a server-specific display name override
@@ -86,7 +88,7 @@ router.put('/me', ensureProfileAllowed, (req, res) => {
   const bio = typeof req.body.bio === 'string' ? req.body.bio.trim() : '';
   if (bio.length > 500) return res.status(400).json({ error: 'Bio must be 500 characters or less' });
   db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio, req.user.id);
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -109,7 +111,7 @@ router.post('/me/avatar-url', (req, res) => {
 
   db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(url, req.user.id);
   updateOnlineUserAvatar(req.user.id, url);
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'central', serverJoinDate: user.created_at ?? null });
 });
 
@@ -131,7 +133,7 @@ router.post('/me/banner-url', (req, res) => {
   }
 
   db.prepare('UPDATE users SET banner = ? WHERE id = ?').run(url, req.user.id);
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'central', serverJoinDate: user.created_at ?? null });
 });
 
@@ -154,7 +156,7 @@ router.post('/me/avatar', upload.single('avatar'), (req, res) => {
     fs.unlink(oldPath, () => {});
   }
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -179,7 +181,7 @@ router.post('/me/banner', (req, _res, next) => {
     fs.unlink(oldPath, () => {});
   }
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -194,7 +196,7 @@ router.delete('/me/avatar', (req, res) => {
     fs.unlink(oldPath, () => {});
   }
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -208,7 +210,7 @@ router.delete('/me/banner', (req, res) => {
     fs.unlink(oldPath, () => {});
   }
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -217,7 +219,7 @@ router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
   const { userId } = req.params;
   if (!isUuid(userId)) return next();
   const user = db.prepare(`
-    SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.status, u.display_name, u.activity_type, u.activity_text, u.account_type, u.central_id, u.pronouns, u.created_at,
+    SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type, u.central_id, u.pronouns, u.created_at,
       COALESCE(dno.display_name, u.display_name) as effective_display_name
     FROM users u
     LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
@@ -261,7 +263,7 @@ router.put('/me/status', ensureProfileAllowed, (req, res) => {
   }
   db.prepare('UPDATE users SET status = ? WHERE id = ?').run(status, req.user.id);
   updateOnlineUserStatus(req.user.id, status);
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -289,7 +291,7 @@ router.put('/me/display-name', ensureProfileAllowed, (req, res) => {
 
   updateOnlineUserDisplayName(req.user.id, trimmed);
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, display_name: trimmed, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -305,7 +307,7 @@ router.delete('/me/display-name', ensureProfileAllowed, (req, res) => {
 
   updateOnlineUserDisplayName(req.user.id, null);
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?').get(req.user.id);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
@@ -342,7 +344,7 @@ router.delete('/nicknames/:targetUserId', (req, res) => {
 
 // PUT /api/profile/me/activity
 router.put('/me/activity', ensureProfileAllowed, (req, res) => {
-  const { activityType, activityText } = req.body ?? {};
+  const { activityType, activityText, activityStartedAt } = req.body ?? {};
 
   const allowedTypes = ['Playing', 'Listening', 'Watching', 'Custom', null];
   if (activityType !== null && !allowedTypes.includes(activityType)) {
@@ -357,24 +359,48 @@ router.put('/me/activity', ensureProfileAllowed, (req, res) => {
 
   const finalType = activityType || null;
   const finalText = (activityText && activityText.trim()) || null;
+  const finalStartedAt = Number.isFinite(activityStartedAt) && activityStartedAt > 0
+    ? Math.floor(Number(activityStartedAt))
+    : null;
 
-  db.prepare('UPDATE users SET activity_type = ?, activity_text = ? WHERE id = ?')
-    .run(finalType, finalText, req.user.id);
+  db.prepare('UPDATE users SET activity_type = ?, activity_text = ?, activity_started_at = ? WHERE id = ?')
+    .run(finalType, finalText, finalStartedAt, req.user.id);
 
-  updateOnlineUserActivity(req.user.id, finalType, finalText);
+  updateOnlineUserActivity(req.user.id, finalType, finalText, finalStartedAt);
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?')
+  const user = db.prepare(USER_PROFILE_SELECT)
     .get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 
 // DELETE /api/profile/me/activity
 router.delete('/me/activity', ensureProfileAllowed, (req, res) => {
-  db.prepare('UPDATE users SET activity_type = NULL, activity_text = NULL WHERE id = ?').run(req.user.id);
-  updateOnlineUserActivity(req.user.id, null, null);
+  db.prepare('UPDATE users SET activity_type = NULL, activity_text = NULL, activity_started_at = NULL WHERE id = ?').run(req.user.id);
+  updateOnlineUserActivity(req.user.id, null, null, null);
 
-  const user = db.prepare('SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, activity_type, activity_text, pronouns, created_at FROM users WHERE id = ?')
+  const user = db.prepare(USER_PROFILE_SELECT)
     .get(req.user.id);
+  res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
+});
+
+// PUT /api/profile/me/custom-status
+router.put('/me/custom-status', ensureProfileAllowed, (req, res) => {
+  const { customStatusText } = req.body ?? {};
+  if (typeof customStatusText !== 'string' || customStatusText.trim().length === 0 || customStatusText.length > 128) {
+    return res.status(400).json({ error: 'Custom status must be 1-128 characters' });
+  }
+  const finalText = customStatusText.trim();
+  db.prepare('UPDATE users SET custom_status_text = ? WHERE id = ?').run(finalText, req.user.id);
+  updateOnlineUserCustomStatus(req.user.id, finalText);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
+  res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
+});
+
+// DELETE /api/profile/me/custom-status
+router.delete('/me/custom-status', ensureProfileAllowed, (req, res) => {
+  db.prepare('UPDATE users SET custom_status_text = NULL WHERE id = ?').run(req.user.id);
+  updateOnlineUserCustomStatus(req.user.id, null);
+  const user = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
   res.json({ ...user, isOwner: !!user.is_owner, accountType: req.user.accountType || 'local', serverJoinDate: user.created_at ?? null });
 });
 

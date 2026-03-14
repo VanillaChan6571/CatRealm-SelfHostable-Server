@@ -203,7 +203,7 @@ function setupSocketHandlers(io) {
         LIMIT 1
       `).get(user.id);
       const userRow = db.prepare(`
-        SELECT u.avatar, u.status, u.display_name, u.activity_type, u.activity_text, u.account_type,
+        SELECT u.avatar, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type,
           COALESCE(dno.display_name, u.display_name) as effective_display_name
         FROM users u
         LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
@@ -223,8 +223,10 @@ function setupSocketHandlers(io) {
         avatar: userRow?.avatar || null,
         status: userRow?.status || 'online',
         display_name: userRow?.effective_display_name || null,
+        custom_status_text: userRow?.custom_status_text || null,
         activity_type: userRow?.activity_type || null,
         activity_text: userRow?.activity_text || null,
+        activity_started_at: userRow?.activity_started_at || null,
         account_type: userRow?.account_type || 'local',
         verified: user.verified || false,
         sockets: new Set([socket.id]),
@@ -790,7 +792,7 @@ function setupSocketHandlers(io) {
           nsfwTags
             .filter((tag) => typeof tag === 'string')
             .map((tag) => String(tag).toLowerCase().trim())
-            .filter((tag) => ['blood', 'gore', 'violence', 'lewd', 'sexual', 'disturbing'].includes(tag))
+            .filter((tag) => ['blood', 'gore', 'violence', 'lewd', 'sexual', 'disturbing', 'spoiler'].includes(tag))
         ))
         : [];
       const normalizedVoiceExpiresAt = (typeof voice_expires_at === 'number' && Number.isFinite(voice_expires_at))
@@ -986,8 +988,10 @@ function buildOnlineList() {
     avatar: info.avatar || null,
     status: info.status || 'online',
     displayName: info.display_name || null,
+    customStatusText: info.custom_status_text || null,
     activityType: info.activity_type || null,
     activityText: info.activity_text || null,
+    activityStartedAt: info.activity_started_at || null,
     accountType: info.account_type || 'local',
     verified: info.verified || false,
   }));
@@ -1012,8 +1016,10 @@ function refreshAllOnlineRoleMetadata() {
       u.is_owner,
       u.avatar,
       u.status,
+      u.custom_status_text,
       u.activity_type,
       u.activity_text,
+      u.activity_started_at,
       u.account_type,
       COALESCE(dno.display_name, u.display_name) as effective_display_name
     FROM users u
@@ -1038,8 +1044,10 @@ function refreshAllOnlineRoleMetadata() {
     entry.avatar = userRow.avatar || null;
     entry.status = userRow.status || 'online';
     entry.display_name = userRow.effective_display_name || null;
+    entry.custom_status_text = userRow.custom_status_text || null;
     entry.activity_type = userRow.activity_type || null;
     entry.activity_text = userRow.activity_text || null;
+    entry.activity_started_at = userRow.activity_started_at || null;
     entry.account_type = userRow.account_type || entry.account_type || 'local';
     onlineUsers.set(userId, entry);
   }
@@ -1098,11 +1106,20 @@ module.exports.updateOnlineUserDisplayName = (userId, displayName) => {
   ioInstance.emit('presence:update', buildOnlineList());
 };
 
-module.exports.updateOnlineUserActivity = (userId, activityType, activityText) => {
+module.exports.updateOnlineUserCustomStatus = (userId, customStatusText) => {
+  const entry = onlineUsers.get(userId);
+  if (!entry || !ioInstance) return;
+  entry.custom_status_text = customStatusText || null;
+  onlineUsers.set(userId, entry);
+  ioInstance.emit('presence:update', buildOnlineList());
+};
+
+module.exports.updateOnlineUserActivity = (userId, activityType, activityText, activityStartedAt) => {
   const entry = onlineUsers.get(userId);
   if (!entry || !ioInstance) return;
   entry.activity_type = activityType || null;
   entry.activity_text = activityText || null;
+  entry.activity_started_at = activityStartedAt || null;
   onlineUsers.set(userId, entry);
   ioInstance.emit('presence:update', buildOnlineList());
 };

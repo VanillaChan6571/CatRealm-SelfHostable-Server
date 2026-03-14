@@ -444,6 +444,14 @@ if (!userColumns.includes('activity_text')) {
   db.prepare('ALTER TABLE users ADD COLUMN activity_text TEXT').run();
   pteroLog('[CatRealm] Added users.activity_text column');
 }
+if (!userColumns.includes('activity_started_at')) {
+  db.prepare('ALTER TABLE users ADD COLUMN activity_started_at INTEGER').run();
+  pteroLog('[CatRealm] Added users.activity_started_at column');
+}
+if (!userColumns.includes('custom_status_text')) {
+  db.prepare('ALTER TABLE users ADD COLUMN custom_status_text TEXT').run();
+  pteroLog('[CatRealm] Added users.custom_status_text column');
+}
 if (!userColumns.includes('banner')) {
   db.prepare('ALTER TABLE users ADD COLUMN banner TEXT').run();
   pteroLog('[CatRealm] Added users.banner column');
