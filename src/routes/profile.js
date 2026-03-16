@@ -359,9 +359,21 @@ router.put('/me/activity', ensureProfileAllowed, (req, res) => {
 
   const finalType = activityType || null;
   const finalText = (activityText && activityText.trim()) || null;
-  const finalStartedAt = Number.isFinite(activityStartedAt) && activityStartedAt > 0
+  const requestedStartedAt = Number.isFinite(activityStartedAt) && activityStartedAt > 0
     ? Math.floor(Number(activityStartedAt))
     : null;
+  const existing = db.prepare(USER_PROFILE_SELECT).get(req.user.id);
+  const finalStartedAt = (
+    finalType &&
+    finalText &&
+    existing?.activity_type === finalType &&
+    existing?.activity_text === finalText &&
+    Number.isFinite(existing?.activity_started_at) &&
+    existing.activity_started_at > 0 &&
+    (!requestedStartedAt || requestedStartedAt > existing.activity_started_at)
+  )
+    ? existing.activity_started_at
+    : requestedStartedAt;
 
   db.prepare('UPDATE users SET activity_type = ?, activity_text = ?, activity_started_at = ? WHERE id = ?')
     .run(finalType, finalText, finalStartedAt, req.user.id);

@@ -46,6 +46,45 @@ setInterval(() => {
 }, 60 * 60 * 1000);
 
 let ioInstance = null;
+
+function collectMessageAttachmentUrls(message) {
+  const urls = new Set();
+  if (typeof message?.attachment_url === 'string' && message.attachment_url.startsWith('/ugc/images/')) {
+    urls.add(message.attachment_url);
+  }
+  if (typeof message?.attachments === 'string' && message.attachments.trim()) {
+    try {
+      const attachments = JSON.parse(message.attachments);
+      if (Array.isArray(attachments)) {
+        for (const att of attachments) {
+          if (typeof att?.url === 'string' && att.url.startsWith('/ugc/images/')) {
+            urls.add(att.url);
+          }
+        }
+      }
+    } catch {}
+  }
+  return Array.from(urls);
+}
+
+function unlinkUgcImageIfUnreferenced(attachmentUrl) {
+  if (!attachmentUrl || !attachmentUrl.startsWith('/ugc/images/')) return;
+  const refByAttachment = db.prepare(
+    'SELECT COUNT(*) AS c FROM messages WHERE attachment_url = ?'
+  ).get(attachmentUrl).c;
+  const refByAttachments = db.prepare(
+    'SELECT COUNT(*) AS c FROM messages WHERE attachments LIKE ?'
+  ).get(`%${attachmentUrl}%`).c;
+  if (refByAttachment > 0 || refByAttachments > 0) return;
+
+  const urlSuffix = attachmentUrl.replace('/ugc/images/', '');
+  const baseDir = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
+  const filePath = path.join(baseDir, urlSuffix);
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch {}
+}
+
 function emitMessage(channelId, message) {
   if (!ioInstance) return;
   ioInstance.to(channelId).emit('message:new', message);
@@ -918,22 +957,10 @@ function setupSocketHandlers(io) {
       const canDelete = msg.user_id === user.id || hasChannelPermission(user, msg.channel_id, PERMISSIONS.DELETE_MESSAGES, db);
       if (!canDelete) return socket.emit('error', 'Not allowed');
 
+      const attachmentUrls = collectMessageAttachmentUrls(msg);
       db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
-      if (msg.attachment_url && msg.attachment_url.startsWith('/ugc/images/')) {
-        // Only delete the file if no other messages still reference it
-        // (forwarded copies store the same attachment_url or embed the URL in content)
-        const refByAttachment = db.prepare(
-          'SELECT COUNT(*) AS c FROM messages WHERE attachment_url = ?'
-        ).get(msg.attachment_url).c;
-        const urlSuffix = msg.attachment_url.replace('/ugc/images/', '');
-        const refByContent = db.prepare(
-          "SELECT COUNT(*) AS c FROM messages WHERE content LIKE ?"
-        ).get(`%/ugc/images/${urlSuffix}%`).c;
-        if (refByAttachment === 0 && refByContent === 0) {
-          const baseDir = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
-          const filePath = path.join(baseDir, urlSuffix);
-          fs.unlink(filePath, () => {});
-        }
+      for (const attachmentUrl of attachmentUrls) {
+        unlinkUgcImageIfUnreferenced(attachmentUrl);
       }
       if (msg.thread_id) {
         io.to(`thread:${msg.thread_id}`).emit('message:deleted', { messageId, channelId: msg.channel_id, threadId: msg.thread_id });

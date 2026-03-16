@@ -207,7 +207,8 @@ db.exec(`
     default_reaction TEXT,
     user_limit INTEGER DEFAULT 0,
     bitrate INTEGER DEFAULT 64000,
-    video_quality_mode TEXT DEFAULT 'auto',
+    video_quality_mode TEXT DEFAULT '720p',
+    default_framerate INTEGER DEFAULT 60,
     thread_auto_archive INTEGER DEFAULT 1440,
     thread_creation_cooldown INTEGER DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -646,6 +647,13 @@ if (!channelColumns2.includes('nsfw')) {
   db.prepare('ALTER TABLE channels ADD COLUMN nsfw INTEGER NOT NULL DEFAULT 0').run();
   pteroLog('[CatRealm] Added channels.nsfw column');
 }
+
+const channelSettingsColumns = db.prepare('PRAGMA table_info(channel_settings)').all().map((c) => c.name);
+if (!channelSettingsColumns.includes('default_framerate')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN default_framerate INTEGER DEFAULT 60').run();
+  pteroLog('[CatRealm] Added channel_settings.default_framerate column');
+}
+db.prepare(`UPDATE channel_settings SET video_quality_mode = '720p' WHERE video_quality_mode IS NULL OR video_quality_mode = 'auto'`).run();
 
 // Seed default moderation settings
 const modSettingsCount = db.prepare('SELECT COUNT(*) as c FROM moderation_settings').get().c;

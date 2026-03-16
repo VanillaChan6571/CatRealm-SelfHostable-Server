@@ -38,6 +38,36 @@ function visibleChannelListForUser(user, channels) {
   return visible;
 }
 
+function normalizeOverwriteBits(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.trunc(value);
+}
+
+function validateOverwriteTarget(targetType, targetId) {
+  if (!['role', 'user'].includes(targetType)) {
+    return 'targetType must be role or user';
+  }
+  if (typeof targetId !== 'string' || !targetId.trim()) {
+    return 'targetId required';
+  }
+  if (targetType === 'role') {
+    const role = db.prepare('SELECT id FROM roles WHERE id = ?').get(targetId);
+    if (!role) return 'Role not found';
+    return null;
+  }
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(targetId);
+  if (!user) return 'User not found';
+  return null;
+}
+
+function listChannelOverwrites(channelId) {
+  return db.prepare(`
+    SELECT * FROM channel_permission_overwrites
+    WHERE channel_id = ?
+    ORDER BY created_at, target_type, target_id
+  `).all(channelId);
+}
+
 // GET /api/channels - list all channels
 router.get('/', (req, res) => {
   const channels = db.prepare('SELECT * FROM channels ORDER BY position ASC').all();
@@ -235,7 +265,17 @@ router.get('/:id/settings', (req, res) => {
   }
 
   const settings = db.prepare('SELECT * FROM channel_settings WHERE channel_id = ?').get(req.params.id);
-  res.json(settings || { channel_id: req.params.id, slowmode: 0, default_reaction: null });
+  res.json(settings || {
+    channel_id: req.params.id,
+    slowmode: 0,
+    default_reaction: null,
+    user_limit: 0,
+    bitrate: 64000,
+    video_quality_mode: '720p',
+    default_framerate: 60,
+    thread_auto_archive: 1440,
+    thread_creation_cooldown: 0,
+  });
 });
 
 // PATCH /api/channels/:id/settings - Update channel settings
@@ -244,13 +284,22 @@ router.patch('/:id/settings', (req, res) => {
     return res.status(403).json({ error: 'Missing permission: manage_channels' });
   }
 
-  const { slowmode, defaultReaction, userLimit, bitrate, videoQualityMode } = req.body ?? {};
+  const {
+    slowmode,
+    defaultReaction,
+    userLimit,
+    bitrate,
+    videoQualityMode,
+    defaultFramerate,
+    threadAutoArchive,
+    threadCreationCooldown,
+  } = req.body ?? {};
   const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
 
-  // Validate slowmode (0-120 seconds)
-  if (typeof slowmode === 'number' && (slowmode < 0 || slowmode > 120)) {
-    return res.status(400).json({ error: 'Slowmode must be between 0 and 120 seconds' });
+  // Validate slowmode (0-21600 seconds)
+  if (typeof slowmode === 'number' && (slowmode < 0 || slowmode > 21600)) {
+    return res.status(400).json({ error: 'Slowmode must be between 0 and 21600 seconds' });
   }
 
   // Validate userLimit (0-99)
@@ -264,8 +313,20 @@ router.patch('/:id/settings', (req, res) => {
   }
 
   // Validate videoQualityMode
-  if (typeof videoQualityMode === 'string' && !['auto', '720p', '1080p'].includes(videoQualityMode)) {
-    return res.status(400).json({ error: 'Video quality mode must be auto, 720p, or 1080p' });
+  if (typeof videoQualityMode === 'string' && !['720p', '1080p', '1440p'].includes(videoQualityMode)) {
+    return res.status(400).json({ error: 'Video quality mode must be 720p, 1080p, or 1440p' });
+  }
+
+  if (typeof defaultFramerate === 'number' && ![24, 48, 60].includes(defaultFramerate)) {
+    return res.status(400).json({ error: 'Default framerate must be 24, 48, or 60' });
+  }
+
+  if (typeof threadAutoArchive === 'number' && ![0, 60, 1440, 4320, 10080].includes(threadAutoArchive)) {
+    return res.status(400).json({ error: 'Thread auto-archive must be 0, 60, 1440, 4320, or 10080' });
+  }
+
+  if (typeof threadCreationCooldown === 'number' && (threadCreationCooldown < 0 || threadCreationCooldown > 21600)) {
+    return res.status(400).json({ error: 'Thread creation cooldown must be between 0 and 21600 seconds' });
   }
 
   const current = db.prepare('SELECT * FROM channel_settings WHERE channel_id = ?').get(req.params.id);
@@ -273,26 +334,55 @@ router.patch('/:id/settings', (req, res) => {
   const nextReaction = typeof defaultReaction === 'string' || defaultReaction === null ? defaultReaction : (current?.default_reaction ?? null);
   const nextUserLimit = typeof userLimit === 'number' ? userLimit : (current?.user_limit ?? 0);
   const nextBitrate = typeof bitrate === 'number' ? bitrate : (current?.bitrate ?? 64000);
-  const nextVideoQuality = typeof videoQualityMode === 'string' ? videoQualityMode : (current?.video_quality_mode ?? 'auto');
+  const nextVideoQuality = typeof videoQualityMode === 'string' ? videoQualityMode : (current?.video_quality_mode ?? '720p');
+  const nextDefaultFramerate = typeof defaultFramerate === 'number' ? defaultFramerate : (current?.default_framerate ?? 60);
+  const nextThreadAutoArchive = typeof threadAutoArchive === 'number' ? threadAutoArchive : (current?.thread_auto_archive ?? 1440);
+  const nextThreadCreationCooldown = typeof threadCreationCooldown === 'number' ? threadCreationCooldown : (current?.thread_creation_cooldown ?? 0);
 
   db.prepare(`
-    INSERT INTO channel_settings (channel_id, slowmode, default_reaction, user_limit, bitrate, video_quality_mode)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO channel_settings (
+      channel_id,
+      slowmode,
+      default_reaction,
+      user_limit,
+      bitrate,
+      video_quality_mode,
+      default_framerate,
+      thread_auto_archive,
+      thread_creation_cooldown
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_id)
     DO UPDATE SET
       slowmode = excluded.slowmode,
       default_reaction = excluded.default_reaction,
       user_limit = excluded.user_limit,
       bitrate = excluded.bitrate,
-      video_quality_mode = excluded.video_quality_mode
-  `).run(req.params.id, nextSlowmode, nextReaction, nextUserLimit, nextBitrate, nextVideoQuality);
+      video_quality_mode = excluded.video_quality_mode,
+      default_framerate = excluded.default_framerate,
+      thread_auto_archive = excluded.thread_auto_archive,
+      thread_creation_cooldown = excluded.thread_creation_cooldown
+  `).run(
+    req.params.id,
+    nextSlowmode,
+    nextReaction,
+    nextUserLimit,
+    nextBitrate,
+    nextVideoQuality,
+    nextDefaultFramerate,
+    nextThreadAutoArchive,
+    nextThreadCreationCooldown
+  );
 
   res.json({
     slowmode: nextSlowmode,
     defaultReaction: nextReaction,
     userLimit: nextUserLimit,
     bitrate: nextBitrate,
-    videoQualityMode: nextVideoQuality
+    videoQualityMode: nextVideoQuality,
+    defaultFramerate: nextDefaultFramerate,
+    threadAutoArchive: nextThreadAutoArchive,
+    threadCreationCooldown: nextThreadCreationCooldown,
   });
 });
 
@@ -336,11 +426,7 @@ router.post('/:id/permissions/sync-from-category', (req, res) => {
   });
   syncTransaction(channel.id, categoryOverwrites);
 
-  const synced = db.prepare(`
-    SELECT * FROM channel_permission_overwrites
-    WHERE channel_id = ?
-    ORDER BY created_at
-  `).all(channel.id);
+  const synced = listChannelOverwrites(channel.id);
   emitPermissionsChanged();
   res.json({ synced: true, direction: 'from-category', count: synced.length, overwrites: synced });
 });
@@ -405,6 +491,60 @@ router.get('/:id/permissions', (req, res) => {
 
   const overwrites = db.prepare('SELECT * FROM channel_permission_overwrites WHERE channel_id = ? ORDER BY created_at').all(req.params.id);
   res.json(overwrites);
+});
+
+// PUT /api/channels/:id/permissions - Replace all permission overwrites atomically
+router.put('/:id/permissions', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_channels' });
+  }
+
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+
+  const overwrites = Array.isArray(req.body?.overwrites) ? req.body.overwrites : null;
+  if (!overwrites) {
+    return res.status(400).json({ error: 'overwrites array required' });
+  }
+
+  const seenTargets = new Set();
+  for (const overwrite of overwrites) {
+    const targetType = overwrite?.targetType ?? overwrite?.target_type;
+    const targetId = overwrite?.targetId ?? overwrite?.target_id;
+    const validationError = validateOverwriteTarget(targetType, targetId);
+    if (validationError) return res.status(400).json({ error: validationError });
+    const dedupeKey = `${targetType}:${targetId}`;
+    if (seenTargets.has(dedupeKey)) {
+      return res.status(400).json({ error: `Duplicate overwrite target: ${dedupeKey}` });
+    }
+    seenTargets.add(dedupeKey);
+  }
+
+  const replaceTransaction = db.transaction((channelId, nextOverwrites) => {
+    db.prepare('DELETE FROM channel_permission_overwrites WHERE channel_id = ?').run(channelId);
+    const insert = db.prepare(`
+      INSERT INTO channel_permission_overwrites (id, channel_id, target_type, target_id, allow, deny)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const overwrite of nextOverwrites) {
+      const allow = normalizeOverwriteBits(overwrite?.allow);
+      const deny = normalizeOverwriteBits(overwrite?.deny);
+      if (allow === 0 && deny === 0) continue;
+      insert.run(
+        randomUUID(),
+        channelId,
+        overwrite.targetType ?? overwrite.target_type,
+        overwrite.targetId ?? overwrite.target_id,
+        allow,
+        deny
+      );
+    }
+  });
+
+  replaceTransaction(channel.id, overwrites);
+  const persisted = listChannelOverwrites(channel.id);
+  emitPermissionsChanged();
+  res.json({ success: true, overwrites: persisted });
 });
 
 // POST /api/channels/:id/permissions - Create permission overwrite
