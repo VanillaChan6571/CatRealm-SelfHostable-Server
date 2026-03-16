@@ -4,6 +4,36 @@ const db = require('../db');
 const { PERMISSIONS, hasPermission } = require('../permissions');
 const { broadcastChannelUpdate, emitPermissionsChanged } = require('../socket/handler');
 
+function normalizeOverwriteBits(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.trunc(value);
+}
+
+function validateOverwriteTarget(targetType, targetId) {
+  if (!['role', 'user'].includes(targetType)) {
+    return 'targetType must be role or user';
+  }
+  if (typeof targetId !== 'string' || !targetId.trim()) {
+    return 'targetId required';
+  }
+  if (targetType === 'role') {
+    const role = db.prepare('SELECT id FROM roles WHERE id = ?').get(targetId);
+    if (!role) return 'Role not found';
+    return null;
+  }
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(targetId);
+  if (!user) return 'User not found';
+  return null;
+}
+
+function listCategoryOverwrites(categoryId) {
+  return db.prepare(`
+    SELECT * FROM category_permission_overwrites
+    WHERE category_id = ?
+    ORDER BY created_at, target_type, target_id
+  `).all(categoryId);
+}
+
 // GET /api/categories
 router.get('/', (_req, res) => {
   const categories = db.prepare('SELECT * FROM categories ORDER BY position ASC').all();
@@ -66,12 +96,7 @@ router.get('/:id/permissions', (req, res) => {
   const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
   if (!category) return res.status(404).json({ error: 'Category not found' });
 
-  const overwrites = db.prepare(`
-    SELECT * FROM category_permission_overwrites
-    WHERE category_id = ?
-    ORDER BY created_at
-  `).all(req.params.id);
-  res.json(overwrites);
+  res.json(listCategoryOverwrites(req.params.id));
 });
 
 // POST /api/categories/:id/permissions - Create category permission overwrite
@@ -123,6 +148,50 @@ router.post('/:id/permissions', (req, res) => {
   const overwrite = db.prepare('SELECT * FROM category_permission_overwrites WHERE id = ?').get(id);
   emitPermissionsChanged();
   res.status(201).json(overwrite);
+});
+
+// PUT /api/categories/:id/permissions - Replace category permission overwrites
+router.put('/:id/permissions', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_channels' });
+  }
+
+  const categoryId = req.params.id;
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+
+  const overwrites = Array.isArray(req.body?.overwrites) ? req.body.overwrites : null;
+  if (!overwrites) {
+    return res.status(400).json({ error: 'overwrites array required' });
+  }
+
+  for (const overwrite of overwrites) {
+    const targetType = overwrite.targetType ?? overwrite.target_type;
+    const targetId = overwrite.targetId ?? overwrite.target_id;
+    const error = validateOverwriteTarget(targetType, targetId);
+    if (error) return res.status(400).json({ error });
+  }
+
+  const insertOverwrite = db.prepare(`
+    INSERT INTO category_permission_overwrites (id, category_id, target_type, target_id, allow, deny)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  const transaction = db.transaction((items) => {
+    db.prepare('DELETE FROM category_permission_overwrites WHERE category_id = ?').run(categoryId);
+    for (const overwrite of items) {
+      const targetType = overwrite.targetType ?? overwrite.target_type;
+      const targetId = overwrite.targetId ?? overwrite.target_id;
+      const allow = normalizeOverwriteBits(overwrite.allow);
+      const deny = normalizeOverwriteBits(overwrite.deny);
+      if (allow === 0 && deny === 0) continue;
+      insertOverwrite.run(randomUUID(), categoryId, targetType, targetId, allow, deny);
+    }
+  });
+
+  transaction(overwrites);
+  emitPermissionsChanged();
+  res.json(listCategoryOverwrites(categoryId));
 });
 
 // PATCH /api/categories/:id/permissions/:overwriteId - Update category permission overwrite

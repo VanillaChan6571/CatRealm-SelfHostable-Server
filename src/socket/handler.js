@@ -12,6 +12,7 @@ const {
   hasChannelPermission,
   computeUserChannelPermissions,
 } = require('../permissions');
+const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
@@ -20,6 +21,8 @@ const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sti
 const onlineUsers = new Map();
 // Track voice rooms: channelId -> Map<userId, { socketId, muted, deafened, user }>
 const voiceRooms = new Map();
+// Track when a voice room first became occupied, using server time as the source of truth.
+const voiceRoomStartedAt = new Map();
 
 // Cleanup expired voice messages hourly
 setInterval(() => {
@@ -98,12 +101,19 @@ function emitServerInfoUpdate(info) {
 function emitPermissionsChanged() {
   if (!ioInstance) return;
   for (const [, socket] of ioInstance.sockets.sockets) {
-    if (!socket.user?.id) continue;
-    const dbUser = db.prepare('SELECT id, role, is_owner FROM users WHERE id = ?').get(socket.user.id);
+    if (!socket.authUser?.id) continue;
+    const dbUser = db.prepare('SELECT id, username, role, is_owner FROM users WHERE id = ?').get(socket.authUser.id);
     if (!dbUser) continue;
-    socket.user.permissions = computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db);
-    socket.user.is_owner = dbUser.is_owner ? 1 : 0;
-    socket.user.role = dbUser.role;
+    const authUser = {
+      ...socket.authUser,
+      ...dbUser,
+      is_owner: dbUser.is_owner ? 1 : 0,
+      permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
+    };
+    const { user, session } = applyRoleViewToUser(authUser, db);
+    socket.authUser = authUser;
+    socket.user = user;
+    socket.viewAsRole = session;
   }
   refreshAllOnlineRoleMetadata();
   ioInstance.emit('permissions:changed');
@@ -202,13 +212,24 @@ function setupSocketHandlers(io) {
     if (!token) return next(new Error('No token'));
     try {
       const payload = jwt.verify(token, JWT_SECRET);
-      const dbUser = db.prepare('SELECT id, is_member FROM users WHERE id = ?').get(payload.id);
+      const dbUser = db.prepare('SELECT id, username, role, is_owner, is_member FROM users WHERE id = ?').get(payload.id);
       if (!dbUser) return next(new Error('Invalid token'));
       if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(dbUser.id)) {
         return next(new Error('Banned from server'));
       }
       if (Number(dbUser.is_member ?? 1) !== 1) return next(new Error('Removed from server'));
-      socket.user = payload;
+      const authUser = {
+        ...payload,
+        id: dbUser.id,
+        username: dbUser.username,
+        role: dbUser.role,
+        is_owner: dbUser.is_owner ? 1 : 0,
+        permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
+      };
+      const { user, session } = applyRoleViewToUser(authUser, db);
+      socket.authUser = authUser;
+      socket.user = user;
+      socket.viewAsRole = session;
       next();
     } catch {
       next(new Error('Invalid token'));
@@ -217,20 +238,11 @@ function setupSocketHandlers(io) {
 
   io.on('connection', (socket) => {
     const user = socket.user;
-    if (user && !user.permissions) {
-      // Hydrate permissions for local accounts
-      const dbUser = db.prepare('SELECT id, role, is_owner FROM users WHERE id = ?').get(user.id);
-      if (dbUser) {
-        const permissions = computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db);
-        user.permissions = permissions;
-        user.is_owner = dbUser.is_owner ? 1 : 0;
-        user.role = dbUser.role;
-      }
-    }
-    pteroLog(`[CatRealm] ${user.username} connected`);
+    const authUser = socket.authUser || socket.user;
+    pteroLog(`[CatRealm] ${authUser.username} connected`);
 
     // Register as online
-    const existingEntry = onlineUsers.get(user.id);
+    const existingEntry = onlineUsers.get(authUser.id);
     if (existingEntry) {
       existingEntry.sockets.add(socket.id);
     } else {
@@ -240,18 +252,18 @@ function setupSocketHandlers(io) {
         WHERE ur.user_id = ?
         ORDER BY r.position DESC
         LIMIT 1
-      `).get(user.id);
+      `).get(authUser.id);
       const userRow = db.prepare(`
         SELECT u.avatar, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type,
           COALESCE(dno.display_name, u.display_name) as effective_display_name
         FROM users u
         LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
         WHERE u.id = ?
-      `).get(user.id);
-      onlineUsers.set(user.id, {
-        username: user.username,
-        role: user.role,
-        is_owner: user.is_owner ? 1 : 0,
+      `).get(authUser.id);
+      onlineUsers.set(authUser.id, {
+        username: authUser.username,
+        role: authUser.role,
+        is_owner: authUser.is_owner ? 1 : 0,
         role_color: topRole?.color || null,
         role_hoist: topRole?.hoist || 0,
         role_icon: topRole?.icon || null,
@@ -267,7 +279,7 @@ function setupSocketHandlers(io) {
         activity_text: userRow?.activity_text || null,
         activity_started_at: userRow?.activity_started_at || null,
         account_type: userRow?.account_type || 'local',
-        verified: user.verified || false,
+        verified: authUser.verified || false,
         sockets: new Set([socket.id]),
       });
     }
@@ -351,7 +363,7 @@ function setupSocketHandlers(io) {
         }
       }
 
-      pteroLog(`[CatRealm] ${user.username} join voice ${channelId}`);
+      pteroLog(`[CatRealm] ${authUser.username} join voice ${channelId}`);
       if (socket.currentVoiceChannel && socket.currentVoiceChannel !== channelId) {
         leaveVoiceRoom(io, socket, socket.currentVoiceChannel, user.id);
       }
@@ -359,9 +371,9 @@ function setupSocketHandlers(io) {
       const online = onlineUsers.get(user.id);
       const voiceUser = {
         id: user.id,
-        username: online?.display_name || user.display_name || user.username,
-        role: user.role,
-        isOwner: !!user.is_owner,
+        username: online?.display_name || authUser.display_name || authUser.username,
+        role: authUser.role,
+        isOwner: !!authUser.is_owner,
         roleColor: online?.role_color || null,
         avatar: online?.avatar || null,
         status: online?.status || 'online',
@@ -374,6 +386,9 @@ function setupSocketHandlers(io) {
       if (!room) {
         room = new Map();
         voiceRooms.set(channelId, room);
+      }
+      if (!voiceRoomStartedAt.has(channelId) || room.size === 0) {
+        voiceRoomStartedAt.set(channelId, Date.now());
       }
       const existingInTargetRoom = room.get(user.id);
       const replacedExistingSession = !!existingInTargetRoom && existingInTargetRoom.socketId !== socket.id;
@@ -395,8 +410,9 @@ function setupSocketHandlers(io) {
           otherRoom.delete(user.id);
           if (otherRoom.size === 0) {
             voiceRooms.delete(otherChannelId);
+            voiceRoomStartedAt.delete(otherChannelId);
             emitVoiceRoomCount(io, otherChannelId);
-            io.emit('voice:room-sync', { channelId: otherChannelId, users: [] });
+            io.emit('voice:room-sync', { channelId: otherChannelId, users: [], startedAt: null });
           } else {
             io.to(`voice:${otherChannelId}`).emit('voice:user-left', { channelId: otherChannelId, userId: user.id });
             emitVoiceRoomCount(io, otherChannelId);
@@ -426,6 +442,7 @@ function setupSocketHandlers(io) {
       const payload = {
         channelId,
         users: Array.from(room.values()).map((entry) => entry.user),
+        startedAt: voiceRoomStartedAt.get(channelId) ?? Date.now(),
         you: user.id,
       };
       socket.emit('voice:users', payload);
@@ -639,6 +656,9 @@ function setupSocketHandlers(io) {
         targetRoom = new Map();
         voiceRooms.set(toChannelId, targetRoom);
       }
+      if (!voiceRoomStartedAt.has(toChannelId) || targetRoom.size === 0) {
+        voiceRoomStartedAt.set(toChannelId, Date.now());
+      }
       targetRoom.set(userId, {
         socketId: sourceEntry.socketId,
         muted: !!sourceEntry.muted,
@@ -651,6 +671,7 @@ function setupSocketHandlers(io) {
       const payload = {
         channelId: toChannelId,
         users: Array.from(targetRoom.values()).map((entry) => entry.user),
+        startedAt: voiceRoomStartedAt.get(toChannelId) ?? Date.now(),
         you: userId,
       };
       targetSocket.emit('voice:users', payload);
@@ -880,14 +901,14 @@ function setupSocketHandlers(io) {
         id,
         channel_id: channelId,
         user_id:    user.id,
-        username:   user.username,
+        username:   authUser.username,
         content:    trimmed,
         edited:     0,
-        is_owner:   user.is_owner ? 1 : 0,
+        is_owner:   authUser.is_owner ? 1 : 0,
         role_color: topRole?.color || null,
         avatar: userInfo?.avatar || null,
         display_name: userInfo?.display_name || null,
-        verified: user.verified || false,
+        verified: authUser.verified || false,
         attachment_url: attachmentUrl,
         attachment_type: attachmentType,
         attachment_size: attachmentSize,
@@ -973,22 +994,22 @@ function setupSocketHandlers(io) {
     socket.on('typing:start', ({ channelId }) => {
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
       if (!canSendToChannel(user, channelId, db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId)?.type, null)) return;
-      socket.to(channelId).emit('typing:update', { userId: user.id, username: user.username, typing: true });
+      socket.to(channelId).emit('typing:update', { userId: user.id, username: authUser.username, typing: true });
     });
 
     socket.on('typing:stop', ({ channelId }) => {
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
-      socket.to(channelId).emit('typing:update', { userId: user.id, username: user.username, typing: false });
+      socket.to(channelId).emit('typing:update', { userId: user.id, username: authUser.username, typing: false });
     });
 
     // ── Disconnect ─────────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
-      pteroLog(`[CatRealm] ${user.username} disconnected`);
-      const entry = onlineUsers.get(user.id);
+      pteroLog(`[CatRealm] ${authUser.username} disconnected`);
+      const entry = onlineUsers.get(authUser.id);
       if (entry) {
         entry.sockets.delete(socket.id);
         if (entry.sockets.size === 0) {
-          onlineUsers.delete(user.id);
+          onlineUsers.delete(authUser.id);
         }
       }
       io.emit('presence:update', buildOnlineList());
@@ -1175,8 +1196,9 @@ function leaveVoiceRoom(io, socket, channelId, userId) {
   }
   if (room.size === 0) {
     voiceRooms.delete(channelId);
+    voiceRoomStartedAt.delete(channelId);
     emitVoiceRoomCount(io, channelId);
-    io.emit('voice:room-sync', { channelId, users: [] });
+    io.emit('voice:room-sync', { channelId, users: [], startedAt: null });
   }
   if (socket.currentVoiceChannel === channelId) {
     socket.currentVoiceChannel = null;
@@ -1185,7 +1207,11 @@ function leaveVoiceRoom(io, socket, channelId, userId) {
 
 function emitVoiceRoomCount(io, channelId) {
   const room = voiceRooms.get(channelId);
-  io.emit('voice:room-count', { channelId, count: room ? room.size : 0 });
+  io.emit('voice:room-count', {
+    channelId,
+    count: room ? room.size : 0,
+    startedAt: room && room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
+  });
 }
 
 function emitVoiceRoomSync(io, channelId) {
@@ -1193,6 +1219,7 @@ function emitVoiceRoomSync(io, channelId) {
   io.emit('voice:room-sync', {
     channelId,
     users: room ? Array.from(room.values()).map((entry) => entry.user) : [],
+    startedAt: room && room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
   });
 }
 
@@ -1201,5 +1228,6 @@ function buildVoiceRoomCounts() {
     channelId,
     count: room.size,
     users: Array.from(room.values()).map((entry) => entry.user),
+    startedAt: room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
   }));
 }

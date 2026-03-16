@@ -98,13 +98,17 @@ router.get('/me', authenticateToken, (req, res) => {
   `).get(req.user.id);
   if (!current) return res.status(404).json({ error: 'User not found' });
 
-  const permissions = computePermissionsForUser(current.id, current.role, current.is_owner, db);
+  const permissions = typeof req.user?.permissions === 'number'
+    ? req.user.permissions
+    : computePermissionsForUser(current.id, current.role, current.is_owner, db);
+  const effectiveRole = typeof req.user?.role === 'string' ? req.user.role : current.role;
+  const effectiveOwner = !!req.user?.is_owner;
   const accountType = current.account_type === 'central' ? 'central' : 'local';
   const tokenPayload = {
     id: current.id,
     username: current.username,
-    role: current.role,
-    is_owner: current.is_owner ? 1 : 0,
+    role: effectiveRole,
+    is_owner: effectiveOwner ? 1 : 0,
     permissions,
   };
   if (accountType === 'central') {
@@ -117,14 +121,15 @@ router.get('/me', authenticateToken, (req, res) => {
     user: {
       id: current.id,
       username: current.username,
-      role: current.role,
-      isOwner: !!current.is_owner,
+      role: effectiveRole,
+      isOwner: effectiveOwner,
       permissions,
       accountType,
       status: current.status || 'online',
       avatar: current.avatar || null,
       banner: current.banner || null,
       bio: current.bio || null,
+      viewAsRole: req.viewAsRole || null,
     },
   });
 });

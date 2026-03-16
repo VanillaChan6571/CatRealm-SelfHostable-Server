@@ -1,7 +1,8 @@
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const db = require('../db');
-const { PERMISSIONS, ALL_PERMISSIONS, computePermissionsForUser } = require('../permissions');
+const { computePermissionsForUser } = require('../permissions');
+const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
@@ -41,14 +42,14 @@ async function authenticateToken(req, res, next) {
             return res.status(403).json({ error: 'Removed from server' });
           }
           const permissions = computePermissionsForUser(localUser.id, localUser.role, localUser.is_owner, db);
-          req.user = {
+          req.authUser = {
             ...localUser,
             is_owner: localUser.is_owner ? 1 : 0,
             permissions,
             accountType: 'central',
           };
         } else {
-          req.user = { ...resp.data.user, permissions: 0, accountType: 'central' };
+          req.authUser = { ...resp.data.user, permissions: 0, accountType: 'central' };
         }
       } catch (err) {
         if (axios.isAxiosError(err)) {
@@ -66,7 +67,7 @@ async function authenticateToken(req, res, next) {
       if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(user.id)) return res.status(403).json({ error: 'Banned from server' });
       if (Number(user.is_member ?? 1) !== 1) return res.status(403).json({ error: 'Removed from server' });
       const permissions = computePermissionsForUser(user.id, user.role, user.is_owner, db);
-      req.user = {
+      req.authUser = {
         ...user,
         is_owner: user.is_owner ? 1 : 0,
         permissions,
@@ -83,7 +84,7 @@ async function authenticateToken(req, res, next) {
       if (Number(user.is_member ?? 1) !== 1) return res.status(403).json({ error: 'Removed from server' });
       const permissions = computePermissionsForUser(user.id, user.role, user.is_owner, db);
 
-      req.user = {
+      req.authUser = {
         ...user,
         is_owner: user.is_owner ? 1 : 0,
         permissions,
@@ -91,6 +92,9 @@ async function authenticateToken(req, res, next) {
       };
     }
 
+    const { user, session } = applyRoleViewToUser(req.authUser, db);
+    req.user = user;
+    req.viewAsRole = session;
     next();
   } catch {
     return res.status(403).json({ error: 'Invalid or expired token' });

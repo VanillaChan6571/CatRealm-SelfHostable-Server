@@ -527,7 +527,11 @@ if (!channelColumns.includes('category_id')) {
   pteroLog('[CatRealm] Added channels.category_id column');
 }
 
-const { ALL_PERMISSIONS } = require('./permissions');
+const { ALL_PERMISSIONS, PERMISSIONS } = require('./permissions');
+const DEFAULT_MEMBER_PERMISSIONS =
+  PERMISSIONS.VIEW_CHANNELS |
+  PERMISSIONS.READ_CHAT_HISTORY |
+  PERMISSIONS.SEND_MESSAGES;
 db.exec(`
   CREATE TABLE IF NOT EXISTS role_categories (
     id          TEXT PRIMARY KEY,
@@ -543,7 +547,7 @@ if (roleCount === 0) {
   const memberRoleId = randomUUID();
   const adminRoleId = randomUUID();
   db.prepare('INSERT INTO roles (id, name, permissions, position, is_default) VALUES (?, ?, ?, ?, ?)')
-    .run(memberRoleId, 'Member', 0, 0, 1);
+    .run(memberRoleId, 'Member', DEFAULT_MEMBER_PERMISSIONS, 0, 1);
   db.prepare('INSERT INTO roles (id, name, permissions, position, is_default) VALUES (?, ?, ?, ?, ?)')
     .run(adminRoleId, 'Admin', ALL_PERMISSIONS, 10, 0);
   pteroLog('[CatRealm] Seeded default roles');
