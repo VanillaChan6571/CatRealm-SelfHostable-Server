@@ -177,7 +177,7 @@ function applyPermissionOverwrites(currentPermissions, overwrites, userRoles, de
  * 4. Apply user-specific overwrites (deny, then allow)
  * 5. Owner/Administrator always has all permissions
  */
-function computeChannelPermissions(userId, channelId, basePermissions, db) {
+function computeChannelPermissions(userId, channelId, basePermissions, db, overwriteRoleIds = null) {
   // Owner and Administrator always have all permissions
   const user = db.prepare('SELECT is_owner, role FROM users WHERE id = ?').get(userId);
   if (user?.is_owner || user?.role === 'owner') return ALL_PERMISSIONS;
@@ -189,9 +189,11 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
   if (!channel) return Number(permissions);
 
   // Get user's roles
-  const userRoles = db.prepare(`
-    SELECT role_id FROM user_roles WHERE user_id = ?
-  `).all(userId).map(r => r.role_id);
+  const userRoles = Array.isArray(overwriteRoleIds)
+    ? overwriteRoleIds
+    : db.prepare(`
+      SELECT role_id FROM user_roles WHERE user_id = ?
+    `).all(userId).map(r => r.role_id);
 
   // Get default role
   const defaultRole = db.prepare('SELECT id FROM roles WHERE is_default = 1').get();
@@ -217,7 +219,11 @@ function computeChannelPermissions(userId, channelId, basePermissions, db) {
 function computeUserChannelPermissions(user, channelId, db) {
   if (!user) return 0;
   if (user.is_owner || user.role === 'owner') return ALL_PERMISSIONS;
-  return computeChannelPermissions(user.id, channelId, user.permissions || 0, db);
+  const viewedRoleId = typeof user.view_as_role?.roleId === 'string'
+    ? user.view_as_role.roleId
+    : null;
+  const overwriteRoleIds = viewedRoleId ? [viewedRoleId] : null;
+  return computeChannelPermissions(user.id, channelId, user.permissions || 0, db, overwriteRoleIds);
 }
 
 function hasChannelPermission(user, channelId, permission, db) {
