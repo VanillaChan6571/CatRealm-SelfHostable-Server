@@ -177,9 +177,10 @@ function applyPermissionOverwrites(currentPermissions, overwrites, userRoles, de
  * 4. Apply user-specific overwrites (deny, then allow)
  * 5. Owner/Administrator always has all permissions
  */
-function computeChannelPermissions(userId, channelId, basePermissions, db, overwriteRoleIds = null) {
-  // Owner and Administrator always have all permissions
-  const user = db.prepare('SELECT is_owner, role FROM users WHERE id = ?').get(userId);
+function computeChannelPermissions(userId, channelId, basePermissions, db, overwriteRoleIds = null, effectiveUser = null) {
+  // Owner and Administrator always have all permissions, but use the effective
+  // user first so "view as role" does not fall back to the real DB user.
+  const user = effectiveUser || db.prepare('SELECT is_owner, role FROM users WHERE id = ?').get(userId);
   if (user?.is_owner || user?.role === 'owner') return ALL_PERMISSIONS;
   const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
   if ((toPermissionBits(basePermissions) & administratorMask) === administratorMask) return ALL_PERMISSIONS;
@@ -223,7 +224,7 @@ function computeUserChannelPermissions(user, channelId, db) {
     ? user.view_as_role.roleId
     : null;
   const overwriteRoleIds = viewedRoleId ? [viewedRoleId] : null;
-  return computeChannelPermissions(user.id, channelId, user.permissions || 0, db, overwriteRoleIds);
+  return computeChannelPermissions(user.id, channelId, user.permissions || 0, db, overwriteRoleIds, user);
 }
 
 function hasChannelPermission(user, channelId, permission, db) {
