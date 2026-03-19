@@ -10,6 +10,16 @@ const {
 const { broadcastChannelUpdate, emitMessage, emitPermissionsChanged } = require('../socket/handler');
 const { getSetting } = require('../settings');
 const { encryptMessageContent, decryptMessageRows } = require('../messageCrypto');
+const {
+  WEBHOOK_SCOPE_CHANNEL,
+  listWebhooks,
+  createWebhook,
+  updateWebhook,
+  regenerateWebhookSecret,
+  deleteWebhook,
+  queueChannelCreatedEvent,
+  queueChannelDeletedEvent,
+} = require('../webhooks');
 
 function allowsNsfw(userId) {
   const prefs = db.prepare('SELECT preferences FROM user_content_social_prefs WHERE user_id = ?').get(userId);
@@ -91,6 +101,7 @@ router.post('/', (req, res) => {
     .run(id, channelName, description || null, channelType, maxPos + 1, categoryId || null);
 
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(id);
+  queueChannelCreatedEvent(channel);
   broadcastChannelUpdate();
   res.status(201).json(channel);
 });
@@ -100,6 +111,9 @@ router.delete('/:id', (req, res) => {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
     return res.status(403).json({ error: 'Missing permission: manage_channels' });
   }
+  const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  queueChannelDeletedEvent(channel);
   db.prepare('DELETE FROM channels WHERE id = ?').run(req.params.id);
   broadcastChannelUpdate();
   res.json({ success: true });
@@ -155,6 +169,7 @@ router.post('/:id/duplicate', (req, res) => {
   db.prepare('INSERT INTO channels (id, name, description, type, position, category_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, name, channel.description, channel.type, maxPos + 1, channel.category_id);
   const newChannel = db.prepare('SELECT * FROM channels WHERE id = ?').get(id);
+  queueChannelCreatedEvent(newChannel);
   broadcastChannelUpdate();
   res.status(201).json(newChannel);
 });
@@ -629,6 +644,91 @@ router.delete('/:id/permissions/:overwriteId', (req, res) => {
 
   db.prepare('DELETE FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').run(req.params.overwriteId, req.params.id);
   emitPermissionsChanged();
+  res.json({ success: true });
+});
+
+// GET /api/channels/:id/webhooks
+router.get('/:id/webhooks', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  res.json(listWebhooks(WEBHOOK_SCOPE_CHANNEL, req.params.id, req));
+});
+
+// POST /api/channels/:id/webhooks
+router.post('/:id/webhooks', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  try {
+    const created = createWebhook({
+      req,
+      scopeType: WEBHOOK_SCOPE_CHANNEL,
+      scopeId: req.params.id,
+      name: req.body?.name,
+      inboundEnabled: !!req.body?.inboundEnabled,
+      outboundEnabled: !!req.body?.outboundEnabled,
+      callbackUrl: req.body?.callbackUrl,
+      createdBy: req.user.id,
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to create webhook' });
+  }
+});
+
+// PATCH /api/channels/:id/webhooks/:webhookId
+router.patch('/:id/webhooks/:webhookId', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  try {
+    res.json(updateWebhook({
+      req,
+      scopeType: WEBHOOK_SCOPE_CHANNEL,
+      scopeId: req.params.id,
+      webhookId: req.params.webhookId,
+      body: req.body ?? {},
+    }));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to update webhook' });
+  }
+});
+
+// POST /api/channels/:id/webhooks/:webhookId/regenerate-secret
+router.post('/:id/webhooks/:webhookId/regenerate-secret', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  try {
+    res.json(regenerateWebhookSecret({
+      req,
+      scopeType: WEBHOOK_SCOPE_CHANNEL,
+      scopeId: req.params.id,
+      webhookId: req.params.webhookId,
+    }));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to regenerate webhook secret' });
+  }
+});
+
+// DELETE /api/channels/:id/webhooks/:webhookId
+router.delete('/:id/webhooks/:webhookId', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  const deleted = deleteWebhook(WEBHOOK_SCOPE_CHANNEL, req.params.id, req.params.webhookId);
+  if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
   res.json({ success: true });
 });
 

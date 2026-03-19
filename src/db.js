@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const pteroLog = require('./logger');
 const fs = require('fs');
 
@@ -239,6 +240,64 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_category_overwrites_category ON category_permission_overwrites(category_id);
   CREATE INDEX IF NOT EXISTS idx_category_overwrites_target ON category_permission_overwrites(target_id);
+
+  CREATE TABLE IF NOT EXISTS webhooks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    scope_type TEXT NOT NULL CHECK(scope_type IN ('channel', 'category')),
+    scope_id TEXT NOT NULL,
+    inbound_enabled INTEGER NOT NULL DEFAULT 1,
+    outbound_enabled INTEGER NOT NULL DEFAULT 0,
+    callback_url TEXT,
+    secret_hash TEXT NOT NULL,
+    secret_encrypted TEXT NOT NULL,
+    secret_preview TEXT,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_delivery_at INTEGER,
+    last_delivery_status TEXT,
+    last_delivery_error TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_webhooks_scope ON webhooks(scope_type, scope_id);
+
+  CREATE TABLE IF NOT EXISTS webhook_channel_links (
+    webhook_id TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    external_key TEXT NOT NULL,
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    external_label TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (webhook_id, external_key)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_webhook_links_channel ON webhook_channel_links(channel_id);
+
+  CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id TEXT PRIMARY KEY,
+    webhook_id TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    status TEXT NOT NULL DEFAULT 'pending',
+    response_code INTEGER,
+    last_error TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_schedule ON webhook_deliveries(status, next_attempt_at);
+
+  CREATE TABLE IF NOT EXISTS webhook_origins (
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('channel', 'message')),
+    entity_id TEXT NOT NULL,
+    webhook_id TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (entity_type, entity_id)
+  );
 `);
 
 const secureModeEnvRaw = getEnvValue(['SECURE_MODE', 'secure-mode']);
@@ -462,6 +521,30 @@ if (!userColumns.includes('pronouns')) {
   pteroLog('[CatRealm] Added users.pronouns column (synced from central)');
 }
 
+const webhookColumns = db.prepare('PRAGMA table_info(webhooks)').all().map((c) => c.name);
+if (webhookColumns.length > 0) {
+  if (!webhookColumns.includes('secret_encrypted')) {
+    db.prepare("ALTER TABLE webhooks ADD COLUMN secret_encrypted TEXT NOT NULL DEFAULT ''").run();
+    pteroLog('[CatRealm] Added webhooks.secret_encrypted column');
+  }
+  if (!webhookColumns.includes('enabled')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1').run();
+    pteroLog('[CatRealm] Added webhooks.enabled column');
+  }
+  if (!webhookColumns.includes('last_delivery_at')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN last_delivery_at INTEGER').run();
+    pteroLog('[CatRealm] Added webhooks.last_delivery_at column');
+  }
+  if (!webhookColumns.includes('last_delivery_status')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN last_delivery_status TEXT').run();
+    pteroLog('[CatRealm] Added webhooks.last_delivery_status column');
+  }
+  if (!webhookColumns.includes('last_delivery_error')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN last_delivery_error TEXT').run();
+    pteroLog('[CatRealm] Added webhooks.last_delivery_error column');
+  }
+}
+
 const expressionColumns = db.prepare('PRAGMA table_info(expressions)').all().map((c) => c.name);
 if (!expressionColumns.includes('variants_json')) {
   db.prepare('ALTER TABLE expressions ADD COLUMN variants_json TEXT').run();
@@ -551,6 +634,19 @@ if (roleCount === 0) {
   db.prepare('INSERT INTO roles (id, name, permissions, position, is_default) VALUES (?, ?, ?, ?, ?)')
     .run(adminRoleId, 'Admin', ALL_PERMISSIONS, 10, 0);
   pteroLog('[CatRealm] Seeded default roles');
+}
+
+const webhookUser = db.prepare('SELECT id FROM users WHERE username = ? LIMIT 1').get('__catrealm_webhook__');
+if (!webhookUser) {
+  const webhookUserId = crypto.randomUUID();
+  const webhookPassword = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 10);
+  db.prepare(`
+    INSERT INTO users (id, username, password, role, avatar, created_at, is_member, display_name)
+    VALUES (?, ?, ?, 'admin', NULL, unixepoch(), 0, ?)
+  `).run(webhookUserId, '__catrealm_webhook__', webhookPassword, 'Webhook');
+  pteroLog('[CatRealm] Created hidden webhook system user');
+} else {
+  db.prepare('UPDATE users SET is_member = 0, display_name = ? WHERE id = ?').run('Webhook', webhookUser.id);
 }
 
 if (!roleColumns.includes('mentionable')) {

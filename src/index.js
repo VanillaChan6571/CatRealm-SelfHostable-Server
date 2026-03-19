@@ -591,9 +591,11 @@ const invitesRoutes = require('./routes/invites');
 const expressionsRoutes = require('./routes/expressions');
 const embedsRoutes = require('./routes/embeds');
 const embedMediaRoutes = require('./routes/embedMedia');
+const webhooksRoutes = require('./routes/webhooks');
 const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
+const { startWebhookWorker, stopWebhookWorker } = require('./webhooks');
 
 const app = express();
 setupConsoleCommands(db);
@@ -603,7 +605,11 @@ const CLIENT_URL = process.env.CLIENT_URL || '*';
 
 // ── Middleware ─────────────────────────────────────────────────────────────────
 app.use(cors({ origin: CLIENT_URL }));
-app.use(express.json());
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  },
+}));
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../data/uploads');
 app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '7d', etag: true }));
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../data/ugc/images');
@@ -636,6 +642,7 @@ app.use('/api/turn', turnRoutes); // TURN/STUN credentials (no auth required)
 app.use('/api/expressions', expressionsRoutes);
 app.use('/api/embed-media', embedMediaRoutes);
 app.use('/api/embeds', authenticateToken, embedsRoutes);
+app.use('/api/webhooks', webhooksRoutes);
 
 // ── Create server & start ─────────────────────────────────────────────────────
 async function start() {
@@ -694,6 +701,7 @@ async function start() {
   });
 
   setupSocketHandlers(io);
+  startWebhookWorker();
 
   if (!updateRuntime.checkerDisabled && shouldAutoUpdate()) {
     const checkerMs = updateConfig().checkerMs;
@@ -734,6 +742,7 @@ async function start() {
     httpServer.close(() => {
       pteroLog('[CatRealm] HTTP server closed');
       try {
+        stopWebhookWorker();
         db.close();
         pteroLog('[CatRealm] Database closed');
       } catch (err) {

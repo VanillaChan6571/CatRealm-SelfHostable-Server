@@ -15,6 +15,7 @@ const {
 const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
+const { queueMessageCreatedEvent } = require('../webhooks');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
@@ -1000,6 +1001,7 @@ function setupSocketHandlers(io) {
         } else {
           io.to(channelId).emit('message:new', message);
         }
+        queueMessageCreatedEvent(message);
       }
 
       // Auto-reaction (if configured)

@@ -9,6 +9,12 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { decryptMessageContent, encryptMessageContent } = require('../messageCrypto');
+const {
+  listAllWebhooks,
+  updateWebhookById,
+  regenerateWebhookSecretById,
+  deleteWebhookById,
+} = require('../webhooks');
 
 function requirePermission(permission) {
   return (req, res, next) => {
@@ -255,6 +261,43 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
   });
 
   res.json(response);
+});
+
+// GET /api/admin/webhooks
+router.get('/webhooks', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
+  res.json(listAllWebhooks(req));
+});
+
+// PATCH /api/admin/webhooks/:id
+router.patch('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
+  try {
+    res.json(updateWebhookById({
+      req,
+      webhookId: req.params.id,
+      body: req.body ?? {},
+    }));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to update webhook' });
+  }
+});
+
+// POST /api/admin/webhooks/:id/regenerate-secret
+router.post('/webhooks/:id/regenerate-secret', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
+  try {
+    res.json(regenerateWebhookSecretById({
+      req,
+      webhookId: req.params.id,
+    }));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to regenerate webhook secret' });
+  }
+});
+
+// DELETE /api/admin/webhooks/:id
+router.delete('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
+  const deleted = deleteWebhookById(req.params.id);
+  if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
+  res.json({ success: true });
 });
 
 // GET /api/admin/users

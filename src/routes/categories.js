@@ -3,6 +3,14 @@ const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission } = require('../permissions');
 const { broadcastChannelUpdate, emitPermissionsChanged } = require('../socket/handler');
+const {
+  WEBHOOK_SCOPE_CATEGORY,
+  listWebhooks,
+  createWebhook,
+  updateWebhook,
+  regenerateWebhookSecret,
+  deleteWebhook,
+} = require('../webhooks');
 
 function normalizeOverwriteBits(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
@@ -85,6 +93,91 @@ router.delete('/:id', (req, res) => {
   db.prepare('UPDATE channels SET category_id = NULL WHERE category_id = ?').run(req.params.id);
   db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
   emitPermissionsChanged();
+  res.json({ success: true });
+});
+
+// GET /api/categories/:id/webhooks
+router.get('/:id/webhooks', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+  res.json(listWebhooks(WEBHOOK_SCOPE_CATEGORY, req.params.id, req));
+});
+
+// POST /api/categories/:id/webhooks
+router.post('/:id/webhooks', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+  try {
+    const created = createWebhook({
+      req,
+      scopeType: WEBHOOK_SCOPE_CATEGORY,
+      scopeId: req.params.id,
+      name: req.body?.name,
+      inboundEnabled: !!req.body?.inboundEnabled,
+      outboundEnabled: !!req.body?.outboundEnabled,
+      callbackUrl: req.body?.callbackUrl,
+      createdBy: req.user.id,
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to create webhook' });
+  }
+});
+
+// PATCH /api/categories/:id/webhooks/:webhookId
+router.patch('/:id/webhooks/:webhookId', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+  try {
+    res.json(updateWebhook({
+      req,
+      scopeType: WEBHOOK_SCOPE_CATEGORY,
+      scopeId: req.params.id,
+      webhookId: req.params.webhookId,
+      body: req.body ?? {},
+    }));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to update webhook' });
+  }
+});
+
+// POST /api/categories/:id/webhooks/:webhookId/regenerate-secret
+router.post('/:id/webhooks/:webhookId/regenerate-secret', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+  try {
+    res.json(regenerateWebhookSecret({
+      req,
+      scopeType: WEBHOOK_SCOPE_CATEGORY,
+      scopeId: req.params.id,
+      webhookId: req.params.webhookId,
+    }));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Failed to regenerate webhook secret' });
+  }
+});
+
+// DELETE /api/categories/:id/webhooks/:webhookId
+router.delete('/:id/webhooks/:webhookId', (req, res) => {
+  if (!hasPermission(req.user, PERMISSIONS.MANAGE_WEBHOOKS)) {
+    return res.status(403).json({ error: 'Missing permission: manage_webhooks' });
+  }
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
+  if (!category) return res.status(404).json({ error: 'Category not found' });
+  const deleted = deleteWebhook(WEBHOOK_SCOPE_CATEGORY, req.params.id, req.params.webhookId);
+  if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
   res.json({ success: true });
 });
 
