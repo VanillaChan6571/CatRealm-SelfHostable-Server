@@ -253,7 +253,7 @@ function createWebhook({ req, scopeType, scopeId, authMode, name, inboundEnabled
       ip_lock_enabled, locked_ip, callback_url, secret_hash, secret_encrypted, secret_preview,
       created_by, created_at, updated_at, enabled
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1)
   `).run(
     id,
     name.trim(),
