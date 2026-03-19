@@ -142,6 +142,17 @@ router.put('/admin/welcome/settings', authenticateToken, requireManageServer, (r
   res.json({ ok: true });
 });
 
+// POST /api/admin/welcome/reset-onboarding
+router.post('/admin/welcome/reset-onboarding', authenticateToken, requireManageServer, (_req, res) => {
+  const result = db.prepare(`
+    UPDATE users
+    SET onboarding_completed = 0
+    WHERE COALESCE(is_member, 1) = 1
+      AND username != '__catrealm_webhook__'
+  `).run();
+  res.json({ ok: true, resetCount: result.changes || 0 });
+});
+
 // PUT /api/admin/welcome/rules
 router.put('/admin/welcome/rules', authenticateToken, requireManageServer, (req, res) => {
   const { rulesMode, rulesMarkdown, rules } = req.body;
