@@ -645,6 +645,13 @@ if (!messageColumnsV2.includes('forward_from_at')) {
   pteroLog('[CatRealm] Added messages.forward_from_at column');
 }
 
+const messageColumnsV3 = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+if (!messageColumnsV3.includes('scheduled_at')) {
+  db.prepare('ALTER TABLE messages ADD COLUMN scheduled_at INTEGER NULL').run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_messages_scheduled ON messages(scheduled_at) WHERE scheduled_at IS NOT NULL').run();
+  pteroLog('[CatRealm] Added messages.scheduled_at column');
+}
+
 // Add NSFW column to channels
 const channelColumns2 = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
 if (!channelColumns2.includes('nsfw')) {

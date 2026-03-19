@@ -72,9 +72,9 @@ router.get('/:channelId', (req, res) => {
       LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
       LEFT JOIN messages rm ON rm.id = m.reply_to_id
       LEFT JOIN users ru ON ru.id = rm.user_id
-      WHERE m.channel_id = ? AND m.thread_id IS NULL AND m.created_at < ?
+      WHERE m.channel_id = ? AND m.thread_id IS NULL AND m.created_at < ? AND (m.scheduled_at IS NULL OR m.user_id = ?)
       ORDER BY m.created_at DESC LIMIT ?
-    `).all(channelId, before, limit);
+    `).all(channelId, before, req.user.id, limit);
   } else {
     messages = db.prepare(`
       SELECT m.*, u.username, u.avatar, u.is_owner,
@@ -108,9 +108,9 @@ router.get('/:channelId', (req, res) => {
       LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
       LEFT JOIN messages rm ON rm.id = m.reply_to_id
       LEFT JOIN users ru ON ru.id = rm.user_id
-      WHERE m.channel_id = ? AND m.thread_id IS NULL
+      WHERE m.channel_id = ? AND m.thread_id IS NULL AND (m.scheduled_at IS NULL OR m.user_id = ?)
       ORDER BY m.created_at DESC LIMIT ?
-    `).all(channelId, limit);
+    `).all(channelId, req.user.id, limit);
   }
 
   messages = decryptMessageRows(messages);

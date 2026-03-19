@@ -48,6 +48,49 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
+// Publish scheduled messages every 30 seconds
+setInterval(() => {
+  try {
+    if (!ioInstance) return;
+    const now = Math.floor(Date.now() / 1000);
+    const due = db.prepare(`
+      SELECT m.*, u.username, u.avatar,
+        COALESCE(dno.display_name, u.display_name) as display_name
+      FROM messages m
+      JOIN users u ON u.id = m.user_id
+      LEFT JOIN display_name_overrides dno ON dno.user_id = m.user_id
+      WHERE m.scheduled_at IS NOT NULL AND m.scheduled_at <= ?
+    `).all(now);
+
+    const clearStmt = db.prepare('UPDATE messages SET scheduled_at = NULL WHERE id = ?');
+
+    for (const msg of due) {
+      const nsfwTags = db.prepare('SELECT tag FROM message_nsfw_tags WHERE message_id = ?')
+        .all(msg.id).map(r => r.tag);
+      let attachments = [];
+      try { if (msg.attachments) attachments = JSON.parse(msg.attachments); } catch {}
+
+      const payload = {
+        id: msg.id, channel_id: msg.channel_id, thread_id: msg.thread_id || null,
+        user_id: msg.user_id, username: msg.username, avatar: msg.avatar || null,
+        display_name: msg.display_name || null, content: decryptMessageContent(msg.content),
+        edited: 0, created_at: msg.created_at, scheduled_at: null,
+        attachment_url: msg.attachment_url, attachments,
+        nsfw_tags: nsfwTags, message_type: msg.message_type || 'user',
+        embeds_enabled: msg.embeds_enabled, voice_expires_at: msg.voice_expires_at ?? null,
+      };
+
+      clearStmt.run(msg.id);
+
+      if (msg.thread_id) ioInstance.to(`thread:${msg.thread_id}`).emit('message:new', payload);
+      else ioInstance.to(msg.channel_id).emit('message:new', payload);
+    }
+    if (due.length > 0) pteroLog(`[CatRealm] Published ${due.length} scheduled message(s)`);
+  } catch (err) {
+    pteroLog(`[CatRealm] Scheduled publish error: ${err}`);
+  }
+}, 30_000);
+
 let ioInstance = null;
 
 function collectMessageAttachmentUrls(message) {
@@ -731,7 +774,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at }) => {
+    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at }) => {
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
         .filter((a) => a && typeof a.url === 'string');
@@ -772,7 +815,7 @@ function setupSocketHandlers(io) {
         if (!hasBypass) {
           const lastMessage = db.prepare(`
             SELECT created_at FROM messages
-            WHERE channel_id = ? AND user_id = ? AND message_type = 'user'
+            WHERE channel_id = ? AND user_id = ? AND message_type = 'user' AND scheduled_at IS NULL
             ORDER BY created_at DESC
             LIMIT 1
           `).get(channelId, user.id);
@@ -785,6 +828,21 @@ function setupSocketHandlers(io) {
             }
           }
         }
+      }
+
+      // Validate and normalize scheduled_at
+      let normalizedScheduledAt = null;
+      if (scheduled_at != null) {
+        if (!hasChannelPermission(user, channelId, PERMISSIONS.SCHEDULE_MESSAGES, db)) {
+          return socket.emit('error', 'Missing permission: schedule_messages');
+        }
+        const nowSec = Math.floor(Date.now() / 1000);
+        const parsed = typeof scheduled_at === 'number' ? Math.floor(scheduled_at) : null;
+        const maxSec = nowSec + 30 * 24 * 60 * 60; // 30 days
+        if (!parsed || parsed < nowSec + 30 || parsed > maxSec) {
+          return socket.emit('error', 'Invalid scheduled_at');
+        }
+        normalizedScheduledAt = parsed;
       }
 
       // Validate replyToId
@@ -863,9 +921,9 @@ function setupSocketHandlers(io) {
           id, channel_id, user_id, content, created_at,
           attachment_url, attachment_type, attachment_size, attachments, message_type, thread_id,
           reply_to_id, forward_from_id, forward_from_user, forward_from_channel, forward_from_at, embeds_enabled,
-          voice_expires_at
+          voice_expires_at, scheduled_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, channelId, user.id, encryptMessageContent(trimmed), now,
         attachmentUrl, attachmentType, attachmentSize, attachmentsJson, 'user', threadId || null,
@@ -875,7 +933,8 @@ function setupSocketHandlers(io) {
         forwardFrom?.channel_name || null,
         forwardFrom?.forwarded_at ?? null,
         canEmbedLinks ? 1 : 0,
-        normalizedVoiceExpiresAt
+        normalizedVoiceExpiresAt,
+        normalizedScheduledAt
       );
       if (normalizedNsfwTags.length > 0) {
         const insertTagStmt = db.prepare('INSERT OR IGNORE INTO message_nsfw_tags (message_id, tag) VALUES (?, ?)');
@@ -933,10 +992,14 @@ function setupSocketHandlers(io) {
         voice_expires_at: normalizedVoiceExpiresAt,
       };
 
-      if (threadId) {
-        io.to(`thread:${threadId}`).emit('message:new', message);
+      if (normalizedScheduledAt) {
+        socket.emit('message:scheduled', { ...message, scheduled_at: normalizedScheduledAt });
       } else {
-        io.to(channelId).emit('message:new', message);
+        if (threadId) {
+          io.to(`thread:${threadId}`).emit('message:new', message);
+        } else {
+          io.to(channelId).emit('message:new', message);
+        }
       }
 
       // Auto-reaction (if configured)

@@ -79,6 +79,7 @@ const PERMISSIONS = {
 // External expression usage. These must not collide with grouped permission bits.
 PERMISSIONS.USE_EXTERNAL_EMOTES = bit(44);
 PERMISSIONS.USE_EXTERNAL_STICKERS = bit(45);
+PERMISSIONS.SCHEDULE_MESSAGES = bit(46);
 
 // Backward-compatible aliases used across older routes/components.
 PERMISSIONS.SEND_MEDIA = USER_GENERAL.ATTACH_FILES;
