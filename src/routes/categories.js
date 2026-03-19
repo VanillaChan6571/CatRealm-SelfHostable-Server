@@ -118,9 +118,12 @@ router.post('/:id/webhooks', (req, res) => {
       req,
       scopeType: WEBHOOK_SCOPE_CATEGORY,
       scopeId: req.params.id,
+      authMode: req.body?.authMode,
       name: req.body?.name,
       inboundEnabled: !!req.body?.inboundEnabled,
       outboundEnabled: !!req.body?.outboundEnabled,
+      actionFlags: req.body?.actionFlags,
+      ipLockEnabled: req.body?.ipLockEnabled,
       callbackUrl: req.body?.callbackUrl,
       createdBy: req.user.id,
     });

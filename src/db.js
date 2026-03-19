@@ -246,8 +246,12 @@ db.exec(`
     name TEXT NOT NULL,
     scope_type TEXT NOT NULL CHECK(scope_type IN ('channel', 'category')),
     scope_id TEXT NOT NULL,
+    auth_mode TEXT NOT NULL DEFAULT 'secured',
     inbound_enabled INTEGER NOT NULL DEFAULT 1,
     outbound_enabled INTEGER NOT NULL DEFAULT 0,
+    action_flags TEXT,
+    ip_lock_enabled INTEGER NOT NULL DEFAULT 0,
+    locked_ip TEXT,
     callback_url TEXT,
     secret_hash TEXT NOT NULL,
     secret_encrypted TEXT NOT NULL,
@@ -530,6 +534,22 @@ if (webhookColumns.length > 0) {
   if (!webhookColumns.includes('enabled')) {
     db.prepare('ALTER TABLE webhooks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1').run();
     pteroLog('[CatRealm] Added webhooks.enabled column');
+  }
+  if (!webhookColumns.includes('auth_mode')) {
+    db.prepare("ALTER TABLE webhooks ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'secured'").run();
+    pteroLog('[CatRealm] Added webhooks.auth_mode column');
+  }
+  if (!webhookColumns.includes('action_flags')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN action_flags TEXT').run();
+    pteroLog('[CatRealm] Added webhooks.action_flags column');
+  }
+  if (!webhookColumns.includes('ip_lock_enabled')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN ip_lock_enabled INTEGER NOT NULL DEFAULT 0').run();
+    pteroLog('[CatRealm] Added webhooks.ip_lock_enabled column');
+  }
+  if (!webhookColumns.includes('locked_ip')) {
+    db.prepare('ALTER TABLE webhooks ADD COLUMN locked_ip TEXT').run();
+    pteroLog('[CatRealm] Added webhooks.locked_ip column');
   }
   if (!webhookColumns.includes('last_delivery_at')) {
     db.prepare('ALTER TABLE webhooks ADD COLUMN last_delivery_at INTEGER').run();

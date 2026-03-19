@@ -7,6 +7,8 @@ const pteroLog = require('./logger');
 
 const WEBHOOK_SCOPE_CHANNEL = 'channel';
 const WEBHOOK_SCOPE_CATEGORY = 'category';
+const WEBHOOK_AUTH_SECURED = 'secured';
+const WEBHOOK_AUTH_SIMPLE = 'simple';
 const WEBHOOK_EVENT_MESSAGE_CREATED = 'message.created';
 const WEBHOOK_EVENT_CHANNEL_CREATED = 'channel.created';
 const WEBHOOK_EVENT_CHANNEL_DELETED = 'channel.deleted';
@@ -79,25 +81,55 @@ function validateCallbackUrl(callbackUrl) {
   }
 }
 
-function buildInboundUrl(req, scopeType, webhookId) {
+function buildInboundUrl(req, scopeType, webhookId, authMode = WEBHOOK_AUTH_SECURED, secret = null) {
   const proto = req.get('x-forwarded-proto')?.split(',')[0]?.trim() || req.protocol || 'http';
   const host = req.get('x-forwarded-host')?.split(',')[0]?.trim() || req.get('host') || 'localhost';
+  if (authMode === WEBHOOK_AUTH_SIMPLE && secret) {
+    return `${proto}://${host}/api/webhooks/simple/${scopeType}/${webhookId}/${secret}`;
+  }
   return `${proto}://${host}/api/webhooks/${scopeType}/${webhookId}`;
+}
+
+function parseActionFlags(raw, scopeType) {
+  const defaults = scopeType === WEBHOOK_SCOPE_CATEGORY
+    ? { allowConversationUpsert: true }
+    : { allowMessageCreate: true };
+  if (!raw) return defaults;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== 'object') return defaults;
+    return {
+      allowMessageCreate: parsed.allowMessageCreate !== false,
+      allowConversationUpsert: parsed.allowConversationUpsert !== false,
+    };
+  } catch (_err) {
+    return defaults;
+  }
+}
+
+function normalizeAuthMode(value) {
+  return value === WEBHOOK_AUTH_SIMPLE ? WEBHOOK_AUTH_SIMPLE : WEBHOOK_AUTH_SECURED;
 }
 
 function mapWebhookRow(row, req) {
   if (!row) return null;
+  const authMode = normalizeAuthMode(row.auth_mode);
+  const secret = req ? decryptSecret(row.secret_encrypted) : null;
   return {
     id: row.id,
     name: row.name,
     scopeType: row.scope_type,
     scopeId: row.scope_id,
+    authMode,
     inboundEnabled: !!row.inbound_enabled,
     outboundEnabled: !!row.outbound_enabled,
+    actionFlags: parseActionFlags(row.action_flags, row.scope_type),
+    ipLockEnabled: !!row.ip_lock_enabled,
+    lockedIp: row.locked_ip || null,
     callbackUrl: row.callback_url || null,
     enabled: !!row.enabled,
     secretPreview: row.secret_preview || null,
-    inboundUrl: row.inbound_enabled ? buildInboundUrl(req, row.scope_type, row.id) : null,
+    inboundUrl: row.inbound_enabled ? buildInboundUrl(req, row.scope_type, row.id, authMode, secret) : null,
     lastDeliveryAt: row.last_delivery_at || null,
     lastDeliveryStatus: row.last_delivery_status || null,
     lastDeliveryError: row.last_delivery_error || null,
@@ -151,12 +183,38 @@ function getPublicWebhook(scopeType, webhookId) {
   `).get(webhookId, scopeType);
 }
 
-function assertWebhookConfig({ name, inboundEnabled, outboundEnabled, callbackUrl }) {
+function normalizeActionFlags(scopeType, actionFlags) {
+  const current = parseActionFlags(actionFlags, scopeType);
+  if (scopeType === WEBHOOK_SCOPE_CATEGORY) {
+    return {
+      allowConversationUpsert: current.allowConversationUpsert !== false,
+    };
+  }
+  return {
+    allowMessageCreate: current.allowMessageCreate !== false,
+  };
+}
+
+function assertWebhookConfig({ name, authMode, inboundEnabled, outboundEnabled, callbackUrl, actionFlags, scopeType }) {
   if (typeof name !== 'string' || name.trim().length < 2) {
     return 'Webhook name required';
   }
+  const normalizedAuthMode = normalizeAuthMode(authMode);
   if (!inboundEnabled && !outboundEnabled) {
     return 'Enable inbound or outbound delivery';
+  }
+  if (normalizedAuthMode === WEBHOOK_AUTH_SIMPLE && outboundEnabled) {
+    return 'Simple webhooks do not support outbound callbacks';
+  }
+  if (normalizedAuthMode === WEBHOOK_AUTH_SIMPLE && !inboundEnabled) {
+    return 'Simple webhooks require inbound enabled';
+  }
+  const normalizedFlags = normalizeActionFlags(scopeType, actionFlags);
+  if (scopeType === WEBHOOK_SCOPE_CHANNEL && !normalizedFlags.allowMessageCreate) {
+    return 'Enable at least one channel action';
+  }
+  if (scopeType === WEBHOOK_SCOPE_CATEGORY && !normalizedFlags.allowConversationUpsert) {
+    return 'Enable at least one category action';
   }
   const callbackError = validateCallbackUrl(callbackUrl);
   if (callbackError) return callbackError;
@@ -166,8 +224,21 @@ function assertWebhookConfig({ name, inboundEnabled, outboundEnabled, callbackUr
   return null;
 }
 
-function createWebhook({ req, scopeType, scopeId, name, inboundEnabled, outboundEnabled, callbackUrl, createdBy }) {
-  const validationError = assertWebhookConfig({ name, inboundEnabled, outboundEnabled, callbackUrl });
+function createWebhook({ req, scopeType, scopeId, authMode, name, inboundEnabled, outboundEnabled, actionFlags, callbackUrl, ipLockEnabled, createdBy }) {
+  const normalizedAuthMode = normalizeAuthMode(authMode);
+  const normalizedFlags = normalizeActionFlags(scopeType, actionFlags);
+  const normalizedIpLockEnabled = normalizedAuthMode === WEBHOOK_AUTH_SIMPLE
+    ? (ipLockEnabled === undefined ? true : normalizeBoolean(ipLockEnabled))
+    : false;
+  const validationError = assertWebhookConfig({
+    name,
+    authMode: normalizedAuthMode,
+    inboundEnabled,
+    outboundEnabled,
+    callbackUrl,
+    actionFlags: normalizedFlags,
+    scopeType,
+  });
   if (validationError) {
     const error = new Error(validationError);
     error.status = 400;
@@ -178,18 +249,21 @@ function createWebhook({ req, scopeType, scopeId, name, inboundEnabled, outbound
   const secret = generateSecret();
   db.prepare(`
     INSERT INTO webhooks (
-      id, name, scope_type, scope_id, inbound_enabled, outbound_enabled,
-      callback_url, secret_hash, secret_encrypted, secret_preview,
+      id, name, scope_type, scope_id, auth_mode, inbound_enabled, outbound_enabled, action_flags,
+      ip_lock_enabled, locked_ip, callback_url, secret_hash, secret_encrypted, secret_preview,
       created_by, created_at, updated_at, enabled
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1)
   `).run(
     id,
     name.trim(),
     scopeType,
     scopeId,
+    normalizedAuthMode,
     inboundEnabled ? 1 : 0,
     outboundEnabled ? 1 : 0,
+    JSON.stringify(normalizedFlags),
+    normalizedIpLockEnabled ? 1 : 0,
     callbackUrl ? String(callbackUrl).trim() : null,
     hashSecret(secret),
     encryptSecret(secret),
@@ -213,15 +287,30 @@ function updateWebhook({ req, scopeType, scopeId, webhookId, body }) {
     throw error;
   }
   const nextName = typeof body.name === 'string' ? body.name.trim() : row.name;
+  const nextAuthMode = body.authMode === undefined ? normalizeAuthMode(row.auth_mode) : normalizeAuthMode(body.authMode);
   const nextInboundEnabled = body.inboundEnabled === undefined ? !!row.inbound_enabled : !!body.inboundEnabled;
   const nextOutboundEnabled = body.outboundEnabled === undefined ? !!row.outbound_enabled : !!body.outboundEnabled;
+  const nextActionFlags = body.actionFlags === undefined ? parseActionFlags(row.action_flags, scopeType) : normalizeActionFlags(scopeType, body.actionFlags);
   const nextCallbackUrl = body.callbackUrl === undefined ? row.callback_url : (body.callbackUrl ? String(body.callbackUrl).trim() : null);
   const nextEnabled = body.enabled === undefined ? !!row.enabled : !!body.enabled;
+  const nextIpLockEnabled = nextAuthMode === WEBHOOK_AUTH_SIMPLE
+    ? (
+      body.ipLockEnabled === undefined
+        ? (normalizeAuthMode(row.auth_mode) === WEBHOOK_AUTH_SIMPLE ? !!row.ip_lock_enabled : true)
+        : normalizeBoolean(body.ipLockEnabled)
+    )
+    : false;
+  const nextLockedIp = body.resetIpLock === true
+    ? null
+    : (nextAuthMode === WEBHOOK_AUTH_SIMPLE && nextIpLockEnabled ? (row.locked_ip || null) : null);
   const validationError = assertWebhookConfig({
     name: nextName,
+    authMode: nextAuthMode,
     inboundEnabled: nextInboundEnabled,
     outboundEnabled: nextOutboundEnabled,
     callbackUrl: nextCallbackUrl,
+    actionFlags: nextActionFlags,
+    scopeType,
   });
   if (validationError) {
     const error = new Error(validationError);
@@ -231,12 +320,16 @@ function updateWebhook({ req, scopeType, scopeId, webhookId, body }) {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(`
     UPDATE webhooks
-    SET name = ?, inbound_enabled = ?, outbound_enabled = ?, callback_url = ?, enabled = ?, updated_at = ?
+    SET name = ?, auth_mode = ?, inbound_enabled = ?, outbound_enabled = ?, action_flags = ?, ip_lock_enabled = ?, locked_ip = ?, callback_url = ?, enabled = ?, updated_at = ?
     WHERE id = ?
   `).run(
     nextName,
+    nextAuthMode,
     nextInboundEnabled ? 1 : 0,
     nextOutboundEnabled ? 1 : 0,
+    JSON.stringify(nextActionFlags),
+    nextIpLockEnabled ? 1 : 0,
+    nextLockedIp,
     nextCallbackUrl,
     nextEnabled ? 1 : 0,
     now,
@@ -335,6 +428,13 @@ function timingSafeEqualHex(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
+function timingSafeEqualString(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  if (left.length === 0 || right.length === 0 || left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
 function verifyRequestSignature(req, webhook) {
   const timestampHeader = String(req.get('x-catrealm-timestamp') || '').trim();
   const signatureHeader = String(req.get('x-catrealm-signature') || '').trim();
@@ -352,6 +452,46 @@ function verifyRequestSignature(req, webhook) {
     .update(`${timestampHeader}.${rawBody}`, 'utf8')
     .digest('hex');
   if (!timingSafeEqualHex(provided, expected)) return 'Invalid signature';
+  return null;
+}
+
+function verifySimpleToken(token, webhook) {
+  const secret = decryptSecret(webhook.secret_encrypted);
+  if (!secret) return 'Webhook secret unavailable';
+  if (!timingSafeEqualString(token, secret)) return 'Invalid webhook token';
+  return null;
+}
+
+function normalizeIpValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('::ffff:')) return raw.slice(7);
+  return raw;
+}
+
+function extractRequestIp(req) {
+  const forwarded = String(req.get('x-forwarded-for') || '').split(',')[0].trim();
+  if (forwarded) return normalizeIpValue(forwarded);
+  if (req.ip) return normalizeIpValue(req.ip);
+  if (req.socket?.remoteAddress) return normalizeIpValue(req.socket.remoteAddress);
+  return '';
+}
+
+function verifyOrBindSimpleIp(req, webhook) {
+  if (!webhook?.ip_lock_enabled) return null;
+  const requestIp = extractRequestIp(req);
+  if (!requestIp) return 'Unable to determine caller IP';
+  const lockedIp = normalizeIpValue(webhook.locked_ip);
+  if (!lockedIp) {
+    db.prepare(`
+      UPDATE webhooks
+      SET locked_ip = ?, updated_at = ?
+      WHERE id = ?
+    `).run(requestIp, Math.floor(Date.now() / 1000), webhook.id);
+    webhook.locked_ip = requestIp;
+    return null;
+  }
+  if (lockedIp !== requestIp) return 'Caller IP does not match the locked webhook IP';
   return null;
 }
 
@@ -528,7 +668,7 @@ function getOutboundChannelWebhooks(channelId) {
   return db.prepare(`
     SELECT *
     FROM webhooks
-    WHERE scope_type = 'channel' AND scope_id = ? AND enabled = 1 AND outbound_enabled = 1
+    WHERE scope_type = 'channel' AND scope_id = ? AND enabled = 1 AND outbound_enabled = 1 AND auth_mode = 'secured'
   `).all(channelId);
 }
 
@@ -541,6 +681,7 @@ function getOutboundCategoryWebhooksByChannel(channelId) {
       AND c.id = ?
       AND w.enabled = 1
       AND w.outbound_enabled = 1
+      AND w.auth_mode = 'secured'
   `).all(channelId);
 }
 
@@ -562,7 +703,7 @@ function queueChannelDeletedEvent(channel) {
   const hooks = db.prepare(`
     SELECT *
     FROM webhooks
-    WHERE scope_type = 'category' AND scope_id = ? AND enabled = 1 AND outbound_enabled = 1
+    WHERE scope_type = 'category' AND scope_id = ? AND enabled = 1 AND outbound_enabled = 1 AND auth_mode = 'secured'
   `).all(channel.category_id);
   if (hooks.length === 0) return;
   queueDeliveriesForRows(hooks, WEBHOOK_EVENT_CHANNEL_DELETED, {
@@ -736,6 +877,52 @@ function handleChannelWebhookRequest(req) {
   };
 }
 
+function handleSimpleChannelWebhookRequest(req) {
+  const webhook = getPublicWebhook(WEBHOOK_SCOPE_CHANNEL, req.params.webhookId);
+  if (!webhook || !webhook.enabled || !webhook.inbound_enabled || normalizeAuthMode(webhook.auth_mode) !== WEBHOOK_AUTH_SIMPLE) {
+    const error = new Error('Webhook not found');
+    error.status = 404;
+    throw error;
+  }
+  const tokenError = verifySimpleToken(req.params.token, webhook);
+  if (tokenError) {
+    const error = new Error(tokenError);
+    error.status = 401;
+    throw error;
+  }
+  const ipLockError = verifyOrBindSimpleIp(req, webhook);
+  if (ipLockError) {
+    const error = new Error(ipLockError);
+    error.status = 403;
+    throw error;
+  }
+  const flags = parseActionFlags(webhook.action_flags, WEBHOOK_SCOPE_CHANNEL);
+  if (!flags.allowMessageCreate) {
+    const error = new Error('Action not allowed');
+    error.status = 403;
+    throw error;
+  }
+  const channel = db.prepare('SELECT id, name FROM channels WHERE id = ?').get(webhook.scope_id);
+  if (!channel) {
+    const error = new Error('Channel not found');
+    error.status = 404;
+    throw error;
+  }
+  const created = createInboundMessage({
+    webhookId: webhook.id,
+    channelId: channel.id,
+    content: req.body?.content ?? req.body?.message ?? req.body?.text,
+    authorName: req.body?.author?.name ?? req.body?.username ?? req.body?.authorName,
+  });
+  return {
+    ok: true,
+    channelId: channel.id,
+    channelName: channel.name,
+    created: false,
+    messageId: created.messageId,
+  };
+}
+
 function handleCategoryWebhookRequest(req) {
   const webhook = getPublicWebhook(WEBHOOK_SCOPE_CATEGORY, req.params.webhookId);
   if (!webhook || !webhook.enabled || !webhook.inbound_enabled) {
@@ -796,9 +983,82 @@ function handleCategoryWebhookRequest(req) {
   };
 }
 
+function handleSimpleCategoryWebhookRequest(req) {
+  const webhook = getPublicWebhook(WEBHOOK_SCOPE_CATEGORY, req.params.webhookId);
+  if (!webhook || !webhook.enabled || !webhook.inbound_enabled || normalizeAuthMode(webhook.auth_mode) !== WEBHOOK_AUTH_SIMPLE) {
+    const error = new Error('Webhook not found');
+    error.status = 404;
+    throw error;
+  }
+  const tokenError = verifySimpleToken(req.params.token, webhook);
+  if (tokenError) {
+    const error = new Error(tokenError);
+    error.status = 401;
+    throw error;
+  }
+  const ipLockError = verifyOrBindSimpleIp(req, webhook);
+  if (ipLockError) {
+    const error = new Error(ipLockError);
+    error.status = 403;
+    throw error;
+  }
+  const flags = parseActionFlags(webhook.action_flags, WEBHOOK_SCOPE_CATEGORY);
+  if (!flags.allowConversationUpsert) {
+    const error = new Error('Action not allowed');
+    error.status = 403;
+    throw error;
+  }
+  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(webhook.scope_id);
+  if (!category) {
+    const error = new Error('Category not found');
+    error.status = 404;
+    throw error;
+  }
+  const externalKey = String(
+    req.body?.externalKey
+    || req.body?.externalId
+    || req.body?.conversationId
+    || req.body?.userId
+    || ''
+  ).trim();
+  if (!externalKey) {
+    const error = new Error('externalKey required');
+    error.status = 400;
+    throw error;
+  }
+  const result = createChannelForCategoryWebhook({
+    webhookId: webhook.id,
+    categoryId: category.id,
+    externalKey,
+    channelName: req.body?.channelName ?? req.body?.name,
+    channelDescription: req.body?.channelDescription ?? req.body?.description,
+  });
+  if (result.created) emitChannelUpdate();
+  let messageId = null;
+  const messageContent = req.body?.message?.content ?? req.body?.content ?? req.body?.message ?? req.body?.text;
+  if (messageContent) {
+    const createdMessage = createInboundMessage({
+      webhookId: webhook.id,
+      channelId: result.channelId,
+      content: messageContent,
+      authorName: req.body?.message?.author?.name ?? req.body?.author?.name ?? req.body?.username ?? req.body?.authorName,
+    });
+    messageId = createdMessage.messageId;
+  }
+  return {
+    ok: true,
+    channelId: result.channelId,
+    channelName: result.channelName,
+    created: result.created,
+    messageId,
+  };
+}
+
 module.exports = {
   WEBHOOK_SCOPE_CHANNEL,
   WEBHOOK_SCOPE_CATEGORY,
+  WEBHOOK_AUTH_SECURED,
+  WEBHOOK_AUTH_SIMPLE,
   listWebhooks,
   listAllWebhooks,
   createWebhook,
@@ -809,7 +1069,9 @@ module.exports = {
   deleteWebhook,
   deleteWebhookById,
   handleChannelWebhookRequest,
+  handleSimpleChannelWebhookRequest,
   handleCategoryWebhookRequest,
+  handleSimpleCategoryWebhookRequest,
   queueChannelCreatedEvent,
   queueChannelDeletedEvent,
   queueMessageCreatedEvent,
