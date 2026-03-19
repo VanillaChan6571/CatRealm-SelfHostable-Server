@@ -302,7 +302,37 @@ db.exec(`
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (entity_type, entity_id)
   );
+
+  CREATE TABLE IF NOT EXISTS welcome_questions (
+    id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    allow_multiple INTEGER NOT NULL DEFAULT 0,
+    required INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS welcome_answers (
+    id TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL REFERENCES welcome_questions(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    emoji TEXT,
+    role_ids TEXT NOT NULL DEFAULT '[]',
+    channel_ids TEXT NOT NULL DEFAULT '[]',
+    position INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS welcome_rules (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+  );
 `);
+
+try {
+  db.prepare('ALTER TABLE users ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 1').run();
+} catch {
+  // Column already exists
+}
 
 const secureModeEnvRaw = getEnvValue(['SECURE_MODE', 'secure-mode']);
 const secureModeRequested = isTruthy(secureModeEnvRaw, false);

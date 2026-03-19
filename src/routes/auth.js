@@ -8,6 +8,7 @@ const { JWT_SECRET, SERVER_MODE, checkUsernameConflict, authenticateToken } = re
 const { computePermissionsForUser } = require('../permissions');
 const pteroLog = require('../logger');
 const { isBlockedUsername } = require('../usernameBlocklist');
+const { getSetting } = require('../settings');
 const DEFAULT_AVATAR_URL = (
   process.env.DEFAULT_AVATAR_URL ||
   'https://catrealm.app/uploads/avatars/default.jpg'
@@ -51,9 +52,15 @@ router.post('/register', async (req, res) => {
     db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)').run(id, defaultRole.id);
   }
 
+  const welcomeEnabled = getSetting('welcome_board_enabled', '0') === '1';
+  if (welcomeEnabled) {
+    db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(id);
+  }
+
   const permissions = computePermissionsForUser(id, 'member', 0, db);
   const token = jwt.sign({ id, username, role: 'member', is_owner: 0, permissions }, JWT_SECRET, { expiresIn: '7d' });
-  res.status(201).json({ token, user: { id, username, role: 'member', isOwner: false, permissions, accountType: 'local', status: 'online' } });
+  const onboardingCompleted = welcomeEnabled ? false : true;
+  res.status(201).json({ token, user: { id, username, role: 'member', isOwner: false, permissions, accountType: 'local', status: 'online', onboardingCompleted } });
 });
 
 // POST /api/auth/login  (local accounts only — central accounts log in via central auth)
@@ -85,14 +92,14 @@ router.post('/login', (req, res) => {
   );
   res.json({
     token,
-    user: { id: user.id, username: user.username, role: user.role, isOwner: !!user.is_owner, permissions, accountType: 'local', status: user.status || 'online', avatar: user.avatar || null, banner: user.banner || null, bio: user.bio || null },
+    user: { id: user.id, username: user.username, role: user.role, isOwner: !!user.is_owner, permissions, accountType: 'local', status: user.status || 'online', avatar: user.avatar || null, banner: user.banner || null, bio: user.bio || null, onboardingCompleted: user.onboarding_completed !== 0 },
   });
 });
 
 // GET /api/auth/me - return current user with freshly computed permissions
 router.get('/me', authenticateToken, (req, res) => {
   const current = db.prepare(`
-    SELECT id, username, role, is_owner, status, avatar, banner, bio, account_type
+    SELECT id, username, role, is_owner, status, avatar, banner, bio, account_type, onboarding_completed
     FROM users
     WHERE id = ?
   `).get(req.user.id);
@@ -130,6 +137,7 @@ router.get('/me', authenticateToken, (req, res) => {
       banner: current.banner || null,
       bio: current.bio || null,
       viewAsRole: req.viewAsRole || null,
+      onboardingCompleted: current.onboarding_completed !== 0,
     },
   });
 });

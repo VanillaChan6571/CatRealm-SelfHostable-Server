@@ -592,6 +592,7 @@ const expressionsRoutes = require('./routes/expressions');
 const embedsRoutes = require('./routes/embeds');
 const embedMediaRoutes = require('./routes/embedMedia');
 const webhooksRoutes = require('./routes/webhooks');
+const welcomeRoutes = require('./routes/welcome');
 const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
@@ -643,6 +644,7 @@ app.use('/api/expressions', expressionsRoutes);
 app.use('/api/embed-media', embedMediaRoutes);
 app.use('/api/embeds', authenticateToken, embedsRoutes);
 app.use('/api/webhooks', webhooksRoutes);
+app.use('/api', welcomeRoutes);
 
 // ── Create server & start ─────────────────────────────────────────────────────
 async function start() {

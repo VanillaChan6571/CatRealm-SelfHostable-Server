@@ -32,7 +32,7 @@ async function authenticateToken(req, res, next) {
 
         // Look up local user record by central_id
         const centralId = resp.data.user.id;
-        const localUser = db.prepare('SELECT id, username, role, is_owner, is_member FROM users WHERE central_id = ?').get(centralId);
+        const localUser = db.prepare('SELECT id, username, role, is_owner, is_member, onboarding_completed FROM users WHERE central_id = ?').get(centralId);
         if (localUser) {
           const isBanned = !!db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(localUser.id);
           if (isBanned) {
@@ -62,7 +62,7 @@ async function authenticateToken(req, res, next) {
       if (SERVER_MODE === 'decentral_only') {
         return res.status(403).json({ error: 'This server only accepts local accounts' });
       }
-      const user = db.prepare('SELECT id, username, role, is_owner, is_member FROM users WHERE id = ?').get(payload.id);
+      const user = db.prepare('SELECT id, username, role, is_owner, is_member, onboarding_completed FROM users WHERE id = ?').get(payload.id);
       if (!user) return res.status(401).json({ error: 'User not found' });
       if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(user.id)) return res.status(403).json({ error: 'Banned from server' });
       if (Number(user.is_member ?? 1) !== 1) return res.status(403).json({ error: 'Removed from server' });
@@ -78,7 +78,7 @@ async function authenticateToken(req, res, next) {
       if (SERVER_MODE === 'central_only') {
         return res.status(403).json({ error: 'This server only accepts CatRealm central accounts' });
       }
-      const user = db.prepare('SELECT id, username, role, is_owner, is_member FROM users WHERE id = ?').get(payload.id);
+      const user = db.prepare('SELECT id, username, role, is_owner, is_member, onboarding_completed FROM users WHERE id = ?').get(payload.id);
       if (!user) return res.status(401).json({ error: 'User not found' });
       if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(user.id)) return res.status(403).json({ error: 'Banned from server' });
       if (Number(user.is_member ?? 1) !== 1) return res.status(403).json({ error: 'Removed from server' });

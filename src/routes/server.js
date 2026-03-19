@@ -51,6 +51,7 @@ router.get('/', (req, res) => {
     enabled: process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1',
     locked: process.env.CATREALM_SECURE_MODE_LOCKED === '1',
   };
+  const welcomeBoardEnabled = getSetting('welcome_board_enabled', '0') === '1';
 
   res.json({
     name,
@@ -62,6 +63,7 @@ router.get('/', (req, res) => {
     serverIcon,
     serverBanner,
     secureMode,
+    welcomeBoardEnabled,
     version: packageVersion,
     gitHash: gitHash,
     buildInfo: `v${packageVersion} (${gitHash})`
