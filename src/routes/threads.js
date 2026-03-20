@@ -52,7 +52,7 @@ router.get('/forum', (req, res) => {
   const showArchived = archived === '1' ? 1 : 0;
   const rows = db.prepare(`
     SELECT t.id, t.channel_id, t.parent_message_id, t.name, t.created_by, t.created_at,
-      ts.archived, ts.last_message_at,
+      ts.archived, ts.last_message_at, ts.cover_image,
       u.username AS author_username, u.avatar AS author_avatar, u.account_type AS author_account_type,
       COALESCE(dno.display_name, u.display_name) AS author_display_name,
       m.content AS preview_content,
@@ -80,7 +80,7 @@ router.get('/forum', (req, res) => {
 
 // POST /api/threads
 router.post('/', (req, res) => {
-  const { channelId, messageId, name } = req.body ?? {};
+  const { channelId, messageId, name, coverImage } = req.body ?? {};
   if (!channelId || !messageId) return res.status(400).json({ error: 'channelId and messageId required' });
   if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
     return res.status(403).json({ error: 'Missing permission: view_channels' });
@@ -124,10 +124,12 @@ router.post('/', (req, res) => {
     .run(id, channelId, messageId, threadName, req.user.id);
 
   // Initialize thread settings
+  const safeCoverImage = (typeof coverImage === 'string' && /^(https?:\/\/|\/uploads\/|\/ugc\/)/.test(coverImage.trim()))
+    ? coverImage.trim() : null;
   db.prepare(`
-    INSERT INTO thread_settings (thread_id, last_message_at)
-    VALUES (?, unixepoch())
-  `).run(id);
+    INSERT INTO thread_settings (thread_id, last_message_at, cover_image)
+    VALUES (?, unixepoch(), ?)
+  `).run(id, safeCoverImage);
 
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(id);
   res.status(201).json(thread);

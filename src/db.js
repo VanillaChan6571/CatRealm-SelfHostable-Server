@@ -812,6 +812,18 @@ if (!channelSettingsColumns.includes('default_framerate')) {
 }
 db.prepare(`UPDATE channel_settings SET video_quality_mode = '720p' WHERE video_quality_mode IS NULL OR video_quality_mode = 'auto'`).run();
 
+const channelColumns = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
+if (!channelColumns.includes('forum_layout')) {
+  db.prepare("ALTER TABLE channels ADD COLUMN forum_layout TEXT NOT NULL DEFAULT 'user_choice'").run();
+  pteroLog('[CatRealm] Added channels.forum_layout column');
+}
+
+const threadSettingsColumnsAll = db.prepare('PRAGMA table_info(thread_settings)').all().map((c) => c.name);
+if (!threadSettingsColumnsAll.includes('cover_image')) {
+  db.prepare('ALTER TABLE thread_settings ADD COLUMN cover_image TEXT').run();
+  pteroLog('[CatRealm] Added thread_settings.cover_image column');
+}
+
 // Seed default moderation settings
 const modSettingsCount = db.prepare('SELECT COUNT(*) as c FROM moderation_settings').get().c;
 if (modSettingsCount === 0) {

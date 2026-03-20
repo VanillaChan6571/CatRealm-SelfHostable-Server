@@ -124,7 +124,7 @@ router.patch('/:id', (req, res) => {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
     return res.status(403).json({ error: 'Missing permission: manage_channels' });
   }
-  const { name, description, type, categoryId, position, allowDisplayName } = req.body ?? {};
+  const { name, description, type, categoryId, position, allowDisplayName, forumLayout } = req.body ?? {};
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
   if (typeof name === 'string' && name.trim().length >= 2) {
@@ -150,6 +150,9 @@ router.patch('/:id', (req, res) => {
   }
   if (typeof position === 'number') {
     db.prepare('UPDATE channels SET position = ? WHERE id = ?').run(position, req.params.id);
+  }
+  if (typeof forumLayout === 'string' && ['list', 'gallery', 'user_choice'].includes(forumLayout)) {
+    db.prepare('UPDATE channels SET forum_layout = ? WHERE id = ?').run(forumLayout, req.params.id);
   }
   const updated = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
   broadcastChannelUpdate();
