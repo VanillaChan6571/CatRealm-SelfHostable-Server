@@ -812,8 +812,8 @@ if (!channelSettingsColumns.includes('default_framerate')) {
 }
 db.prepare(`UPDATE channel_settings SET video_quality_mode = '720p' WHERE video_quality_mode IS NULL OR video_quality_mode = 'auto'`).run();
 
-const channelColumns = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
-if (!channelColumns.includes('forum_layout')) {
+const channelColumnsLayout = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
+if (!channelColumnsLayout.includes('forum_layout')) {
   db.prepare("ALTER TABLE channels ADD COLUMN forum_layout TEXT NOT NULL DEFAULT 'user_choice'").run();
   pteroLog('[CatRealm] Added channels.forum_layout column');
 }
