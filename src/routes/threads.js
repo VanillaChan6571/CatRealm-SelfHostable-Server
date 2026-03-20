@@ -235,6 +235,18 @@ router.get('/:id/messages', (req, res) => {
   }));
   messages = attachNsfwTags(messages);
 
+  // Normalize attachments: parse JSON column or build from legacy single-attachment fields
+  messages = messages.map((m) => {
+    let attachments = null;
+    if (m.attachments) {
+      try { attachments = JSON.parse(m.attachments); } catch { attachments = null; }
+    }
+    if (!attachments && m.attachment_url) {
+      attachments = [{ url: m.attachment_url, mime: m.attachment_type, size: m.attachment_size }];
+    }
+    return { ...m, attachments: attachments ?? [] };
+  });
+
   res.json(messages.reverse());
 });
 
