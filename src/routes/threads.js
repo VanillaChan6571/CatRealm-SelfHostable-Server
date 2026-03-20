@@ -38,16 +38,59 @@ router.get('/', (req, res) => {
   res.json(threads);
 });
 
+// GET /api/threads/forum?channelId=&archived=
+// Must be before /:id routes to prevent 'forum' being matched as an id
+router.get('/forum', (req, res) => {
+  const { channelId, archived } = req.query;
+  if (!channelId) return res.status(400).json({ error: 'channelId required' });
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
+  const showArchived = archived === '1' ? 1 : 0;
+  const rows = db.prepare(`
+    SELECT t.id, t.channel_id, t.parent_message_id, t.name, t.created_by, t.created_at,
+      ts.archived, ts.last_message_at,
+      u.username AS author_username, u.avatar AS author_avatar, u.account_type AS author_account_type,
+      COALESCE(dno.display_name, u.display_name) AS author_display_name,
+      m.content AS preview_content,
+      (SELECT COUNT(*) FROM messages WHERE thread_id = t.id) AS reply_count
+    FROM threads t
+    LEFT JOIN thread_settings ts ON ts.thread_id = t.id
+    JOIN users u ON u.id = t.created_by
+    LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+    JOIN messages m ON m.id = t.parent_message_id
+    WHERE t.channel_id = ?
+      AND (? = 1 OR COALESCE(ts.archived, 0) = 0)
+    ORDER BY COALESCE(ts.last_message_at, t.created_at) DESC
+  `).all(channelId, showArchived);
+
+  const result = rows.map((r) => {
+    const [decrypted] = decryptMessageRows([{ content: r.preview_content }]);
+    return {
+      ...r,
+      preview_content: (decrypted?.content ?? r.preview_content ?? '').slice(0, 1000),
+    };
+  });
+
+  res.json(result);
+});
+
 // POST /api/threads
 router.post('/', (req, res) => {
-  if (!hasPermission(req.user, PERMISSIONS.CREATE_THREADS)) {
-    return res.status(403).json({ error: 'Missing permission: create_threads' });
-  }
   const { channelId, messageId, name } = req.body ?? {};
   if (!channelId || !messageId) return res.status(400).json({ error: 'channelId and messageId required' });
   if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
     return res.status(403).json({ error: 'Missing permission: view_channels' });
   }
+
+  const channel = db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId);
+  const canPost = channel?.type === 'forum'
+    ? hasPermission(req.user, PERMISSIONS.CREATE_POST_IN_FORUMS) || hasPermission(req.user, PERMISSIONS.CREATE_THREADS)
+    : hasPermission(req.user, PERMISSIONS.CREATE_THREADS);
+  if (!canPost) return res.status(403).json({ error: 'Missing permission' });
   const msg = db.prepare('SELECT id, channel_id FROM messages WHERE id = ?').get(messageId);
   if (!msg || msg.channel_id !== channelId) {
     return res.status(400).json({ error: 'Message not in channel' });

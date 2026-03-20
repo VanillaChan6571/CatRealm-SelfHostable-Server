@@ -49,17 +49,27 @@ function isBoardReady() {
   return ruleCount > 0;
 }
 
+function toAbsoluteAssetUrl(req, value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const proto = req.get('x-forwarded-proto')?.split(',')[0]?.trim() || req.protocol || 'http';
+  const host = req.get('x-forwarded-host')?.split(',')[0]?.trim() || req.get('host') || '';
+  return host ? `${proto}://${host}${raw}` : raw;
+}
+
 // ── Public/Authenticated ──────────────────────────────────────────────────────
 
 // GET /api/welcome/settings
 router.get('/welcome/settings', authenticateToken, (req, res) => {
   const enabled = getSetting('welcome_board_enabled', '0') === '1';
-  const bg = getSetting('welcome_board_bg', '');
+  const bg = toAbsoluteAssetUrl(req, getSetting('welcome_board_bg', ''));
+  const serverIcon = toAbsoluteAssetUrl(req, getSetting('server_icon', null));
   const rulesMode = getSetting('welcome_rules_mode', 'structured');
   const rulesMarkdown = getSetting('welcome_rules_markdown', '');
   const questions = getQuestionsWithAnswers();
   const rules = getRules();
-  res.json({ enabled, bg, questions, rules, rulesMode, rulesMarkdown });
+  res.json({ enabled, bg, serverIcon, questions, rules, rulesMode, rulesMarkdown });
 });
 
 // POST /api/welcome/complete
@@ -114,12 +124,13 @@ router.post('/welcome/complete', authenticateToken, (req, res) => {
 // GET /api/admin/welcome
 router.get('/admin/welcome', authenticateToken, requireManageServer, (req, res) => {
   const enabled = getSetting('welcome_board_enabled', '0') === '1';
-  const bg = getSetting('welcome_board_bg', '');
+  const bg = toAbsoluteAssetUrl(req, getSetting('welcome_board_bg', ''));
+  const serverIcon = toAbsoluteAssetUrl(req, getSetting('server_icon', null));
   const rulesMode = getSetting('welcome_rules_mode', 'structured');
   const rulesMarkdown = getSetting('welcome_rules_markdown', '');
   const questions = getQuestionsWithAnswers();
   const rules = getRules();
-  res.json({ enabled, bg, questions, rules, rulesMode, rulesMarkdown, boardReady: isBoardReady() });
+  res.json({ enabled, bg, serverIcon, questions, rules, rulesMode, rulesMarkdown, boardReady: isBoardReady() });
 });
 
 // PUT /api/admin/welcome/settings

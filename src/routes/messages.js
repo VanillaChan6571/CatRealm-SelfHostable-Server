@@ -1,7 +1,8 @@
 const router = require('express').Router();
+const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasChannelPermission } = require('../permissions');
-const { decryptMessageRows, isSecureModeEnabled } = require('../messageCrypto');
+const { decryptMessageRows, isSecureModeEnabled, encryptMessageContent } = require('../messageCrypto');
 
 function attachNsfwTags(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
@@ -140,6 +141,41 @@ router.get('/:channelId', (req, res) => {
   });
 
   res.json(messages.reverse()); // Return oldest-first
+});
+
+// POST /api/messages/forum - Create a forum post body message, returns it with id
+router.post('/forum', (req, res) => {
+  const { channelId, content } = req.body ?? {};
+  if (!channelId || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({ error: 'channelId and content required' });
+  }
+  const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (channel.type !== 'forum') return res.status(400).json({ error: 'Channel is not a forum' });
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.SEND_MESSAGES, db)) {
+    return res.status(403).json({ error: 'Missing permission: send_messages' });
+  }
+
+  const id = randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  const stored = encryptMessageContent(content.trim());
+  db.prepare('INSERT INTO messages (id, channel_id, user_id, content, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(id, channelId, req.user.id, stored, now);
+
+  const msg = db.prepare(`
+    SELECT m.*, u.username, u.avatar, u.account_type,
+      COALESCE(dno.display_name, u.display_name) AS display_name
+    FROM messages m
+    JOIN users u ON u.id = m.user_id
+    LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+    WHERE m.id = ?
+  `).get(id);
+
+  const [decrypted] = decryptMessageRows([msg]);
+  res.status(201).json(decrypted);
 });
 
 const SEARCH_SELECT = `
