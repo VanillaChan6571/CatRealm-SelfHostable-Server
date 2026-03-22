@@ -55,7 +55,7 @@ router.get('/forum', (req, res) => {
       ts.archived, ts.last_message_at, ts.cover_image,
       u.username AS author_username, u.avatar AS author_avatar, u.account_type AS author_account_type,
       COALESCE(dno.display_name, u.display_name) AS author_display_name,
-      m.content AS preview_content,
+      m.content AS preview_content, m.attachments AS body_attachments_raw,
       (SELECT COUNT(*) FROM messages WHERE thread_id = t.id) AS reply_count
     FROM threads t
     LEFT JOIN thread_settings ts ON ts.thread_id = t.id
@@ -69,9 +69,15 @@ router.get('/forum', (req, res) => {
 
   const result = rows.map((r) => {
     const [decrypted] = decryptMessageRows([{ content: r.preview_content }]);
+    let body_attachments = [];
+    if (r.body_attachments_raw) {
+      try { body_attachments = JSON.parse(r.body_attachments_raw); } catch { body_attachments = []; }
+    }
+    const { body_attachments_raw, ...rest } = r;
     return {
-      ...r,
+      ...rest,
       preview_content: (decrypted?.content ?? r.preview_content ?? '').slice(0, 1000),
+      body_attachments,
     };
   });
 

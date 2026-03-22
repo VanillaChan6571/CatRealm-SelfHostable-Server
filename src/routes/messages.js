@@ -145,7 +145,7 @@ router.get('/:channelId', (req, res) => {
 
 // POST /api/messages/forum - Create a forum post body message, returns it with id
 router.post('/forum', (req, res) => {
-  const { channelId, content } = req.body ?? {};
+  const { channelId, content, attachments } = req.body ?? {};
   if (!channelId || typeof content !== 'string' || !content.trim()) {
     return res.status(400).json({ error: 'channelId and content required' });
   }
@@ -162,8 +162,11 @@ router.post('/forum', (req, res) => {
   const id = randomUUID();
   const now = Math.floor(Date.now() / 1000);
   const stored = encryptMessageContent(content.trim());
-  db.prepare('INSERT INTO messages (id, channel_id, user_id, content, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(id, channelId, req.user.id, stored, now);
+  const attachmentsJson = Array.isArray(attachments) && attachments.length > 0
+    ? JSON.stringify(attachments.map((a) => ({ url: a.url, mime: a.mime ?? null, size: a.size ?? null })))
+    : null;
+  db.prepare('INSERT INTO messages (id, channel_id, user_id, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, channelId, req.user.id, stored, attachmentsJson, now);
 
   const msg = db.prepare(`
     SELECT m.*, u.username, u.avatar, u.account_type,
@@ -175,7 +178,11 @@ router.post('/forum', (req, res) => {
   `).get(id);
 
   const [decrypted] = decryptMessageRows([msg]);
-  res.status(201).json(decrypted);
+  let parsedAttachments = [];
+  if (decrypted.attachments) {
+    try { parsedAttachments = JSON.parse(decrypted.attachments); } catch { parsedAttachments = []; }
+  }
+  res.status(201).json({ ...decrypted, attachments: parsedAttachments });
 });
 
 const SEARCH_SELECT = `
