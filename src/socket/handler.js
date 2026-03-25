@@ -1188,9 +1188,15 @@ function broadcastChannelUpdate() {
   }
 }
 
+function emitToChannel(channelId, event, data) {
+  if (!ioInstance) return;
+  ioInstance.to(channelId).emit(event, data);
+}
+
 module.exports = setupSocketHandlers;
 module.exports.broadcastChannelUpdate = broadcastChannelUpdate;
 module.exports.emitMessage = emitMessage;
+module.exports.emitToChannel = emitToChannel;
 module.exports.emitServerInfoUpdate = emitServerInfoUpdate;
 module.exports.emitServerImportStatus = emitServerImportStatus;
 module.exports.emitPermissionsChanged = emitPermissionsChanged;

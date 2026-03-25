@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows } = require('../messageCrypto');
+const { emitToChannel } = require('../socket/handler');
 
 function attachNsfwTags(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
@@ -139,6 +140,44 @@ router.post('/', (req, res) => {
 
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(id);
   res.status(201).json(thread);
+
+  // Emit live forum post creation to all clients viewing this channel
+  if (channel?.type === 'forum') {
+    try {
+      const author = db.prepare(`
+        SELECT u.username, u.avatar, u.account_type,
+          COALESCE(dno.display_name, u.display_name) AS display_name
+        FROM users u
+        LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+        WHERE u.id = ?
+      `).get(req.user.id);
+      const parentMsg = db.prepare('SELECT content, attachments FROM messages WHERE id = ?').get(messageId);
+      const [decrypted] = decryptMessageRows([{ content: parentMsg?.content ?? '' }]);
+      let body_attachments = [];
+      if (parentMsg?.attachments) {
+        try { body_attachments = JSON.parse(parentMsg.attachments); } catch { body_attachments = []; }
+      }
+      const forumPost = {
+        id,
+        channel_id: channelId,
+        parent_message_id: messageId,
+        name: threadName,
+        created_by: req.user.id,
+        created_at: thread.created_at,
+        archived: null,
+        last_message_at: null,
+        cover_image: safeCoverImage,
+        author_username: author?.username ?? '',
+        author_avatar: author?.avatar ?? null,
+        author_account_type: author?.account_type ?? 'local',
+        author_display_name: author?.display_name ?? null,
+        preview_content: (decrypted?.content ?? '').slice(0, 1000),
+        reply_count: 0,
+        body_attachments,
+      };
+      emitToChannel(channelId, 'forum:created', forumPost);
+    } catch { /* non-critical */ }
+  }
 });
 
 // PATCH /api/threads/:id
@@ -166,6 +205,7 @@ router.delete('/:id', (req, res) => {
   if (!thread) return res.status(404).json({ error: 'Thread not found' });
   db.prepare('DELETE FROM threads WHERE id = ?').run(req.params.id);
   res.json({ success: true });
+  emitToChannel(thread.channel_id, 'forum:deleted', { id: req.params.id, channel_id: thread.channel_id });
 });
 
 // GET /api/threads/:id/messages
