@@ -593,6 +593,7 @@ const embedsRoutes = require('./routes/embeds');
 const embedMediaRoutes = require('./routes/embedMedia');
 const webhooksRoutes = require('./routes/webhooks');
 const welcomeRoutes = require('./routes/welcome');
+const theaterRoutes = require('./routes/theater');
 const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
@@ -621,6 +622,24 @@ app.use('/ugc/server', express.static(UGC_SERVER_DIR, { maxAge: '7d', etag: true
 const UGC_EXPRESSIONS_DIR = process.env.UGC_EXPRESSIONS_DIR || path.join(__dirname, '../data/ugc/expressions');
 if (!fs.existsSync(UGC_EXPRESSIONS_DIR)) fs.mkdirSync(UGC_EXPRESSIONS_DIR, { recursive: true });
 app.use('/ugc/expressions', express.static(UGC_EXPRESSIONS_DIR, { maxAge: '7d', etag: true }));
+const THEATER_CACHE_DIR = process.env.THEATER_CACHE_DIR || path.join(__dirname, '../data/ugc/temp-theater');
+if (!fs.existsSync(THEATER_CACHE_DIR)) fs.mkdirSync(THEATER_CACHE_DIR, { recursive: true });
+// Serve theater video files with auth — token passed as query param or Authorization header
+app.use('/ugc/temp-theater', authenticateToken, (req, res, next) => {
+  // Path format: /:channelId/filename — verify user has VIEW_CHANNELS on that channel
+  const parts = req.path.split('/').filter(Boolean);
+  if (parts.length < 2) return res.status(400).json({ error: 'Invalid path' });
+  const channelId = parts[0];
+  const {
+    PERMISSIONS: P,
+    hasChannelPermission,
+  } = require('./permissions');
+  const db = require('./db');
+  if (!hasChannelPermission(req.user, channelId, P.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  next();
+}, express.static(THEATER_CACHE_DIR, { maxAge: '0', etag: true }));
 
 // ── Landing page ───────────────────────────────────────────────────────────────
 app.use('/', landingRoutes);
@@ -643,6 +662,7 @@ app.use('/api/turn', turnRoutes); // TURN/STUN credentials (no auth required)
 app.use('/api/expressions', expressionsRoutes);
 app.use('/api/embed-media', embedMediaRoutes);
 app.use('/api/embeds', authenticateToken, embedsRoutes);
+app.use('/api/theater',  authenticateToken, theaterRoutes);
 app.use('/api/webhooks', webhooksRoutes);
 app.use('/api', welcomeRoutes);
 

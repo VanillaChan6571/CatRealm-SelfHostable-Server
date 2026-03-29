@@ -95,7 +95,7 @@ router.post('/', (req, res) => {
 
   const maxPos = db.prepare('SELECT MAX(position) as m FROM channels').get().m || 0;
   const id = randomUUID();
-  const channelType = ['basic', 'media', 'voice', 'announcement', 'forum'].includes(type) ? type : 'basic';
+  const channelType = ['basic', 'media', 'voice', 'announcement', 'forum', 'theater'].includes(type) ? type : 'basic';
   const channelName = allowDisplayName ? name.trim() : name.toLowerCase().replace(/\s+/g, '-');
   db.prepare('INSERT INTO channels (id, name, description, type, position, category_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, channelName, description || null, channelType, maxPos + 1, categoryId || null);
@@ -139,7 +139,7 @@ router.patch('/:id', (req, res) => {
   if (typeof description === 'string') {
     db.prepare('UPDATE channels SET description = ? WHERE id = ?').run(description.trim(), req.params.id);
   }
-  if (typeof type === 'string' && ['basic', 'media', 'voice', 'announcement', 'forum'].includes(type)) {
+  if (typeof type === 'string' && ['basic', 'media', 'voice', 'announcement', 'forum', 'theater'].includes(type)) {
     db.prepare('UPDATE channels SET type = ? WHERE id = ?').run(type, req.params.id);
   }
   if (typeof categoryId === 'string' || categoryId === null) {

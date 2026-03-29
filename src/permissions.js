@@ -80,6 +80,8 @@ const PERMISSIONS = {
 PERMISSIONS.USE_EXTERNAL_EMOTES = bit(44);
 PERMISSIONS.USE_EXTERNAL_STICKERS = bit(45);
 PERMISSIONS.SCHEDULE_MESSAGES = bit(46);
+// Theater channel — submit videos / control playback when open-queuing is off.
+PERMISSIONS.PLAY_IN_THEATER = bit(47);
 
 // Backward-compatible aliases used across older routes/components.
 PERMISSIONS.SEND_MEDIA = USER_GENERAL.ATTACH_FILES;

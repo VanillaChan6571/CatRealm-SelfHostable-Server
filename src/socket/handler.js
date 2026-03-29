@@ -24,6 +24,12 @@ const onlineUsers = new Map();
 const voiceRooms = new Map();
 // Track when a voice room first became occupied, using server time as the source of truth.
 const voiceRoomStartedAt = new Map();
+// Track theater rooms: channelId -> Map<userId, { socketId, user }>
+const theaterRooms = new Map();
+// Per-theater-room sync intervals
+const theaterSyncIntervals = new Map();
+// Per-user reaction rate limiting: userId -> { count, resetAt }
+const theaterReactionLimits = new Map();
 
 // Cleanup expired voice messages hourly
 setInterval(() => {
@@ -755,6 +761,191 @@ function setupSocketHandlers(io) {
       if (typeof ack === 'function') ack({ ok: true });
     });
 
+    // ── Theater ────────────────────────────────────────────────────────────────
+    socket.on('theater:join', ({ channelId }, ack) => {
+      if (!channelId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId' });
+        return;
+      }
+      const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
+      if (!channel || channel.type !== 'theater') {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Not a theater channel' });
+        return;
+      }
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: view_channels' });
+        return;
+      }
+
+      const online = onlineUsers.get(user.id);
+      const theaterUser = {
+        id: user.id,
+        username: online?.display_name || authUser.display_name || authUser.username,
+        avatar: online?.avatar || null,
+        roleColor: online?.role_color || null,
+        cameraEnabled: false,
+        muted: false,
+      };
+
+      let room = theaterRooms.get(channelId);
+      if (!room) {
+        room = new Map();
+        theaterRooms.set(channelId, room);
+      }
+      room.set(user.id, { socketId: socket.id, user: theaterUser });
+      socket.currentTheaterChannel = channelId;
+      socket.join(`theater:${channelId}`);
+
+      // Start sync interval if not running
+      if (!theaterSyncIntervals.has(channelId)) {
+        const interval = setInterval(() => {
+          emitTheaterSync(io, channelId);
+        }, 5000);
+        theaterSyncIntervals.set(channelId, interval);
+      }
+
+      const queue = db.prepare(`
+        SELECT tq.*, u.username as added_by_username
+        FROM theater_queue tq LEFT JOIN users u ON u.id = tq.added_by
+        WHERE tq.channel_id = ? ORDER BY tq.position ASC, tq.created_at ASC
+      `).all(channelId);
+      const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+
+      const payload = {
+        ok: true,
+        channelId,
+        users: Array.from(room.values()).map((e) => e.user),
+        queue,
+        state: state || null,
+        you: user.id,
+      };
+      if (typeof ack === 'function') ack(payload);
+      socket.emit('theater:users', { channelId, users: payload.users, you: user.id });
+      socket.to(`theater:${channelId}`).emit('theater:user-joined', { channelId, user: theaterUser });
+      io.emit('theater:room-count', { channelId, count: room.size });
+    });
+
+    socket.on('theater:leave', ({ channelId }) => {
+      if (!channelId) return;
+      leaveTheaterRoom(io, socket, channelId, user.id);
+    });
+
+    socket.on('theater:signal', ({ channelId, to, data }) => {
+      if (!channelId || !to || !data) return;
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
+
+      // Only allow camera, block screenshare SDP
+      const sdp = data && typeof data === 'object' && typeof data.sdp === 'string' ? data.sdp : '';
+      if (sdp && /\bm=video\b/i.test(sdp)) {
+        if (!hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db)) {
+          socket.emit('error', 'Missing permission: camera');
+          return;
+        }
+      }
+
+      const room = theaterRooms.get(channelId);
+      if (!room || !room.get(user.id)) return;
+      const target = room.get(to);
+      if (target && io.sockets.sockets.has(target.socketId)) {
+        io.to(target.socketId).emit('theater:signal', { channelId, from: user.id, data });
+        return;
+      }
+      const online = onlineUsers.get(to);
+      if (!online?.sockets?.size) return;
+      for (const socketId of online.sockets) {
+        io.to(socketId).emit('theater:signal', { channelId, from: user.id, data });
+      }
+    });
+
+    socket.on('theater:camera-state', ({ channelId, cameraEnabled }) => {
+      const room = theaterRooms.get(channelId);
+      if (!room) return;
+      const entry = room.get(user.id);
+      if (!entry) return;
+      entry.user.cameraEnabled = !!cameraEnabled;
+      io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, cameraEnabled: !!cameraEnabled });
+    });
+
+    socket.on('theater:state', ({ channelId, playing, positionMs, currentItemId }, ack) => {
+      if (!channelId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId' });
+        return;
+      }
+      // Permission check: must be PLAY_IN_THEATER or have MANAGE_CHANNELS, or be delegated host
+      const canControl = (() => {
+        if (user.is_owner || user.role === 'owner') return true;
+        if (hasPermission(user, PERMISSIONS.MANAGE_CHANNELS)) return true;
+        if (hasPermission(user, PERMISSIONS.ADMINISTRATOR)) return true;
+        if (hasChannelPermission(user, channelId, PERMISSIONS.PLAY_IN_THEATER, db)) return true;
+        const state = db.prepare('SELECT host_user_id FROM theater_state WHERE channel_id = ?').get(channelId);
+        return state?.host_user_id === user.id;
+      })();
+      if (!canControl) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: play_in_theater' });
+        return;
+      }
+      db.prepare(`
+        INSERT INTO theater_state (channel_id, position_ms, playing, updated_at) VALUES (?, 0, 0, unixepoch())
+        ON CONFLICT(channel_id) DO NOTHING
+      `).run(channelId);
+      const fields = ['updated_at = unixepoch()'];
+      const values = [];
+      if (typeof playing === 'boolean') { fields.push('playing = ?'); values.push(playing ? 1 : 0); }
+      if (typeof positionMs === 'number') { fields.push('position_ms = ?'); values.push(Math.max(0, positionMs)); }
+      if (currentItemId !== undefined) { fields.push('current_item_id = ?'); values.push(currentItemId || null); }
+      values.push(channelId);
+      db.prepare(`UPDATE theater_state SET ${fields.join(', ')} WHERE channel_id = ?`).run(...values);
+      emitTheaterSync(io, channelId);
+      if (typeof ack === 'function') ack({ ok: true });
+    });
+
+    socket.on('theater:reaction', ({ channelId, emoji }) => {
+      if (!channelId || !emoji || typeof emoji !== 'string') return;
+      const room = theaterRooms.get(channelId);
+      if (!room || !room.has(user.id)) return;
+
+      // Check theater_reactions_enabled setting
+      const settings = db.prepare('SELECT theater_reactions_enabled FROM channel_settings WHERE channel_id = ?').get(channelId);
+      if (!settings?.theater_reactions_enabled) return;
+
+      // Rate limit: max 3 per user per second
+      const now = Date.now();
+      let limit = theaterReactionLimits.get(user.id);
+      if (!limit || now > limit.resetAt) {
+        limit = { count: 0, resetAt: now + 1000 };
+        theaterReactionLimits.set(user.id, limit);
+      }
+      if (limit.count >= 3) return;
+      limit.count += 1;
+
+      const online = onlineUsers.get(user.id);
+      const username = online?.display_name || authUser.display_name || authUser.username;
+      io.to(`theater:${channelId}`).emit('theater:reaction', {
+        channelId,
+        userId: user.id,
+        username,
+        emoji: emoji.slice(0, 8), // limit length
+        at: now,
+      });
+    });
+
+    socket.on('theater:host:grant', ({ channelId, userId }, ack) => {
+      if (!channelId || !userId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId or userId' });
+        return;
+      }
+      if (!hasPermission(user, PERMISSIONS.MANAGE_CHANNELS) && !hasPermission(user, PERMISSIONS.ADMINISTRATOR) && !(user.is_owner || user.role === 'owner')) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: manage_channels' });
+        return;
+      }
+      db.prepare(`
+        INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
+        ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
+      `).run(channelId, userId);
+      io.to(`theater:${channelId}`).emit('theater:host-changed', { channelId, hostUserId: userId });
+      if (typeof ack === 'function') ack({ ok: true });
+    });
+
     // ── Set active channel (for typing indicators only) ────────────────────────
     socket.on('channel:join', (channelId) => {
       const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(channelId);
@@ -1081,6 +1272,9 @@ function setupSocketHandlers(io) {
       if (socket.currentVoiceChannel) {
         leaveVoiceRoom(io, socket, socket.currentVoiceChannel, user.id);
       }
+      if (socket.currentTheaterChannel) {
+        leaveTheaterRoom(io, socket, socket.currentTheaterChannel, user.id);
+      }
     });
   });
 }
@@ -1252,6 +1446,113 @@ module.exports.getActiveVoiceUserCount = () => {
 };
 
 module.exports.getActiveVoiceRoomCount = () => voiceRooms.size;
+module.exports.broadcastTheaterQueueUpdate = (channelId) => {
+  if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
+};
+module.exports.broadcastTheaterSync = (channelId) => {
+  if (ioInstance) emitTheaterSync(ioInstance, channelId);
+};
+module.exports.advanceTheaterQueue = (channelId) => {
+  advanceTheaterQueue(channelId);
+  if (ioInstance) emitTheaterSync(ioInstance, channelId);
+};
+
+// ── Theater helpers ────────────────────────────────────────────────────────────
+function leaveTheaterRoom(io, socket, channelId, userId) {
+  const room = theaterRooms.get(channelId);
+  if (!room) return;
+  if (room.has(userId)) {
+    room.delete(userId);
+    socket.leave(`theater:${channelId}`);
+    io.to(`theater:${channelId}`).emit('theater:user-left', { channelId, userId });
+  }
+  if (room.size === 0) {
+    theaterRooms.delete(channelId);
+    // Stop sync interval
+    const interval = theaterSyncIntervals.get(channelId);
+    if (interval) {
+      clearInterval(interval);
+      theaterSyncIntervals.delete(channelId);
+    }
+    // Clear state and cleanup cache
+    db.prepare('UPDATE theater_state SET playing = 0 WHERE channel_id = ?').run(channelId);
+    const { deleteChannelCache } = require('../lib/theaterDownload');
+    deleteChannelCache(channelId).catch(() => {});
+    // Mark all queue items as pending to prevent stale ready state
+    db.prepare("UPDATE theater_queue SET cache_status = 'pending', cache_progress = 0, cached_path = NULL WHERE channel_id = ?").run(channelId);
+    db.prepare('DELETE FROM theater_queue WHERE channel_id = ?').run(channelId);
+    db.prepare('DELETE FROM theater_state WHERE channel_id = ?').run(channelId);
+    db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
+    io.emit('theater:room-count', { channelId, count: 0 });
+  } else {
+    io.emit('theater:room-count', { channelId, count: room.size });
+  }
+  if (socket.currentTheaterChannel === channelId) {
+    socket.currentTheaterChannel = null;
+  }
+}
+
+function emitTheaterSync(io, channelId) {
+  const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  if (!state) {
+    io.to(`theater:${channelId}`).emit('theater:sync', {
+      channelId,
+      currentItemId: null,
+      positionMs: 0,
+      playing: false,
+      updatedAt: Date.now(),
+      videoUrl: null,
+    });
+    return;
+  }
+  let videoUrl = null;
+  if (state.current_item_id) {
+    const item = db.prepare('SELECT cached_path FROM theater_queue WHERE id = ?').get(state.current_item_id);
+    if (item?.cached_path) {
+      const path = require('path');
+      const basename = path.basename(item.cached_path);
+      videoUrl = `/ugc/temp-theater/${channelId}/${basename}`;
+    }
+  }
+  io.to(`theater:${channelId}`).emit('theater:sync', {
+    channelId,
+    currentItemId: state.current_item_id,
+    positionMs: state.position_ms,
+    playing: !!state.playing,
+    updatedAt: state.updated_at * 1000,
+    hostUserId: state.host_user_id,
+    videoUrl,
+  });
+}
+
+function advanceTheaterQueue(channelId) {
+  const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  const currentItemId = state?.current_item_id;
+
+  // Mark current item as played
+  if (currentItemId) {
+    db.prepare("UPDATE theater_queue SET cache_status = 'played' WHERE id = ?").run(currentItemId);
+    db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
+  }
+
+  // Find next ready item
+  const nextItem = db.prepare(`
+    SELECT id FROM theater_queue
+    WHERE channel_id = ? AND cache_status = 'ready' AND id != COALESCE(?, '')
+    ORDER BY position ASC, created_at ASC
+    LIMIT 1
+  `).get(channelId, currentItemId || null);
+
+  db.prepare(`
+    INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
+    VALUES (?, ?, 0, ?, unixepoch())
+    ON CONFLICT(channel_id) DO UPDATE SET
+      current_item_id = excluded.current_item_id,
+      position_ms = 0,
+      playing = excluded.playing,
+      updated_at = unixepoch()
+  `).run(channelId, nextItem?.id || null, nextItem ? 1 : 0);
+}
 
 function leaveVoiceRoom(io, socket, channelId, userId) {
   const room = voiceRooms.get(channelId);
