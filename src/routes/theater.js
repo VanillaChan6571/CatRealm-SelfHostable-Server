@@ -46,7 +46,10 @@ function canControlTheater(user, channelId) {
   if (user.is_owner || user.role === 'owner') return true;
   if (hasPermission(user, PERMISSIONS.MANAGE_CHANNELS)) return true;
   if (hasPermission(user, PERMISSIONS.ADMINISTRATOR)) return true;
-  return hasChannelPermission(user, channelId, PERMISSIONS.PLAY_IN_THEATER, db);
+  if (hasChannelPermission(user, channelId, PERMISSIONS.PLAY_IN_THEATER, db)) return true;
+  // Also allow the delegated theater host (set via theater:host:grant socket event)
+  const state = db.prepare('SELECT host_user_id FROM theater_state WHERE channel_id = ?').get(channelId);
+  return !!(state?.host_user_id && state.host_user_id === user.id);
 }
 
 function getTheaterSettings(channelId) {
@@ -56,7 +59,7 @@ function getTheaterSettings(channelId) {
     FROM channel_settings WHERE channel_id = ?
   `).get(channelId) || {
     theater_max_duration_seconds: 14400,
-    theater_open_queuing: 0,
+    theater_open_queuing: 1,
     theater_auto_advance: 1,
     theater_reactions_enabled: 0,
     theater_skip_voting_enabled: 0,

@@ -832,6 +832,92 @@ if (modSettingsCount === 0) {
   pteroLog('[CatRealm] Created default moderation settings');
 }
 
+// ── Theater tables ─────────────────────────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS theater_queue (
+    id              TEXT PRIMARY KEY,
+    channel_id      TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    added_by        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    source_url      TEXT NOT NULL,
+    source_type     TEXT NOT NULL DEFAULT 'url' CHECK(source_type IN ('url', 'upload')),
+    cached_path     TEXT,
+    cache_status    TEXT NOT NULL DEFAULT 'pending' CHECK(cache_status IN ('pending', 'downloading', 'ready', 'error')),
+    cache_progress  INTEGER NOT NULL DEFAULT 0,
+    duration_seconds INTEGER,
+    thumbnail_url   TEXT,
+    votes           INTEGER NOT NULL DEFAULT 0,
+    position        INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS theater_state (
+    channel_id      TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+    current_item_id TEXT REFERENCES theater_queue(id) ON DELETE SET NULL,
+    position_ms     INTEGER NOT NULL DEFAULT 0,
+    playing         INTEGER NOT NULL DEFAULT 0,
+    host_user_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS theater_skip_votes (
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    item_id    TEXT NOT NULL REFERENCES theater_queue(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (channel_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS theater_queue_votes (
+    queue_item_id TEXT NOT NULL REFERENCES theater_queue(id) ON DELETE CASCADE,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (queue_item_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS theater_domain_allowlist (
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    domain     TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (channel_id, domain)
+  );
+`);
+
+// Add theater columns to channel_settings
+const theaterSettingsCols = db.prepare('PRAGMA table_info(channel_settings)').all().map((c) => c.name);
+if (!theaterSettingsCols.includes('theater_max_duration_seconds')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN theater_max_duration_seconds INTEGER DEFAULT 14400').run();
+  pteroLog('[CatRealm] Added channel_settings.theater_max_duration_seconds column');
+}
+if (!theaterSettingsCols.includes('theater_open_queuing')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN theater_open_queuing INTEGER NOT NULL DEFAULT 1').run();
+  pteroLog('[CatRealm] Added channel_settings.theater_open_queuing column');
+}
+if (!theaterSettingsCols.includes('theater_auto_advance')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN theater_auto_advance INTEGER NOT NULL DEFAULT 1').run();
+  pteroLog('[CatRealm] Added channel_settings.theater_auto_advance column');
+}
+if (!theaterSettingsCols.includes('theater_reactions_enabled')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN theater_reactions_enabled INTEGER NOT NULL DEFAULT 0').run();
+  pteroLog('[CatRealm] Added channel_settings.theater_reactions_enabled column');
+}
+if (!theaterSettingsCols.includes('theater_skip_voting_enabled')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN theater_skip_voting_enabled INTEGER NOT NULL DEFAULT 0').run();
+  pteroLog('[CatRealm] Added channel_settings.theater_skip_voting_enabled column');
+}
+if (!theaterSettingsCols.includes('theater_queue_voting_enabled')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN theater_queue_voting_enabled INTEGER NOT NULL DEFAULT 0').run();
+  pteroLog('[CatRealm] Added channel_settings.theater_queue_voting_enabled column');
+}
+
+// For existing theater channels that were created before open_queuing defaulted to 1,
+// enable open queuing so server admins are not locked out of their own queue.
+db.prepare(`
+  UPDATE channel_settings SET theater_open_queuing = 1
+  WHERE theater_open_queuing = 0
+    AND channel_id IN (SELECT id FROM channels WHERE type = 'theater')
+`).run();
+
 // Create user_content_social_prefs table for Content & Social settings
 db.exec(`
   CREATE TABLE IF NOT EXISTS user_content_social_prefs (
