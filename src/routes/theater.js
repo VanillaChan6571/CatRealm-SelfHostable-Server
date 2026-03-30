@@ -12,6 +12,7 @@ const {
 } = require('../permissions');
 const {
   isDomainAllowed,
+  isYtDlpAvailable,
   getVideoMetadata,
   downloadVideo,
   deleteChannelCache,
@@ -208,9 +209,19 @@ router.post('/:channelId/queue', async (req, res) => {
     return res.status(400).json({ error: 'URL must be http or https' });
   }
 
-  // YouTube — insert immediately without download
   const youtubeId = extractYouTubeId(url);
-  if (youtubeId) {
+
+  // Domain allowlist — YouTube bypasses it so yt-dlp can handle it without
+  // requiring admins to explicitly allow youtube.com
+  if (!youtubeId) {
+    const allowlist = db.prepare('SELECT domain FROM theater_domain_allowlist WHERE channel_id = ?').all(channel.id).map((r) => r.domain);
+    if (!isDomainAllowed(url, allowlist)) {
+      return res.status(403).json({ error: 'Domain not in allowlist' });
+    }
+  }
+
+  // YouTube without yt-dlp — embed via iframe (no file download possible)
+  if (youtubeId && !isYtDlpAvailable()) {
     const itemId = randomUUID();
     const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
     db.prepare(`
@@ -218,9 +229,8 @@ router.post('/:channelId/queue', async (req, res) => {
       VALUES (?, ?, ?, ?, ?, 'url', ?, 'ready', 100, ?)
     `).run(itemId, channel.id, req.user.id, url, url, `youtube:${youtubeId}`, maxPos + 1);
     broadcastTheaterQueueUpdate(channel.id);
-    res.status(201).json({ id: itemId, status: 'ready' });
+    res.status(201).json({ id: itemId, status: 'pending' });
 
-    // Enrich with oEmbed metadata and maybe auto-play in background
     fetchYouTubeOEmbed(youtubeId).then((meta) => {
       if (meta) {
         db.prepare('UPDATE theater_queue SET title = ?, thumbnail_url = ? WHERE id = ?')
@@ -240,12 +250,6 @@ router.post('/:channelId/queue', async (req, res) => {
       broadcastTheaterQueueUpdate(channel.id);
     }).catch(() => broadcastTheaterQueueUpdate(channel.id));
     return;
-  }
-
-  // Domain allowlist check
-  const allowlist = db.prepare('SELECT domain FROM theater_domain_allowlist WHERE channel_id = ?').all(channel.id).map((r) => r.domain);
-  if (!isDomainAllowed(url, allowlist)) {
-    return res.status(403).json({ error: 'Domain not in allowlist' });
   }
 
   // Start download in background, insert item as pending
