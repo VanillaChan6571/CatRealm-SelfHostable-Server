@@ -5,6 +5,7 @@ const multer = require('multer');
 const axios = require('axios');
 const { randomUUID } = require('crypto');
 const db = require('../db');
+const pteroLog = require('../logger');
 const {
   PERMISSIONS,
   hasChannelPermission,
@@ -48,7 +49,8 @@ async function fetchYouTubeOEmbed(videoId) {
       { timeout: 5000 }
     );
     return resp.data || null;
-  } catch {
+  } catch (err) {
+    pteroLog(`[Theater] oEmbed fetch failed for ${videoId}: ${err.message}`);
     return null;
   }
 }
@@ -196,6 +198,7 @@ router.post('/:channelId/queue', async (req, res) => {
 
   const settings = getTheaterSettings(channel.id);
   if (!canControlTheater(req.user, channel.id) && !settings.theater_open_queuing) {
+    pteroLog(`[Theater] Queue add denied — user ${req.user.username} (${req.user.id}) lacks permission in channel ${channel.id}`);
     return res.status(403).json({ error: 'Missing permission: play_in_theater' });
   }
 
@@ -210,18 +213,21 @@ router.post('/:channelId/queue', async (req, res) => {
   }
 
   const youtubeId = extractYouTubeId(url);
+  pteroLog(`[Theater] Queue add by ${req.user.username} in channel ${channel.id}: ${url}${youtubeId ? ` [YouTube ID: ${youtubeId}]` : ''}`);
 
   // Domain allowlist — YouTube bypasses it so yt-dlp can handle it without
   // requiring admins to explicitly allow youtube.com
   if (!youtubeId) {
     const allowlist = db.prepare('SELECT domain FROM theater_domain_allowlist WHERE channel_id = ?').all(channel.id).map((r) => r.domain);
     if (!isDomainAllowed(url, allowlist)) {
+      pteroLog(`[Theater] Queue add blocked — domain not in allowlist: ${parsedUrl.hostname} (channel ${channel.id})`);
       return res.status(403).json({ error: 'Domain not in allowlist' });
     }
   }
 
   // YouTube without yt-dlp — embed via iframe (no file download possible)
   if (youtubeId && !isYtDlpAvailable()) {
+    pteroLog(`[Theater] YouTube iframe fallback for ${youtubeId} — yt-dlp not available`);
     const itemId = randomUUID();
     const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
     db.prepare(`
@@ -233,54 +239,16 @@ router.post('/:channelId/queue', async (req, res) => {
 
     fetchYouTubeOEmbed(youtubeId).then((meta) => {
       if (meta) {
+        pteroLog(`[Theater] oEmbed OK for ${youtubeId}: "${meta.title}"`);
         db.prepare('UPDATE theater_queue SET title = ?, thumbnail_url = ? WHERE id = ?')
           .run(meta.title || url, meta.thumbnail_url || null, itemId);
+      } else {
+        pteroLog(`[Theater] oEmbed returned no data for ${youtubeId}`);
       }
       const state = getState(channel.id);
       const tsettings = getTheaterSettings(channel.id);
       if (tsettings.theater_auto_advance && (!state || !state.current_item_id)) {
-        db.prepare(`
-          INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
-          VALUES (?, ?, 0, 0, unixepoch())
-          ON CONFLICT(channel_id) DO UPDATE SET
-            current_item_id = excluded.current_item_id,
-            position_ms = 0, playing = 0, updated_at = unixepoch()
-        `).run(channel.id, itemId);
-      }
-      broadcastTheaterQueueUpdate(channel.id);
-    }).catch(() => broadcastTheaterQueueUpdate(channel.id));
-    return;
-  }
-
-  // Start download in background, insert item as pending
-  const itemId = randomUUID();
-  const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
-
-  // Get metadata (best-effort, don't block)
-  getVideoMetadata(url).then((meta) => {
-    // Max duration check
-    if (settings.theater_max_duration_seconds > 0 && meta.durationSeconds && meta.durationSeconds > settings.theater_max_duration_seconds) {
-      db.prepare('UPDATE theater_queue SET cache_status = ?, cached_path = NULL WHERE id = ?').run('error', itemId);
-      broadcastTheaterQueueUpdate(channel.id);
-      return;
-    }
-    db.prepare('UPDATE theater_queue SET title = ?, duration_seconds = ?, thumbnail_url = ?, cache_status = ? WHERE id = ?')
-      .run(meta.title || url, meta.durationSeconds || null, meta.thumbnailUrl || null, 'downloading', itemId);
-    broadcastTheaterQueueUpdate(channel.id);
-
-    downloadVideo(url, channel.id, (progress) => {
-      db.prepare('UPDATE theater_queue SET cache_progress = ? WHERE id = ?').run(progress, itemId);
-      if (progress % 10 === 0) broadcastTheaterQueueUpdate(channel.id);
-    }).then(({ filename, durationSeconds }) => {
-      db.prepare(`
-        UPDATE theater_queue
-        SET cached_path = ?, duration_seconds = COALESCE(?, duration_seconds), cache_status = 'ready', cache_progress = 100
-        WHERE id = ?
-      `).run(filename, durationSeconds, itemId);
-      // Auto-play if nothing is currently playing
-      const state = getState(channel.id);
-      const tsettings = getTheaterSettings(channel.id);
-      if (tsettings.theater_auto_advance && (!state || !state.current_item_id)) {
+        pteroLog(`[Theater] Auto-advance: setting YouTube iframe item ${itemId} as current in channel ${channel.id}`);
         db.prepare(`
           INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
           VALUES (?, ?, 0, 0, unixepoch())
@@ -291,25 +259,86 @@ router.post('/:channelId/queue', async (req, res) => {
       }
       broadcastTheaterQueueUpdate(channel.id);
     }).catch((err) => {
+      pteroLog(`[Theater] oEmbed error for ${youtubeId}: ${err.message}`);
+      broadcastTheaterQueueUpdate(channel.id);
+    });
+    return;
+  }
+
+  // Start download in background, insert item as pending
+  const itemId = randomUUID();
+  const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
+
+  // Get metadata (best-effort, don't block)
+  pteroLog(`[Theater] Fetching metadata for item ${itemId}: ${url}`);
+  getVideoMetadata(url).then((meta) => {
+    pteroLog(`[Theater] Metadata for ${itemId}: title="${meta.title}" duration=${meta.durationSeconds ?? 'unknown'}s`);
+
+    // Max duration check
+    if (settings.theater_max_duration_seconds > 0 && meta.durationSeconds && meta.durationSeconds > settings.theater_max_duration_seconds) {
+      pteroLog(`[Theater] Item ${itemId} rejected — duration ${meta.durationSeconds}s exceeds limit ${settings.theater_max_duration_seconds}s`);
+      db.prepare('UPDATE theater_queue SET cache_status = ?, cached_path = NULL WHERE id = ?').run('error', itemId);
+      broadcastTheaterQueueUpdate(channel.id);
+      return;
+    }
+    db.prepare('UPDATE theater_queue SET title = ?, duration_seconds = ?, thumbnail_url = ?, cache_status = ? WHERE id = ?')
+      .run(meta.title || url, meta.durationSeconds || null, meta.thumbnailUrl || null, 'downloading', itemId);
+    broadcastTheaterQueueUpdate(channel.id);
+
+    pteroLog(`[Theater] Download started for item ${itemId} (${meta.title || url})`);
+    let lastLoggedProgress = -1;
+    downloadVideo(url, channel.id, (progress) => {
+      db.prepare('UPDATE theater_queue SET cache_progress = ? WHERE id = ?').run(progress, itemId);
+      if (progress % 10 === 0) broadcastTheaterQueueUpdate(channel.id);
+      if (Math.floor(progress / 25) > Math.floor(lastLoggedProgress / 25)) {
+        pteroLog(`[Theater] Download progress for ${itemId}: ${progress}%`);
+        lastLoggedProgress = progress;
+      }
+    }).then(({ filename, durationSeconds }) => {
+      pteroLog(`[Theater] Download complete for ${itemId}: ${path.basename(filename)}${durationSeconds ? ` (${durationSeconds}s)` : ''}`);
+      db.prepare(`
+        UPDATE theater_queue
+        SET cached_path = ?, duration_seconds = COALESCE(?, duration_seconds), cache_status = 'ready', cache_progress = 100
+        WHERE id = ?
+      `).run(filename, durationSeconds, itemId);
+      // Auto-play if nothing is currently playing
+      const state = getState(channel.id);
+      const tsettings = getTheaterSettings(channel.id);
+      if (tsettings.theater_auto_advance && (!state || !state.current_item_id)) {
+        pteroLog(`[Theater] Auto-advance: setting item ${itemId} as current in channel ${channel.id}`);
+        db.prepare(`
+          INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
+          VALUES (?, ?, 0, 0, unixepoch())
+          ON CONFLICT(channel_id) DO UPDATE SET
+            current_item_id = excluded.current_item_id,
+            position_ms = 0, playing = 0, updated_at = unixepoch()
+        `).run(channel.id, itemId);
+      }
+      broadcastTheaterQueueUpdate(channel.id);
+    }).catch((err) => {
+      pteroLog(`[Theater] Download failed for ${itemId}: ${err.message}`);
       if (err.code !== 'ENOENT') {
         db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('error', itemId);
         broadcastTheaterQueueUpdate(channel.id);
       }
     });
-  }).catch(() => {
+  }).catch((err) => {
     // If metadata fetch fails, still try to download
+    pteroLog(`[Theater] Metadata fetch failed for ${itemId} (${url}): ${err?.message || 'unknown error'} — attempting download anyway`);
     db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('downloading', itemId);
     broadcastTheaterQueueUpdate(channel.id);
     downloadVideo(url, channel.id, (progress) => {
       db.prepare('UPDATE theater_queue SET cache_progress = ? WHERE id = ?').run(progress, itemId);
     }).then(({ filename, durationSeconds }) => {
+      pteroLog(`[Theater] Download complete (no metadata) for ${itemId}: ${path.basename(filename)}`);
       db.prepare(`
         UPDATE theater_queue
         SET cached_path = ?, duration_seconds = ?, cache_status = 'ready', cache_progress = 100, title = COALESCE(NULLIF(title, ?), title)
         WHERE id = ?
       `).run(filename, durationSeconds, url, itemId);
       broadcastTheaterQueueUpdate(channel.id);
-    }).catch(() => {
+    }).catch((err2) => {
+      pteroLog(`[Theater] Download failed (no metadata) for ${itemId}: ${err2?.message || 'unknown error'}`);
       db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('error', itemId);
       broadcastTheaterQueueUpdate(channel.id);
     });
@@ -340,6 +369,8 @@ router.post('/:channelId/queue/upload', videoUpload.single('video'), async (req,
   const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
   const itemId = randomUUID();
   const title = req.body.title?.trim() || path.basename(req.file.originalname, path.extname(req.file.originalname)) || 'Upload';
+  pteroLog(`[Theater] Upload by ${req.user.username} in channel ${channel.id}: "${title}" (${req.file.originalname}, ${Math.round(req.file.size / 1024 / 1024 * 10) / 10} MB)`);
+
 
   db.prepare(`
     INSERT INTO theater_queue (id, channel_id, added_by, title, source_url, source_type, cached_path, cache_status, cache_progress, position)
@@ -373,12 +404,17 @@ router.delete('/:channelId/queue/:itemId', (req, res) => {
 
   const isOwnItem = item.added_by === req.user.id;
   if (!isOwnItem && !canControlTheater(req.user, channel.id)) {
+    pteroLog(`[Theater] Queue remove denied — user ${req.user.username} (${req.user.id}) tried to remove item ${item.id} owned by ${item.added_by}`);
     return res.status(403).json({ error: 'Missing permission' });
   }
 
+  pteroLog(`[Theater] Queue item removed by ${req.user.username}: "${item.title}" (${item.id}) from channel ${channel.id}`);
+
   // Delete cached file
-  if (item.cached_path) {
-    fs.unlink(item.cached_path, () => {});
+  if (item.cached_path && !item.cached_path.startsWith('youtube:')) {
+    fs.unlink(item.cached_path, (err) => {
+      if (err && err.code !== 'ENOENT') pteroLog(`[Theater] Failed to delete cached file ${item.cached_path}: ${err.message}`);
+    });
   }
 
   // If this was the current item, clear state
@@ -502,6 +538,11 @@ router.patch('/:channelId/state', (req, res) => {
   }
 
   const { playing, positionMs, currentItemId } = req.body;
+  const stateParts = [];
+  if (typeof playing === 'boolean') stateParts.push(playing ? 'play' : 'pause');
+  if (typeof positionMs === 'number') stateParts.push(`seek to ${Math.round(positionMs / 1000)}s`);
+  if (currentItemId !== undefined) stateParts.push(`item → ${currentItemId || 'none'}`);
+  pteroLog(`[Theater] State change by ${req.user.username} in channel ${channel.id}: ${stateParts.join(', ') || 'no-op'}`);
   const fields = [];
   const values = [];
   if (typeof playing === 'boolean') { fields.push('playing = ?'); values.push(playing ? 1 : 0); }
@@ -529,6 +570,7 @@ router.post('/:channelId/skip', (req, res) => {
     return res.status(403).json({ error: 'Missing permission: play_in_theater' });
   }
 
+  pteroLog(`[Theater] Skip requested by ${req.user.username} in channel ${channel.id}`);
   const { advanceTheaterQueue } = require('../socket/handler');
   advanceTheaterQueue(channel.id);
   res.json({ success: true });

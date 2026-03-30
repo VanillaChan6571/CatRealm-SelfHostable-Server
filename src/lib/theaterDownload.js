@@ -13,6 +13,7 @@ function isYtDlpAvailable() {
   if (ytDlpAvailable !== null) return ytDlpAvailable;
   const result = spawnSync('yt-dlp', ['--version'], { encoding: 'utf8' });
   ytDlpAvailable = result.status === 0;
+  pteroLog(`[Theater] yt-dlp availability: ${ytDlpAvailable ? `YES (${result.stdout.trim()})` : 'NO — YouTube will use iframe fallback'}`);
   return ytDlpAvailable;
 }
 
@@ -118,6 +119,7 @@ async function downloadVideo(url, channelId, onProgress) {
 }
 
 function downloadWithYtDlp(url, dir, fileId, onProgress) {
+  pteroLog(`[Theater] yt-dlp download start: ${url}`);
   return new Promise((resolve, reject) => {
     const outputTemplate = path.join(dir, `${fileId}.%(ext)s`);
     const args = [
@@ -152,10 +154,14 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
       // yt-dlp duration in JSON output sometimes emitted to stderr
       const durMatch = text.match(/"duration":\s*(\d+)/);
       if (durMatch) durationSeconds = parseInt(durMatch[1], 10);
+      // Log yt-dlp warnings/errors
+      const lines = text.trim().split('\n').filter((l) => l.includes('ERROR') || l.includes('WARNING'));
+      for (const line of lines) pteroLog(`[Theater] yt-dlp: ${line.trim()}`);
     });
 
     proc.on('close', (code) => {
       if (code !== 0) {
+        pteroLog(`[Theater] yt-dlp exited with code ${code} for ${url}`);
         return reject(new Error(`yt-dlp exited with code ${code}`));
       }
       // If filename wasn't captured, glob for our file
@@ -168,6 +174,7 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
       }
       if (!filename) return reject(new Error('Could not determine output filename'));
       if (onProgress) onProgress(100);
+      pteroLog(`[Theater] yt-dlp download complete: ${path.basename(filename)}${durationSeconds ? ` (${durationSeconds}s)` : ''}`);
       resolve({ filename, durationSeconds });
     });
 
@@ -176,6 +183,7 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
 }
 
 function downloadDirect(url, dir, fileId, onProgress) {
+  pteroLog(`[Theater] Direct download start: ${url}`);
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
     const extMatch = urlObj.pathname.match(/\.([a-z0-9]+)(\?|$)/i);
@@ -188,6 +196,7 @@ function downloadDirect(url, dir, fileId, onProgress) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
         fs.unlink(filename, () => {});
+        pteroLog(`[Theater] Direct download redirect → ${res.headers.location}`);
         return downloadDirect(res.headers.location, dir, fileId, onProgress)
           .then(resolve)
           .catch(reject);
@@ -195,6 +204,7 @@ function downloadDirect(url, dir, fileId, onProgress) {
       if (res.statusCode !== 200) {
         file.close();
         fs.unlink(filename, () => {});
+        pteroLog(`[Theater] Direct download failed: HTTP ${res.statusCode} for ${url}`);
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
       const totalBytes = parseInt(res.headers['content-length'] || '0', 10);
@@ -209,6 +219,7 @@ function downloadDirect(url, dir, fileId, onProgress) {
       file.on('finish', () => {
         file.close();
         if (onProgress) onProgress(100);
+        pteroLog(`[Theater] Direct download complete: ${path.basename(filename)}`);
         resolve({ filename, durationSeconds: null });
       });
     });
@@ -216,6 +227,7 @@ function downloadDirect(url, dir, fileId, onProgress) {
     request.on('error', (err) => {
       file.close();
       fs.unlink(filename, () => {});
+      pteroLog(`[Theater] Direct download error for ${url}: ${err.message}`);
       reject(err);
     });
 
@@ -223,6 +235,7 @@ function downloadDirect(url, dir, fileId, onProgress) {
       request.destroy();
       file.close();
       fs.unlink(filename, () => {});
+      pteroLog(`[Theater] Direct download timed out for ${url}`);
       reject(new Error('Request timed out'));
     });
   });

@@ -798,6 +798,7 @@ function setupSocketHandlers(io) {
       room.set(user.id, { socketId: socket.id, user: theaterUser });
       socket.currentTheaterChannel = channelId;
       socket.join(`theater:${channelId}`);
+      pteroLog(`[Theater] ${theaterUser.username} (${user.id}) joined channel ${channelId} — ${room.size} viewer(s)`);
 
       // Start sync interval if not running
       if (!theaterSyncIntervals.has(channelId)) {
@@ -830,6 +831,7 @@ function setupSocketHandlers(io) {
 
     socket.on('theater:leave', ({ channelId }) => {
       if (!channelId) return;
+      pteroLog(`[Theater] ${authUser.username || user.id} left channel ${channelId}`);
       leaveTheaterRoom(io, socket, channelId, user.id);
     });
 
@@ -902,9 +904,15 @@ function setupSocketHandlers(io) {
         return state?.host_user_id === user.id;
       })();
       if (!canControl) {
+        pteroLog(`[Theater] State change denied — ${authUser.username || user.id} lacks permission in channel ${channelId}`);
         if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: play_in_theater' });
         return;
       }
+      const stateParts = [];
+      if (typeof playing === 'boolean') stateParts.push(playing ? 'play' : 'pause');
+      if (typeof positionMs === 'number') stateParts.push(`seek ${Math.round(positionMs / 1000)}s`);
+      if (currentItemId !== undefined) stateParts.push(`item → ${currentItemId || 'none'}`);
+      pteroLog(`[Theater] State change by ${authUser.username || user.id} in channel ${channelId}: ${stateParts.join(', ') || 'no-op'}`);
       db.prepare(`
         INSERT INTO theater_state (channel_id, position_ms, playing, updated_at) VALUES (?, 0, 0, unixepoch())
         ON CONFLICT(channel_id) DO NOTHING
@@ -916,7 +924,7 @@ function setupSocketHandlers(io) {
       if (currentItemId !== undefined) { fields.push('current_item_id = ?'); values.push(currentItemId || null); }
       values.push(channelId);
       db.prepare(`UPDATE theater_state SET ${fields.join(', ')} WHERE channel_id = ?`).run(...values);
-      emitTheaterSync(io, channelId);
+      emitTheaterSync(io, channelId, true);
       if (typeof ack === 'function') ack({ ok: true });
     });
 
@@ -959,6 +967,8 @@ function setupSocketHandlers(io) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: manage_channels' });
         return;
       }
+      const targetUser = db.prepare('SELECT username FROM users WHERE id = ?').get(userId);
+      pteroLog(`[Theater] Host granted to ${targetUser?.username || userId} by ${authUser.username || user.id} in channel ${channelId}`);
       db.prepare(`
         INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
         ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
@@ -1471,11 +1481,11 @@ module.exports.broadcastTheaterQueueUpdate = (channelId) => {
   if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
 };
 module.exports.broadcastTheaterSync = (channelId) => {
-  if (ioInstance) emitTheaterSync(ioInstance, channelId);
+  if (ioInstance) emitTheaterSync(ioInstance, channelId, true);
 };
 module.exports.advanceTheaterQueue = (channelId) => {
   advanceTheaterQueue(channelId);
-  if (ioInstance) emitTheaterSync(ioInstance, channelId);
+  if (ioInstance) emitTheaterSync(ioInstance, channelId, true);
 };
 
 // ── Theater helpers ────────────────────────────────────────────────────────────
@@ -1513,7 +1523,7 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
   }
 }
 
-function emitTheaterSync(io, channelId) {
+function emitTheaterSync(io, channelId, logSync = false) {
   const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
   if (!state) {
     io.to(`theater:${channelId}`).emit('theater:sync', {
@@ -1539,6 +1549,7 @@ function emitTheaterSync(io, channelId) {
       }
     }
   }
+  if (logSync) pteroLog(`[Theater] Sync broadcast for channel ${channelId}: ${state.playing ? 'PLAYING' : 'PAUSED'} at ${Math.round(state.position_ms / 1000)}s, item=${state.current_item_id || 'none'}, videoUrl=${videoUrl || 'none'}`);
   io.to(`theater:${channelId}`).emit('theater:sync', {
     channelId,
     currentItemId: state.current_item_id,
@@ -1556,6 +1567,8 @@ function advanceTheaterQueue(channelId) {
 
   // Mark current item as played
   if (currentItemId) {
+    const currentItem = db.prepare('SELECT title FROM theater_queue WHERE id = ?').get(currentItemId);
+    pteroLog(`[Theater] Advancing queue in channel ${channelId} — marking "${currentItem?.title || currentItemId}" as played`);
     db.prepare("UPDATE theater_queue SET cache_status = 'played' WHERE id = ?").run(currentItemId);
     db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
   }
