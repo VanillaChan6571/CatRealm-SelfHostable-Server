@@ -235,6 +235,25 @@ ensure_native_build_tools() {
   sudo apt install -y build-essential python3
 }
 
+ensure_theater_media_tools() {
+  local missing=0
+
+  for cmd in ffmpeg yt-dlp; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing=1
+      break
+    fi
+  done
+
+  if (( missing == 0 )); then
+    return 0
+  fi
+
+  printf "%bInstalling Theater media tools (ffmpeg, yt-dlp)...%b\n\n" "$YELLOW" "$NC"
+  sudo apt update
+  sudo apt install -y ffmpeg yt-dlp
+}
+
 compiler_supports_cpp20() {
   local compiler="${1:-g++}"
   local test_src test_bin
@@ -922,6 +941,7 @@ install_dependencies() {
   ensure_env_file
   ensure_node_runtime
   ensure_native_build_tools
+  ensure_theater_media_tools
   ensure_modern_cpp_compiler
 
   (

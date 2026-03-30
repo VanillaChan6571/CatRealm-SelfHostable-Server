@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
+const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -57,6 +58,22 @@ function updateConfig() {
     voiceDelayThreshold: Math.max(1, Number(process.env.AUTO_UPDATE_VOICE_DELAY_THRESHOLD || 2) || 2),
     restartOnStartupUpdate: isTruthy(process.env.AUTO_UPDATE_RESTART_ON_START, true),
   };
+}
+
+function logMediaDependencyStatus() {
+  const ytDlp = spawnSync('yt-dlp', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (ytDlp.status === 0) {
+    pteroLog(`[CatRealm] yt-dlp detected: ${(ytDlp.stdout || '').trim()}`);
+  } else {
+    pteroLog('[CatRealm] WARNING: yt-dlp not found. Theater YouTube links will fall back to iframe playback.');
+  }
+
+  const ffmpeg = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (ffmpeg.status === 0) {
+    pteroLog('[CatRealm] ffmpeg detected');
+  } else {
+    pteroLog('[CatRealm] WARNING: ffmpeg not found. Theater YouTube downloads will be limited to progressive formats and media processing features may be reduced.');
+  }
 }
 
 function ensureRepoReady(repoRoot, repo, branch) {
@@ -382,120 +399,28 @@ function setupConsoleCommands(db) {
   }
 
   function printHelp() {
-    pteroLog('[CatRealm Console] Commands: help, secure-status, db-status, db-latest [n], db-checkpoint, db-encrypt-legacy');
-  }
-
-  function printSecureStatus() {
-    const enabled = process.env.CATREALM_SECURE_MODE_EFFECTIVE === '1';
-    const locked = process.env.CATREALM_SECURE_MODE_LOCKED === '1';
-    pteroLog(`[CatRealm Console] Secure mode: ${enabled ? 'ENABLED' : 'DISABLED'} (locked=${locked ? 1 : 0})`);
-  }
-
-  function printDbStatus() {
-    const dbPath = process.env.DB_PATH || path.join(__dirname, '../data/catrealm.db');
-    const walPath = `${dbPath}-wal`;
-    const shmPath = `${dbPath}-shm`;
-    const messageCount = db.prepare('SELECT COUNT(*) as c FROM messages').get().c;
-    const latest = db.prepare('SELECT created_at FROM messages ORDER BY created_at DESC LIMIT 1').get();
-    const walSize = fs.existsSync(walPath) ? fs.statSync(walPath).size : 0;
-    const shmSize = fs.existsSync(shmPath) ? fs.statSync(shmPath).size : 0;
-    pteroLog(`[CatRealm Console] DB_PATH=${dbPath}`);
-    pteroLog(`[CatRealm Console] messages=${messageCount} latest_created_at=${latest?.created_at || 'none'}`);
-    pteroLog(`[CatRealm Console] wal_size=${walSize} shm_size=${shmSize}`);
-  }
-
-  function printLatestMessages(limitRaw) {
-    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 5, 1), 50);
-    const rows = db.prepare(`
-      SELECT id, channel_id, user_id, created_at, content
-      FROM messages
-      ORDER BY created_at DESC
-      LIMIT ?
-    `).all(limit);
-    if (rows.length === 0) {
-      pteroLog('[CatRealm Console] No messages found.');
-      return;
-    }
-    for (const row of rows) {
-      const encrypted = typeof row.content === 'string' && row.content.startsWith('enc:v1:');
-      const preview = String(row.content || '').slice(0, 36).replace(/\s+/g, ' ');
-      pteroLog(`[CatRealm Console] msg=${row.id} ch=${row.channel_id} user=${row.user_id} ts=${row.created_at} encrypted=${encrypted ? 1 : 0} preview=${preview}`);
-    }
-  }
-
-  function runCheckpoint() {
-    try {
-      const result = db.prepare('PRAGMA wal_checkpoint(FULL)').get();
-      if (result && typeof result === 'object') {
-        const busy = result.busy ?? 'n/a';
-        const logFrames = result.log ?? result['wal frames'] ?? 'n/a';
-        const checkpointed = result.checkpointed ?? result['checkpointed frames'] ?? 'n/a';
-        pteroLog(`[CatRealm Console] WAL checkpoint complete (busy=${busy} log=${logFrames} checkpointed=${checkpointed})`);
-      } else {
-        pteroLog('[CatRealm Console] WAL checkpoint complete.');
-      }
-    } catch (err) {
-      pteroLog(`[CatRealm Console] WAL checkpoint failed: ${err.message}`);
-    }
-  }
-
-  function encryptLegacyMessages() {
-    const { encryptMessageContent } = require('./messageCrypto');
-    const rows = db.prepare(`
-      SELECT id, content
-      FROM messages
-      WHERE content NOT LIKE 'enc:v1:%'
-    `).all();
-    if (rows.length === 0) {
-      pteroLog('[CatRealm Console] No legacy plaintext messages found.');
-      return;
-    }
-
-    const updateMessage = db.prepare('UPDATE messages SET content = ? WHERE id = ?');
-    const migrateMessages = db.transaction((items) => {
-      for (const row of items) {
-        updateMessage.run(encryptMessageContent(row.content || ''), row.id);
-      }
-    });
-    migrateMessages(rows);
-    pteroLog(`[CatRealm Console] Encrypted ${rows.length} legacy plaintext messages.`);
+    pteroLog(`[CatRealm Console] ${getDiagnosticHelpText()}`);
   }
 
   function handleCommand(rawInput) {
     const raw = String(rawInput || '').trim();
     if (!raw) return;
-    const [command, ...args] = raw.split(/\s+/);
-    const cmd = command.toLowerCase();
-
-    switch (cmd) {
-      case 'help':
-      case 'catrealm-help':
-        printHelp();
-        break;
-      case 'secure-status':
-      case 'catrealm-secure':
-        printSecureStatus();
-        break;
-      case 'db-status':
-      case 'catrealm-db-status':
-        printDbStatus();
-        break;
-      case 'db-latest':
-      case 'catrealm-db-latest':
-        printLatestMessages(args[0]);
-        break;
-      case 'db-checkpoint':
-      case 'catrealm-db-checkpoint':
-        runCheckpoint();
-        break;
-      case 'db-encrypt-legacy':
-      case 'catrealm-db-encrypt-legacy':
-        encryptLegacyMessages();
-        break;
-      default:
-        pteroLog(`[CatRealm Console] Unknown command: ${cmd}. Type "help".`);
-        break;
+    if (raw.toLowerCase() === 'help' || raw.toLowerCase() === 'catrealm-help') {
+      printHelp();
+      return;
     }
+
+    const result = runDiagnosticCommand(db, raw);
+    if (!result) return;
+
+    if (result.ok) {
+      for (const line of result.lines || []) {
+        pteroLog(`[CatRealm Console] ${line}`);
+      }
+      return;
+    }
+
+    pteroLog(`[CatRealm Console] ${result.error}. Type "help".`);
   }
 
   let stdinBuffer = '';
@@ -672,6 +597,7 @@ async function start() {
     source: 'startup',
     getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
   });
+  logMediaDependencyStatus();
 
   let httpServer;
   const sslCert = process.env.SSL_CERT_PATH;

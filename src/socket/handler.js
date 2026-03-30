@@ -808,7 +808,7 @@ function setupSocketHandlers(io) {
         cameraEnabled: false,
         micEnabled: false,
         deafened: false,
-        muted: false,
+        muted: true,
       };
 
       if (socket.currentTheaterChannel && socket.currentTheaterChannel !== channelId) {
@@ -935,7 +935,13 @@ function setupSocketHandlers(io) {
       const entry = room.get(user.id);
       if (!entry) return;
       entry.user.micEnabled = !!micEnabled;
-      io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, micEnabled: !!micEnabled });
+      entry.user.muted = !entry.user.micEnabled || !!entry.user.deafened;
+      io.to(`theater:${channelId}`).emit('theater:user-state', {
+        channelId,
+        userId: user.id,
+        micEnabled: !!micEnabled,
+        muted: entry.user.muted,
+      });
       emitTheaterRoomPresence(io, channelId);
     });
 
@@ -945,7 +951,13 @@ function setupSocketHandlers(io) {
       const entry = room.get(user.id);
       if (!entry) return;
       entry.user.deafened = !!deafened;
-      io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, deafened: !!deafened });
+      entry.user.muted = !!deafened || !entry.user.micEnabled;
+      io.to(`theater:${channelId}`).emit('theater:user-state', {
+        channelId,
+        userId: user.id,
+        deafened: !!deafened,
+        muted: entry.user.muted,
+      });
       emitTheaterRoomPresence(io, channelId);
     });
 

@@ -27,6 +27,7 @@ if not exist "!TEMP_DIR!" mkdir "!TEMP_DIR!"
 echo [INFO] This installer will ensure these dependencies exist:
 echo - Git
 echo - Node.js LTS
+echo - FFmpeg
 echo - Python 3
 echo - Visual Studio C++ Build Tools
 echo - node-gyp (global npm package)
@@ -40,6 +41,7 @@ call :clone_repo_if_needed
 call :install_node
 call :ensure_node_installed
 call :ensure_node_in_path
+call :install_ffmpeg
 echo Install Python 3 now? Required for native module builds on Node 24.
 choice /c YN /n /m "Install Python [Y/N]: "
 if errorlevel 2 set "INSTALL_PYTHON=0"
@@ -75,6 +77,31 @@ echo.
 echo Press any key to exit...
 pause >nul
 exit /b 0
+
+:install_ffmpeg
+where ffmpeg >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] FFmpeg is already installed.
+    echo.
+    goto :eof
+)
+
+if "!HAS_WINGET!"=="1" (
+    echo [INFO] Installing FFmpeg via winget...
+    winget install --id "Gyan.FFmpeg" --source winget --silent --accept-package-agreements --accept-source-agreements
+    if not errorlevel 1 (
+        echo [SUCCESS] Installed FFmpeg.
+        echo.
+        goto :eof
+    )
+    echo [WARNING] winget install failed for FFmpeg.
+)
+
+echo [WARNING] FFmpeg is required for Theater YouTube downloads and media processing.
+echo [WARNING] Install FFmpeg manually if Theater downloads fail on this server.
+echo.
+set "HAD_ERRORS=1"
+goto :eof
 
 :install_git
 where git >nul 2>&1
