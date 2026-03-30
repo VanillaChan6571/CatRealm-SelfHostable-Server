@@ -26,6 +26,8 @@ const voiceRooms = new Map();
 const voiceRoomStartedAt = new Map();
 // Track theater rooms: channelId -> Map<userId, { socketId, user }>
 const theaterRooms = new Map();
+// Track when a theater room first became occupied (server-authoritative start time)
+const theaterRoomStartedAt = new Map();
 // Per-theater-room sync intervals
 const theaterSyncIntervals = new Map();
 // Per-user reaction rate limiting: userId -> { count, resetAt }
@@ -349,6 +351,15 @@ function setupSocketHandlers(io) {
     const categories = db.prepare('SELECT * FROM categories ORDER BY position').all();
     socket.emit('category:list', categories);
 
+    // Send current theater room states so sidebar shows occupants immediately
+    for (const [chId, room] of theaterRooms.entries()) {
+      socket.emit('theater:room-users', {
+        channelId: chId,
+        users: Array.from(room.values()).map((e) => e.user),
+        startedAt: theaterRoomStartedAt.get(chId) ?? null,
+      });
+    }
+
     // Send server info
     const { getSetting } = require('../settings');
     const serverName = getSetting('server_name', process.env.SERVER_NAME || 'CatRealm Server');
@@ -519,6 +530,16 @@ function setupSocketHandlers(io) {
     socket.on('voice:rooms:get', (ack) => {
       if (typeof ack !== 'function') return;
       ack({ rooms: buildVoiceRoomCounts() });
+    });
+
+    socket.on('theater:rooms:get', (ack) => {
+      if (typeof ack !== 'function') return;
+      const rooms = Array.from(theaterRooms.entries()).map(([channelId, room]) => ({
+        channelId,
+        users: Array.from(room.values()).map((e) => e.user),
+        startedAt: theaterRoomStartedAt.get(channelId) ?? null,
+      }));
+      ack({ rooms });
     });
 
     socket.on('voice:state', ({ channelId, muted, deafened }) => {
@@ -794,6 +815,7 @@ function setupSocketHandlers(io) {
       if (!room) {
         room = new Map();
         theaterRooms.set(channelId, room);
+        theaterRoomStartedAt.set(channelId, Date.now());
       }
       room.set(user.id, { socketId: socket.id, user: theaterUser });
       socket.currentTheaterChannel = channelId;
@@ -827,7 +849,7 @@ function setupSocketHandlers(io) {
       socket.emit('theater:users', { channelId, users: payload.users, you: user.id });
       socket.to(`theater:${channelId}`).emit('theater:user-joined', { channelId, user: theaterUser });
       io.emit('theater:room-count', { channelId, count: room.size });
-      io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user) });
+      io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user), startedAt: theaterRoomStartedAt.get(channelId) ?? null });
     });
 
     socket.on('theater:leave', ({ channelId }) => {
@@ -1515,11 +1537,12 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
     db.prepare('DELETE FROM theater_queue WHERE channel_id = ?').run(channelId);
     db.prepare('DELETE FROM theater_state WHERE channel_id = ?').run(channelId);
     db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
+    theaterRoomStartedAt.delete(channelId);
     io.emit('theater:room-count', { channelId, count: 0 });
-    io.emit('theater:room-users', { channelId, users: [] });
+    io.emit('theater:room-users', { channelId, users: [], startedAt: null });
   } else {
     io.emit('theater:room-count', { channelId, count: room.size });
-    io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user) });
+    io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user), startedAt: theaterRoomStartedAt.get(channelId) ?? null });
   }
   if (socket.currentTheaterChannel === channelId) {
     socket.currentTheaterChannel = null;
