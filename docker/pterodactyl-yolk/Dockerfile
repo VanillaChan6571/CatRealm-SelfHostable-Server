@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_24
+ARG BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
 FROM ${BASE_IMAGE}
 
 USER root

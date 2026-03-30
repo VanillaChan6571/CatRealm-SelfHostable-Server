@@ -16,7 +16,6 @@ The Dockerfile lives at:
 The GitHub Actions workflow publishes these tags to GHCR:
 
 - `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_20`
-- `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_24`
 
 ## Why this exists
 
@@ -48,10 +47,9 @@ If you want to publish your own image instead of using GHCR:
 ```bash
 docker build \
   -f docker/pterodactyl-yolk/Dockerfile \
-  --build-arg BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_24 \
-  -t your-registry/catrealm-selfhostable-server-yolk:nodejs_24 \
+  --build-arg BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20 \
+  -t your-registry/catrealm-selfhostable-server-yolk:nodejs_20 \
   .
 ```
 
 Then push that image and point your egg at it.
-

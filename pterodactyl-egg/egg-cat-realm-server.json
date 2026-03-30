@@ -13,9 +13,7 @@
     ],
     "docker_images": {
         "CatRealm Runtime (NodeJS 20 + FFmpeg)": "ghcr.io\/vanillachan6571\/catrealm-selfhostable-server-yolk:nodejs_20",
-        "CatRealm Runtime (NodeJS 24 + FFmpeg)": "ghcr.io\/vanillachan6571\/catrealm-selfhostable-server-yolk:nodejs_24",
-        "NodeJS 20": "ghcr.io\/pterodactyl\/yolks:nodejs_20",
-        "NodeJS 24 - Future Release Point": "ghcr.io\/pterodactyl\/yolks:nodejs_24"
+        "NodeJS 20": "ghcr.io\/pterodactyl\/yolks:nodejs_20"
     },
     "file_denylist": [],
     "startup": "node scripts/pterodactyl-bootstrap.js",

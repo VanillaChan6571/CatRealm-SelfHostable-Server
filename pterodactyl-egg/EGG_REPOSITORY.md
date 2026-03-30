@@ -11,7 +11,6 @@ This egg includes:
 - Install-time OS prerequisites via `curl git python3 make g++ ffmpeg yt-dlp`
 - Optional custom runtime images published from this repo:
   - `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_20`
-  - `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_24`
 - Safe-directory handling for `/mnt/server` during git install/update
 - Auto-update controls:
   - `AUTO_UPDATE`

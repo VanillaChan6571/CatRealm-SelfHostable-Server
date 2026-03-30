@@ -23,14 +23,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tag: nodejs_20
-            base_image: ghcr.io/pterodactyl/yolks:nodejs_20
-          - tag: nodejs_24
-            base_image: ghcr.io/pterodactyl/yolks:nodejs_24
 
     steps:
       - name: Checkout
@@ -53,6 +45,6 @@ jobs:
           file: docker/pterodactyl-yolk/Dockerfile
           push: true
           build-args: |
-            BASE_IMAGE=${{ matrix.base_image }}
+            BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
           tags: |
-            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:${{ matrix.tag }}
+            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_20
