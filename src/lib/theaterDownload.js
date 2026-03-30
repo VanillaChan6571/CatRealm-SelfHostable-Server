@@ -149,6 +149,7 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
     const proc = spawn('yt-dlp', args);
     let filename = null;
     let durationSeconds = null;
+    let stderrOutput = '';
 
     proc.stdout.on('data', (chunk) => {
       const text = chunk.toString();
@@ -166,6 +167,7 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
 
     proc.stderr.on('data', (chunk) => {
       const text = chunk.toString();
+      stderrOutput += text;
       // yt-dlp duration in JSON output sometimes emitted to stderr
       const durMatch = text.match(/"duration":\s*(\d+)/);
       if (durMatch) durationSeconds = parseInt(durMatch[1], 10);
@@ -177,7 +179,15 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
     proc.on('close', (code) => {
       if (code !== 0) {
         pteroLog(`[Theater] yt-dlp exited with code ${code} for ${url}`);
-        return reject(new Error(`yt-dlp exited with code ${code}`));
+        const detail = stderrOutput
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .find((line) => line.includes('ERROR') || line.includes('WARNING'));
+        const error = new Error(detail ? `yt-dlp exited with code ${code}: ${detail}` : `yt-dlp exited with code ${code}`);
+        error.code = code;
+        error.stderr = stderrOutput;
+        return reject(error);
       }
       // If filename wasn't captured, glob for our file
       if (!filename) {

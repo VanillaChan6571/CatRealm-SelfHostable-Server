@@ -56,7 +56,7 @@ async function fetchYouTubeOEmbed(videoId) {
 }
 
 function shouldFallbackToYouTubeIframe(err) {
-  const message = String(err?.message || err || '').toLowerCase();
+  const message = `${String(err?.message || err || '')}\n${String(err?.stderr || '')}`.toLowerCase();
   return (
     message.includes('sign in to confirm you’re not a bot')
     || message.includes("sign in to confirm you're not a bot")
