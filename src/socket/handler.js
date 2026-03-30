@@ -782,8 +782,11 @@ function setupSocketHandlers(io) {
         id: user.id,
         username: online?.display_name || authUser.display_name || authUser.username,
         avatar: online?.avatar || null,
+        accountType: authUser.account_type || 'local',
         roleColor: online?.role_color || null,
         cameraEnabled: false,
+        micEnabled: false,
+        deafened: false,
         muted: false,
       };
 
@@ -864,6 +867,24 @@ function setupSocketHandlers(io) {
       if (!entry) return;
       entry.user.cameraEnabled = !!cameraEnabled;
       io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, cameraEnabled: !!cameraEnabled });
+    });
+
+    socket.on('theater:mic-state', ({ channelId, micEnabled }) => {
+      const room = theaterRooms.get(channelId);
+      if (!room) return;
+      const entry = room.get(user.id);
+      if (!entry) return;
+      entry.user.micEnabled = !!micEnabled;
+      io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, micEnabled: !!micEnabled });
+    });
+
+    socket.on('theater:deafen-state', ({ channelId, deafened }) => {
+      const room = theaterRooms.get(channelId);
+      if (!room) return;
+      const entry = room.get(user.id);
+      if (!entry) return;
+      entry.user.deafened = !!deafened;
+      io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, deafened: !!deafened });
     });
 
     socket.on('theater:state', ({ channelId, playing, positionMs, currentItemId }, ack) => {
