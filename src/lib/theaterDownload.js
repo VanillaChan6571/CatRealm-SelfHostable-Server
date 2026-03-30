@@ -135,18 +135,17 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
     const formatSelector = canMergeFormats
       ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4][protocol!*=m3u8]/best[protocol!*=m3u8]/best'
       : 'best[ext=mp4][protocol!*=m3u8]/best[ext=webm][protocol!*=m3u8]/best[protocol!*=m3u8]/best';
-    const args = [
-      '--no-playlist',
-      '--js-runtimes', `node:${process.execPath}`,
+    const args = ['--no-playlist', '--js-runtimes', `node:${process.execPath}`];
+    if (canMergeFormats) {
+      args.push('--merge-output-format', 'mp4');
+    }
+    args.push(
       '--format', formatSelector,
       '--output', outputTemplate,
       '--newline',
       '--progress',
       url,
-    ];
-    if (canMergeFormats) {
-      args.splice(4, 0, '--merge-output-format', 'mp4');
-    }
+    );
     const proc = spawn('yt-dlp', args);
     let filename = null;
     let durationSeconds = null;
