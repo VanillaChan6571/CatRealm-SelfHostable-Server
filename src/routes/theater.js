@@ -55,6 +55,43 @@ async function fetchYouTubeOEmbed(videoId) {
   }
 }
 
+function shouldFallbackToYouTubeIframe(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  return (
+    message.includes('sign in to confirm you’re not a bot')
+    || message.includes("sign in to confirm you're not a bot")
+    || message.includes('--cookies')
+    || message.includes('cookies-from-browser')
+    || message.includes('authentication')
+  );
+}
+
+async function fallbackItemToYouTubeIframe({ channelId, itemId, sourceUrl, youtubeId, settings }) {
+  const meta = await fetchYouTubeOEmbed(youtubeId);
+  const title = meta?.title || sourceUrl;
+  const thumbnailUrl = meta?.thumbnail_url || null;
+
+  db.prepare(`
+    UPDATE theater_queue
+    SET title = ?, thumbnail_url = ?, cached_path = ?, cache_status = 'ready', cache_progress = 100
+    WHERE id = ?
+  `).run(title, thumbnailUrl, `youtube:${youtubeId}`, itemId);
+
+  const state = getState(channelId);
+  if (settings.theater_auto_advance && (!state || !state.current_item_id)) {
+    pteroLog(`[Theater] Auto-advance: setting YouTube iframe item ${itemId} as current in channel ${channelId}`);
+    db.prepare(`
+      INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
+      VALUES (?, ?, 0, 0, unixepoch())
+      ON CONFLICT(channel_id) DO UPDATE SET
+        current_item_id = excluded.current_item_id,
+        position_ms = 0, playing = 0, updated_at = unixepoch()
+    `).run(channelId, itemId);
+  }
+
+  broadcastTheaterQueueUpdate(channelId);
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getChannel(channelId) {
@@ -285,6 +322,15 @@ router.post('/:channelId/queue', async (req, res) => {
       .run(meta.title || url, meta.durationSeconds || null, meta.thumbnailUrl || null, 'downloading', itemId);
     broadcastTheaterQueueUpdate(channel.id);
 
+    if (youtubeId && (!meta.durationSeconds || !meta.thumbnailUrl || meta.title === 'watch')) {
+      fetchYouTubeOEmbed(youtubeId).then((oembed) => {
+        if (!oembed) return;
+        db.prepare('UPDATE theater_queue SET title = ?, thumbnail_url = ? WHERE id = ?')
+          .run(oembed.title || meta.title || url, oembed.thumbnail_url || meta.thumbnailUrl || null, itemId);
+        broadcastTheaterQueueUpdate(channel.id);
+      }).catch(() => {});
+    }
+
     pteroLog(`[Theater] Download started for item ${itemId} (${meta.title || url})`);
     let lastLoggedProgress = -1;
     downloadVideo(url, channel.id, (progress) => {
@@ -317,6 +363,21 @@ router.post('/:channelId/queue', async (req, res) => {
       broadcastTheaterQueueUpdate(channel.id);
     }).catch((err) => {
       pteroLog(`[Theater] Download failed for ${itemId}: ${err.message}`);
+      if (youtubeId && shouldFallbackToYouTubeIframe(err)) {
+        pteroLog(`[Theater] Falling back to YouTube iframe for ${itemId} (${youtubeId}) after yt-dlp auth/bot challenge`);
+        fallbackItemToYouTubeIframe({
+          channelId: channel.id,
+          itemId,
+          sourceUrl: url,
+          youtubeId,
+          settings,
+        }).catch((fallbackErr) => {
+          pteroLog(`[Theater] YouTube iframe fallback failed for ${itemId}: ${fallbackErr.message}`);
+          db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('error', itemId);
+          broadcastTheaterQueueUpdate(channel.id);
+        });
+        return;
+      }
       if (err.code !== 'ENOENT') {
         db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('error', itemId);
         broadcastTheaterQueueUpdate(channel.id);
@@ -339,6 +400,21 @@ router.post('/:channelId/queue', async (req, res) => {
       broadcastTheaterQueueUpdate(channel.id);
     }).catch((err2) => {
       pteroLog(`[Theater] Download failed (no metadata) for ${itemId}: ${err2?.message || 'unknown error'}`);
+      if (youtubeId && shouldFallbackToYouTubeIframe(err2)) {
+        pteroLog(`[Theater] Falling back to YouTube iframe for ${itemId} (${youtubeId}) after metadata/download failure`);
+        fallbackItemToYouTubeIframe({
+          channelId: channel.id,
+          itemId,
+          sourceUrl: url,
+          youtubeId,
+          settings,
+        }).catch((fallbackErr) => {
+          pteroLog(`[Theater] YouTube iframe fallback failed for ${itemId}: ${fallbackErr.message}`);
+          db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('error', itemId);
+          broadcastTheaterQueueUpdate(channel.id);
+        });
+        return;
+      }
       db.prepare('UPDATE theater_queue SET cache_status = ? WHERE id = ?').run('error', itemId);
       broadcastTheaterQueueUpdate(channel.id);
     });
