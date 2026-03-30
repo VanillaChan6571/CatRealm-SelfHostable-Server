@@ -1,5 +1,9 @@
 name: Publish Pterodactyl Yolk
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  GHCR_OWNER: vanillachan6571
+
 on:
   workflow_dispatch:
   push:
@@ -51,5 +55,4 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ matrix.base_image }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/catrealm-selfhostable-server-yolk:${{ matrix.tag }}
-
+            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:${{ matrix.tag }}
