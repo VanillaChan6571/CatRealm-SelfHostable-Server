@@ -827,6 +827,7 @@ function setupSocketHandlers(io) {
       socket.emit('theater:users', { channelId, users: payload.users, you: user.id });
       socket.to(`theater:${channelId}`).emit('theater:user-joined', { channelId, user: theaterUser });
       io.emit('theater:room-count', { channelId, count: room.size });
+      io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user) });
     });
 
     socket.on('theater:leave', ({ channelId }) => {
@@ -1515,8 +1516,10 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
     db.prepare('DELETE FROM theater_state WHERE channel_id = ?').run(channelId);
     db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
     io.emit('theater:room-count', { channelId, count: 0 });
+    io.emit('theater:room-users', { channelId, users: [] });
   } else {
     io.emit('theater:room-count', { channelId, count: room.size });
+    io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user) });
   }
   if (socket.currentTheaterChannel === channelId) {
     socket.currentTheaterChannel = null;
