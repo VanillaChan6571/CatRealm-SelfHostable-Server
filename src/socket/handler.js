@@ -811,12 +811,44 @@ function setupSocketHandlers(io) {
         muted: false,
       };
 
+      if (socket.currentTheaterChannel && socket.currentTheaterChannel !== channelId) {
+        leaveTheaterRoom(io, socket, socket.currentTheaterChannel, user.id);
+      }
+
       let room = theaterRooms.get(channelId);
       if (!room) {
         room = new Map();
         theaterRooms.set(channelId, room);
+      }
+      if (!theaterRoomStartedAt.has(channelId) || room.size === 0) {
         theaterRoomStartedAt.set(channelId, Date.now());
       }
+      const existingInTargetRoom = room.get(user.id);
+      const replacedExistingSession = !!existingInTargetRoom && existingInTargetRoom.socketId !== socket.id;
+
+      for (const [otherChannelId, otherRoom] of theaterRooms.entries()) {
+        if (otherChannelId === channelId) continue;
+        const otherEntry = otherRoom.get(user.id);
+        if (!otherEntry || otherEntry.socketId === socket.id) continue;
+        const otherSocket = io.sockets.sockets.get(otherEntry.socketId);
+        if (otherSocket) {
+          leaveTheaterRoom(io, otherSocket, otherChannelId, user.id);
+        } else {
+          otherRoom.delete(user.id);
+          emitTheaterRoomPresence(io, otherChannelId);
+        }
+      }
+
+      if (replacedExistingSession) {
+        const previousSocket = io.sockets.sockets.get(existingInTargetRoom.socketId);
+        if (previousSocket) {
+          previousSocket.leave(`theater:${channelId}`);
+          if (previousSocket.currentTheaterChannel === channelId) {
+            previousSocket.currentTheaterChannel = null;
+          }
+        }
+      }
+
       room.set(user.id, { socketId: socket.id, user: theaterUser });
       socket.currentTheaterChannel = channelId;
       socket.join(`theater:${channelId}`);
@@ -835,7 +867,7 @@ function setupSocketHandlers(io) {
         FROM theater_queue tq LEFT JOIN users u ON u.id = tq.added_by
         WHERE tq.channel_id = ? ORDER BY tq.position ASC, tq.created_at ASC
       `).all(channelId);
-      const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+      const state = buildTheaterPlaybackState(channelId);
 
       const payload = {
         ok: true,
@@ -843,13 +875,15 @@ function setupSocketHandlers(io) {
         users: Array.from(room.values()).map((e) => e.user),
         queue,
         state: state || null,
+        startedAt: theaterRoomStartedAt.get(channelId) ?? null,
         you: user.id,
       };
       if (typeof ack === 'function') ack(payload);
-      socket.emit('theater:users', { channelId, users: payload.users, you: user.id });
-      socket.to(`theater:${channelId}`).emit('theater:user-joined', { channelId, user: theaterUser });
-      io.emit('theater:room-count', { channelId, count: room.size });
-      io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user), startedAt: theaterRoomStartedAt.get(channelId) ?? null });
+      socket.emit('theater:users', { channelId, users: payload.users, you: user.id, startedAt: payload.startedAt });
+      if (!replacedExistingSession) {
+        socket.to(`theater:${channelId}`).emit('theater:user-joined', { channelId, user: theaterUser });
+      }
+      emitTheaterRoomPresence(io, channelId);
     });
 
     socket.on('theater:leave', ({ channelId }) => {
@@ -892,6 +926,7 @@ function setupSocketHandlers(io) {
       if (!entry) return;
       entry.user.cameraEnabled = !!cameraEnabled;
       io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, cameraEnabled: !!cameraEnabled });
+      emitTheaterRoomPresence(io, channelId);
     });
 
     socket.on('theater:mic-state', ({ channelId, micEnabled }) => {
@@ -901,6 +936,7 @@ function setupSocketHandlers(io) {
       if (!entry) return;
       entry.user.micEnabled = !!micEnabled;
       io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, micEnabled: !!micEnabled });
+      emitTheaterRoomPresence(io, channelId);
     });
 
     socket.on('theater:deafen-state', ({ channelId, deafened }) => {
@@ -910,6 +946,7 @@ function setupSocketHandlers(io) {
       if (!entry) return;
       entry.user.deafened = !!deafened;
       io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, deafened: !!deafened });
+      emitTheaterRoomPresence(io, channelId);
     });
 
     socket.on('theater:state', ({ channelId, playing, positionMs, currentItemId }, ack) => {
@@ -1512,6 +1549,38 @@ module.exports.advanceTheaterQueue = (channelId) => {
 };
 
 // ── Theater helpers ────────────────────────────────────────────────────────────
+function emitTheaterRoomPresence(io, channelId) {
+  const room = theaterRooms.get(channelId);
+  io.emit('theater:room-count', { channelId, count: room ? room.size : 0 });
+  io.emit('theater:room-users', {
+    channelId,
+    users: room ? Array.from(room.values()).map((entry) => entry.user) : [],
+    startedAt: room && room.size > 0 ? (theaterRoomStartedAt.get(channelId) ?? null) : null,
+  });
+}
+
+function buildTheaterPlaybackState(channelId) {
+  const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  if (!state) return null;
+  let videoUrl = null;
+  if (state.current_item_id) {
+    const item = db.prepare('SELECT cached_path FROM theater_queue WHERE id = ?').get(state.current_item_id);
+    if (item?.cached_path) {
+      if (item.cached_path.startsWith('youtube:')) {
+        videoUrl = item.cached_path;
+      } else {
+        const basename = path.basename(item.cached_path);
+        videoUrl = `/ugc/temp-theater/${channelId}/${basename}`;
+      }
+    }
+  }
+  return {
+    ...state,
+    updated_at: state.updated_at * 1000,
+    videoUrl,
+  };
+}
+
 function leaveTheaterRoom(io, socket, channelId, userId) {
   const room = theaterRooms.get(channelId);
   if (!room) return;
@@ -1538,11 +1607,9 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
     db.prepare('DELETE FROM theater_state WHERE channel_id = ?').run(channelId);
     db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
     theaterRoomStartedAt.delete(channelId);
-    io.emit('theater:room-count', { channelId, count: 0 });
-    io.emit('theater:room-users', { channelId, users: [], startedAt: null });
+    emitTheaterRoomPresence(io, channelId);
   } else {
-    io.emit('theater:room-count', { channelId, count: room.size });
-    io.emit('theater:room-users', { channelId, users: Array.from(room.values()).map((e) => e.user), startedAt: theaterRoomStartedAt.get(channelId) ?? null });
+    emitTheaterRoomPresence(io, channelId);
   }
   if (socket.currentTheaterChannel === channelId) {
     socket.currentTheaterChannel = null;

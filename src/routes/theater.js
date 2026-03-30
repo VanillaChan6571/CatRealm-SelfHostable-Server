@@ -181,7 +181,7 @@ router.get('/:channelId/queue', (req, res) => {
   res.json({
     items: enriched,
     state: state
-      ? { ...state, videoUrl: state.current_item_id ? getVideoUrl(
+      ? { ...state, updated_at: state.updated_at * 1000, videoUrl: state.current_item_id ? getVideoUrl(
           items.find((i) => i.id === state.current_item_id)?.cached_path, channel.id
         ) : null }
       : null,
