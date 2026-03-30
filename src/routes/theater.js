@@ -2,6 +2,7 @@ const router = require('express').Router();
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const axios = require('axios');
 const { randomUUID } = require('crypto');
 const db = require('../db');
 const {
@@ -19,6 +20,37 @@ const {
   THEATER_BASE_DIR,
 } = require('../lib/theaterDownload');
 const { broadcastTheaterQueueUpdate } = require('../socket/handler');
+
+// ── YouTube helpers ───────────────────────────────────────────────────────────
+
+function extractYouTubeId(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'youtu.be') {
+      return u.pathname.slice(1).split('?')[0] || null;
+    }
+    if (u.hostname === 'www.youtube.com' || u.hostname === 'youtube.com' || u.hostname === 'm.youtube.com') {
+      if (u.pathname === '/watch') return u.searchParams.get('v');
+      const match = u.pathname.match(/^\/(?:embed|v|shorts)\/([A-Za-z0-9_-]{11})/);
+      if (match) return match[1];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchYouTubeOEmbed(videoId) {
+  try {
+    const resp = await axios.get(
+      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch%3Fv%3D${videoId}&format=json`,
+      { timeout: 5000 }
+    );
+    return resp.data || null;
+  } catch {
+    return null;
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -83,6 +115,7 @@ function getState(channelId) {
 
 function getVideoUrl(cachedPath, channelId) {
   if (!cachedPath) return null;
+  if (cachedPath.startsWith('youtube:')) return cachedPath;
   const basename = path.basename(cachedPath);
   return `/ugc/temp-theater/${channelId}/${basename}`;
 }
@@ -173,6 +206,40 @@ router.post('/:channelId/queue', async (req, res) => {
   try { parsedUrl = new URL(url); } catch { return res.status(400).json({ error: 'Invalid URL' }); }
   if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
     return res.status(400).json({ error: 'URL must be http or https' });
+  }
+
+  // YouTube — insert immediately without download
+  const youtubeId = extractYouTubeId(url);
+  if (youtubeId) {
+    const itemId = randomUUID();
+    const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
+    db.prepare(`
+      INSERT INTO theater_queue (id, channel_id, added_by, title, source_url, source_type, cached_path, cache_status, cache_progress, position)
+      VALUES (?, ?, ?, ?, ?, 'url', ?, 'ready', 100, ?)
+    `).run(itemId, channel.id, req.user.id, url, url, `youtube:${youtubeId}`, maxPos + 1);
+    broadcastTheaterQueueUpdate(channel.id);
+    res.status(201).json({ id: itemId, status: 'ready' });
+
+    // Enrich with oEmbed metadata and maybe auto-play in background
+    fetchYouTubeOEmbed(youtubeId).then((meta) => {
+      if (meta) {
+        db.prepare('UPDATE theater_queue SET title = ?, thumbnail_url = ? WHERE id = ?')
+          .run(meta.title || url, meta.thumbnail_url || null, itemId);
+      }
+      const state = getState(channel.id);
+      const tsettings = getTheaterSettings(channel.id);
+      if (tsettings.theater_auto_advance && (!state || !state.current_item_id)) {
+        db.prepare(`
+          INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
+          VALUES (?, ?, 0, 0, unixepoch())
+          ON CONFLICT(channel_id) DO UPDATE SET
+            current_item_id = excluded.current_item_id,
+            position_ms = 0, playing = 0, updated_at = unixepoch()
+        `).run(channel.id, itemId);
+      }
+      broadcastTheaterQueueUpdate(channel.id);
+    }).catch(() => broadcastTheaterQueueUpdate(channel.id));
+    return;
   }
 
   // Domain allowlist check

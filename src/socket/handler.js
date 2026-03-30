@@ -1530,9 +1530,13 @@ function emitTheaterSync(io, channelId) {
   if (state.current_item_id) {
     const item = db.prepare('SELECT cached_path FROM theater_queue WHERE id = ?').get(state.current_item_id);
     if (item?.cached_path) {
-      const path = require('path');
-      const basename = path.basename(item.cached_path);
-      videoUrl = `/ugc/temp-theater/${channelId}/${basename}`;
+      if (item.cached_path.startsWith('youtube:')) {
+        videoUrl = item.cached_path;
+      } else {
+        const path = require('path');
+        const basename = path.basename(item.cached_path);
+        videoUrl = `/ugc/temp-theater/${channelId}/${basename}`;
+      }
     }
   }
   io.to(`theater:${channelId}`).emit('theater:sync', {
