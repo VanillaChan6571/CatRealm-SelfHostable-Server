@@ -5,6 +5,7 @@ const http = require('http');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const pteroLog = require('../logger');
+const { getYtDlpCookieArgs, hasStoredYouTubeCookies } = require('../theaterYouTubeCookies');
 
 const THEATER_BASE_DIR = process.env.THEATER_CACHE_DIR || path.join(__dirname, '../../data/ugc/temp-theater');
 
@@ -73,10 +74,12 @@ async function deleteChannelCache(channelId) {
 async function getVideoMetadata(url) {
   if (isYtDlpAvailable()) {
     return new Promise((resolve) => {
+      const cookieArgs = getYtDlpCookieArgs();
       const proc = spawn('yt-dlp', [
         '--dump-single-json',
         '--no-playlist',
         '--quiet',
+        ...cookieArgs,
         url,
       ]);
       let output = '';
@@ -132,6 +135,10 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
   return new Promise((resolve, reject) => {
     const outputTemplate = path.join(dir, `${fileId}.%(ext)s`);
     const canMergeFormats = isFfmpegAvailable();
+    const cookieArgs = getYtDlpCookieArgs();
+    if (hasStoredYouTubeCookies()) {
+      pteroLog('[Theater] yt-dlp cookies: enabled');
+    }
     const formatSelector = canMergeFormats
       ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4][protocol!*=m3u8]/best[protocol!*=m3u8]/best'
       : 'best[ext=mp4][protocol!*=m3u8]/best[ext=webm][protocol!*=m3u8]/best[protocol!*=m3u8]/best';
@@ -144,6 +151,7 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
       '--output', outputTemplate,
       '--newline',
       '--progress',
+      ...cookieArgs,
       url,
     );
     const proc = spawn('yt-dlp', args);

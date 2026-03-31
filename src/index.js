@@ -168,6 +168,9 @@ function runUpdateCheck(opts = {}) {
   const getActiveVoiceUserCount = typeof opts.getActiveVoiceUserCount === 'function'
     ? opts.getActiveVoiceUserCount
     : (() => 0);
+  const getActiveTheaterUserCount = typeof opts.getActiveTheaterUserCount === 'function'
+    ? opts.getActiveTheaterUserCount
+    : (() => 0);
 
   if (updateRuntime.checkerDisabled) return;
   if (updateRuntime.updateInProgress) return;
@@ -217,19 +220,21 @@ function runUpdateCheck(opts = {}) {
     }
 
     pteroLog(`[CatRealm <- GitHub]: There is an update to ${remoteShort}! Unable to Download & Apply since we are mid running!`);
-    pteroLog('[CatRealm] Update Found - Checking if anyone in a Voice Call on Realm..');
+    pteroLog('[CatRealm] Update Found - Checking if anyone is active in Voice or Theater on Realm..');
 
     const activeVoiceUsers = Number(getActiveVoiceUserCount()) || 0;
-    if (activeVoiceUsers >= config.voiceDelayThreshold) {
+    const activeTheaterUsers = Number(getActiveTheaterUserCount()) || 0;
+    const activeRealtimeUsers = activeVoiceUsers + activeTheaterUsers;
+    if (activeRealtimeUsers >= config.voiceDelayThreshold) {
       pteroLog(`[CatRealm <- GitHub]: Called to continue to check ${localShort} vs ${remoteShort}`);
-      pteroLog(`[CatRealm] There are ${activeVoiceUsers} users in a Voice Call.. Delay Update, Callback in 5 minutes..`);
+      pteroLog(`[CatRealm] There are ${activeRealtimeUsers} active realtime users (Voice: ${activeVoiceUsers}, Theater: ${activeTheaterUsers}).. Delay Update, Callback in 5 minutes..`);
       return;
     }
 
-    if (activeVoiceUsers === 0) {
-      pteroLog(`[CatRealm <- GitHub]: Called to Download & Apply ${remoteShort} since no one is in a Voice Call.`);
+    if (activeRealtimeUsers === 0) {
+      pteroLog(`[CatRealm <- GitHub]: Called to Download & Apply ${remoteShort} since no one is active in Voice or Theater.`);
     } else {
-      pteroLog(`[CatRealm <- GitHub]: Called to Download & Apply ${remoteShort} since active voice users are below delay threshold (${config.voiceDelayThreshold}).`);
+      pteroLog(`[CatRealm <- GitHub]: Called to Download & Apply ${remoteShort} since active realtime users are below delay threshold (${config.voiceDelayThreshold}). Voice: ${activeVoiceUsers}, Theater: ${activeTheaterUsers}.`);
     }
     applyUpdateAndMaybeRestart(config, hashes.remote, true);
   } finally {
@@ -596,6 +601,7 @@ async function start() {
   runUpdateCheck({
     source: 'startup',
     getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
+    getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
   });
   logMediaDependencyStatus();
 
@@ -657,6 +663,7 @@ async function start() {
       runUpdateCheck({
         source: 'task',
         getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
+        getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
       });
     }, checkerMs);
   }

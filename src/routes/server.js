@@ -52,6 +52,7 @@ router.get('/', (req, res) => {
     locked: process.env.CATREALM_SECURE_MODE_LOCKED === '1',
   };
   const welcomeBoardEnabled = getSetting('welcome_board_enabled', '0') === '1';
+  const mediaMaxMb = Number(getSetting('media_max_mb', '50'));
 
   res.json({
     name,
@@ -64,6 +65,7 @@ router.get('/', (req, res) => {
     serverBanner,
     secureMode,
     welcomeBoardEnabled,
+    mediaMaxMb,
     version: packageVersion,
     gitHash: gitHash,
     buildInfo: `v${packageVersion} (${gitHash})`

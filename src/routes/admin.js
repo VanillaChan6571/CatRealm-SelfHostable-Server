@@ -10,6 +10,11 @@ const path = require('path');
 const fs = require('fs');
 const { runDiagnosticCommand } = require('../diagnosticCommands');
 const {
+  getTheaterYouTubeCookieStatus,
+  saveTheaterYouTubeCookies,
+  clearTheaterYouTubeCookies,
+} = require('../theaterYouTubeCookies');
+const {
   listAllWebhooks,
   updateWebhookById,
   regenerateWebhookSecretById,
@@ -158,6 +163,41 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
   });
 
   res.json(response);
+});
+
+// GET /api/admin/theater-youtube-cookies
+router.get('/theater-youtube-cookies', requirePermission(PERMISSIONS.MANAGE_SERVER), (_req, res) => {
+  res.json(getTheaterYouTubeCookieStatus());
+});
+
+// PUT /api/admin/theater-youtube-cookies
+router.put('/theater-youtube-cookies', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
+  const cookieText = typeof req.body?.cookieText === 'string' ? req.body.cookieText : '';
+  const source = typeof req.body?.source === 'string' ? req.body.source.trim() : 'manual';
+  if (!cookieText.trim()) {
+    return res.status(400).json({ error: 'Cookie text is required' });
+  }
+
+  try {
+    const status = saveTheaterYouTubeCookies(cookieText, {
+      source: source || 'manual',
+      syncedByUser: req.user || null,
+    });
+    logAuditAction('theater_youtube_cookies_updated', req.user?.id ?? null, null, {
+      source: status.source,
+      cookieCount: status.cookieCount,
+    });
+    res.json(status);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to save YouTube cookies' });
+  }
+});
+
+// DELETE /api/admin/theater-youtube-cookies
+router.delete('/theater-youtube-cookies', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
+  const status = clearTheaterYouTubeCookies();
+  logAuditAction('theater_youtube_cookies_cleared', req.user?.id ?? null, null, null);
+  res.json(status);
 });
 
 // GET /api/admin/webhooks
