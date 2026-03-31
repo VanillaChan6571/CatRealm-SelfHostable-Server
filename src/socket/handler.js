@@ -961,7 +961,7 @@ function setupSocketHandlers(io) {
       emitTheaterRoomPresence(io, channelId);
     });
 
-    socket.on('theater:state', ({ channelId, playing, positionMs, currentItemId }, ack) => {
+    socket.on('theater:state', ({ channelId, playing, positionMs, currentItemId, durationMs }, ack) => {
       if (!channelId) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId' });
         return;
@@ -984,16 +984,29 @@ function setupSocketHandlers(io) {
       if (typeof playing === 'boolean') stateParts.push(playing ? 'play' : 'pause');
       if (typeof positionMs === 'number') stateParts.push(`seek ${Math.round(positionMs / 1000)}s`);
       if (currentItemId !== undefined) stateParts.push(`item → ${currentItemId || 'none'}`);
+      if (typeof durationMs === 'number') stateParts.push(`duration ${Math.round(Math.max(0, durationMs) / 1000)}s`);
       pteroLog(`[Theater] State change by ${authUser.username || user.id} in channel ${channelId}: ${stateParts.join(', ') || 'no-op'}`);
       db.prepare(`
-        INSERT INTO theater_state (channel_id, position_ms, playing, updated_at) VALUES (?, 0, 0, unixepoch())
+        INSERT INTO theater_state (channel_id, position_ms, duration_ms, playing, updated_at) VALUES (?, 0, 0, 0, unixepoch())
         ON CONFLICT(channel_id) DO NOTHING
       `).run(channelId);
-      const fields = ['updated_at = unixepoch()'];
+      const fields = [];
       const values = [];
+      const affectsPlaybackClock = typeof playing === 'boolean' || typeof positionMs === 'number' || currentItemId !== undefined;
       if (typeof playing === 'boolean') { fields.push('playing = ?'); values.push(playing ? 1 : 0); }
       if (typeof positionMs === 'number') { fields.push('position_ms = ?'); values.push(Math.max(0, positionMs)); }
-      if (currentItemId !== undefined) { fields.push('current_item_id = ?'); values.push(currentItemId || null); }
+      if (typeof durationMs === 'number') { fields.push('duration_ms = ?'); values.push(Math.max(0, durationMs)); }
+      if (currentItemId !== undefined) {
+        fields.push('current_item_id = ?');
+        values.push(currentItemId || null);
+      }
+      if (affectsPlaybackClock) {
+        fields.push('updated_at = unixepoch()');
+      }
+      if (fields.length === 0) {
+        if (typeof ack === 'function') ack({ ok: true });
+        return;
+      }
       values.push(channelId);
       db.prepare(`UPDATE theater_state SET ${fields.join(', ')} WHERE channel_id = ?`).run(...values);
       emitTheaterSync(io, channelId, true);
@@ -1548,6 +1561,14 @@ module.exports.getActiveVoiceUserCount = () => {
   return total;
 };
 
+module.exports.getActiveTheaterUserCount = () => {
+  let total = 0;
+  for (const room of theaterRooms.values()) {
+    total += room.size;
+  }
+  return total;
+};
+
 module.exports.getActiveVoiceRoomCount = () => voiceRooms.size;
 module.exports.broadcastTheaterQueueUpdate = (channelId) => {
   if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
@@ -1557,6 +1578,7 @@ module.exports.broadcastTheaterSync = (channelId) => {
 };
 module.exports.advanceTheaterQueue = (channelId) => {
   advanceTheaterQueue(channelId);
+  if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
   if (ioInstance) emitTheaterSync(ioInstance, channelId, true);
 };
 
@@ -1659,6 +1681,7 @@ function emitTheaterSync(io, channelId, logSync = false) {
     channelId,
     currentItemId: state.current_item_id,
     positionMs: state.position_ms,
+    durationMs: state.duration_ms || 0,
     playing: !!state.playing,
     updatedAt: state.updated_at * 1000,
     hostUserId: state.host_user_id,
@@ -1670,12 +1693,12 @@ function advanceTheaterQueue(channelId) {
   const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
   const currentItemId = state?.current_item_id;
 
-  // Mark current item as played
+  // Remove the current item from the queue before advancing.
   if (currentItemId) {
     const currentItem = db.prepare('SELECT title FROM theater_queue WHERE id = ?').get(currentItemId);
-    pteroLog(`[Theater] Advancing queue in channel ${channelId} — marking "${currentItem?.title || currentItemId}" as played`);
-    db.prepare("UPDATE theater_queue SET cache_status = 'played' WHERE id = ?").run(currentItemId);
+    pteroLog(`[Theater] Advancing queue in channel ${channelId} — removing "${currentItem?.title || currentItemId}" from queue`);
     db.prepare('DELETE FROM theater_skip_votes WHERE channel_id = ?').run(channelId);
+    db.prepare('DELETE FROM theater_queue WHERE id = ?').run(currentItemId);
   }
 
   // Find next ready item
@@ -1687,11 +1710,12 @@ function advanceTheaterQueue(channelId) {
   `).get(channelId, currentItemId || null);
 
   db.prepare(`
-    INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
-    VALUES (?, ?, 0, ?, unixepoch())
+    INSERT INTO theater_state (channel_id, current_item_id, position_ms, duration_ms, playing, updated_at)
+    VALUES (?, ?, 0, 0, ?, unixepoch())
     ON CONFLICT(channel_id) DO UPDATE SET
       current_item_id = excluded.current_item_id,
       position_ms = 0,
+      duration_ms = 0,
       playing = excluded.playing,
       updated_at = unixepoch()
   `).run(channelId, nextItem?.id || null, nextItem ? 1 : 0);

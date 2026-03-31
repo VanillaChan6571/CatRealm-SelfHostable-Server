@@ -42,6 +42,19 @@ function extractYouTubeId(url) {
   }
 }
 
+function isYouTubePlaylistUrl(url) {
+  try {
+    const u = new URL(url);
+    const hostname = u.hostname.toLowerCase();
+    const isYouTubeHost = hostname === 'www.youtube.com' || hostname === 'youtube.com' || hostname === 'm.youtube.com';
+    if (!isYouTubeHost) return false;
+    if (u.pathname === '/playlist') return true;
+    return u.searchParams.has('list') && !u.searchParams.get('v');
+  } catch {
+    return false;
+  }
+}
+
 async function fetchYouTubeOEmbed(videoId) {
   try {
     const resp = await axios.get(
@@ -81,11 +94,11 @@ async function fallbackItemToYouTubeIframe({ channelId, itemId, sourceUrl, youtu
   if (settings.theater_auto_advance && (!state || !state.current_item_id)) {
     pteroLog(`[Theater] Auto-advance: setting YouTube iframe item ${itemId} as current in channel ${channelId}`);
     db.prepare(`
-      INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
-      VALUES (?, ?, 0, 0, unixepoch())
+      INSERT INTO theater_state (channel_id, current_item_id, position_ms, duration_ms, playing, updated_at)
+      VALUES (?, ?, 0, 0, 0, unixepoch())
       ON CONFLICT(channel_id) DO UPDATE SET
         current_item_id = excluded.current_item_id,
-        position_ms = 0, playing = 0, updated_at = unixepoch()
+        position_ms = 0, duration_ms = 0, playing = 0, updated_at = unixepoch()
     `).run(channelId, itemId);
   }
 
@@ -250,7 +263,13 @@ router.post('/:channelId/queue', async (req, res) => {
   }
 
   const youtubeId = extractYouTubeId(url);
+  const isPlaylistUrl = isYouTubePlaylistUrl(url);
   pteroLog(`[Theater] Queue add by ${req.user.username} in channel ${channel.id}: ${url}${youtubeId ? ` [YouTube ID: ${youtubeId}]` : ''}`);
+
+  if (isPlaylistUrl) {
+    pteroLog(`[Theater] Queue add rejected — playlist URLs are not supported yet: ${url}`);
+    return res.status(400).json({ error: 'YouTube playlist URLs are not supported yet. Add individual videos instead.' });
+  }
 
   // Domain allowlist — YouTube bypasses it so yt-dlp can handle it without
   // requiring admins to explicitly allow youtube.com
@@ -287,11 +306,11 @@ router.post('/:channelId/queue', async (req, res) => {
       if (tsettings.theater_auto_advance && (!state || !state.current_item_id)) {
         pteroLog(`[Theater] Auto-advance: setting YouTube iframe item ${itemId} as current in channel ${channel.id}`);
         db.prepare(`
-          INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
-          VALUES (?, ?, 0, 0, unixepoch())
+          INSERT INTO theater_state (channel_id, current_item_id, position_ms, duration_ms, playing, updated_at)
+          VALUES (?, ?, 0, 0, 0, unixepoch())
           ON CONFLICT(channel_id) DO UPDATE SET
             current_item_id = excluded.current_item_id,
-            position_ms = 0, playing = 0, updated_at = unixepoch()
+            position_ms = 0, duration_ms = 0, playing = 0, updated_at = unixepoch()
         `).run(channel.id, itemId);
       }
       broadcastTheaterQueueUpdate(channel.id);
@@ -353,11 +372,11 @@ router.post('/:channelId/queue', async (req, res) => {
       if (tsettings.theater_auto_advance && (!state || !state.current_item_id)) {
         pteroLog(`[Theater] Auto-advance: setting item ${itemId} as current in channel ${channel.id}`);
         db.prepare(`
-          INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
-          VALUES (?, ?, 0, 0, unixepoch())
+          INSERT INTO theater_state (channel_id, current_item_id, position_ms, duration_ms, playing, updated_at)
+          VALUES (?, ?, 0, 0, 0, unixepoch())
           ON CONFLICT(channel_id) DO UPDATE SET
             current_item_id = excluded.current_item_id,
-            position_ms = 0, playing = 0, updated_at = unixepoch()
+            position_ms = 0, duration_ms = 0, playing = 0, updated_at = unixepoch()
         `).run(channel.id, itemId);
       }
       broadcastTheaterQueueUpdate(channel.id);
@@ -457,11 +476,11 @@ router.post('/:channelId/queue/upload', videoUpload.single('video'), async (req,
   const state = getState(channel.id);
   if (settings.theater_auto_advance && (!state || !state.current_item_id)) {
     db.prepare(`
-      INSERT INTO theater_state (channel_id, current_item_id, position_ms, playing, updated_at)
-      VALUES (?, ?, 0, 0, unixepoch())
+      INSERT INTO theater_state (channel_id, current_item_id, position_ms, duration_ms, playing, updated_at)
+      VALUES (?, ?, 0, 0, 0, unixepoch())
       ON CONFLICT(channel_id) DO UPDATE SET
         current_item_id = excluded.current_item_id,
-        position_ms = 0, playing = 0, updated_at = unixepoch()
+        position_ms = 0, duration_ms = 0, playing = 0, updated_at = unixepoch()
     `).run(channel.id, itemId);
   }
 
@@ -496,7 +515,7 @@ router.delete('/:channelId/queue/:itemId', (req, res) => {
   // If this was the current item, clear state
   const state = getState(channel.id);
   if (state?.current_item_id === item.id) {
-    db.prepare('UPDATE theater_state SET current_item_id = NULL, position_ms = 0, playing = 0 WHERE channel_id = ?').run(channel.id);
+    db.prepare('UPDATE theater_state SET current_item_id = NULL, position_ms = 0, duration_ms = 0, playing = 0 WHERE channel_id = ?').run(channel.id);
   }
 
   db.prepare('DELETE FROM theater_queue WHERE id = ?').run(item.id);
@@ -613,22 +632,29 @@ router.patch('/:channelId/state', (req, res) => {
     }
   }
 
-  const { playing, positionMs, currentItemId } = req.body;
+  const { playing, positionMs, currentItemId, durationMs } = req.body;
   const stateParts = [];
   if (typeof playing === 'boolean') stateParts.push(playing ? 'play' : 'pause');
   if (typeof positionMs === 'number') stateParts.push(`seek to ${Math.round(positionMs / 1000)}s`);
   if (currentItemId !== undefined) stateParts.push(`item → ${currentItemId || 'none'}`);
+  if (typeof durationMs === 'number') stateParts.push(`duration ${Math.round(Math.max(0, durationMs) / 1000)}s`);
   pteroLog(`[Theater] State change by ${req.user.username} in channel ${channel.id}: ${stateParts.join(', ') || 'no-op'}`);
   const fields = [];
   const values = [];
+  const affectsPlaybackClock = typeof playing === 'boolean' || typeof positionMs === 'number' || currentItemId !== undefined;
   if (typeof playing === 'boolean') { fields.push('playing = ?'); values.push(playing ? 1 : 0); }
   if (typeof positionMs === 'number') { fields.push('position_ms = ?'); values.push(Math.max(0, positionMs)); }
-  if (currentItemId !== undefined) { fields.push('current_item_id = ?'); values.push(currentItemId || null); }
-  fields.push('updated_at = unixepoch()');
+  if (typeof durationMs === 'number') { fields.push('duration_ms = ?'); values.push(Math.max(0, durationMs)); }
+  if (currentItemId !== undefined) {
+    fields.push('current_item_id = ?');
+    values.push(currentItemId || null);
+  }
+  if (affectsPlaybackClock) fields.push('updated_at = unixepoch()');
+  if (fields.length === 0) return res.json({ success: true });
   values.push(channel.id);
 
   db.prepare(`
-    INSERT INTO theater_state (channel_id, position_ms, playing, updated_at) VALUES (?, 0, 0, unixepoch())
+    INSERT INTO theater_state (channel_id, position_ms, duration_ms, playing, updated_at) VALUES (?, 0, 0, 0, unixepoch())
     ON CONFLICT(channel_id) DO NOTHING
   `).run(channel.id);
   db.prepare(`UPDATE theater_state SET ${fields.join(', ')} WHERE channel_id = ?`).run(...values);
@@ -647,9 +673,14 @@ router.post('/:channelId/skip', (req, res) => {
   }
 
   pteroLog(`[Theater] Skip requested by ${req.user.username} in channel ${channel.id}`);
-  const { advanceTheaterQueue } = require('../socket/handler');
-  advanceTheaterQueue(channel.id);
-  res.json({ success: true });
+  try {
+    const { advanceTheaterQueue } = require('../socket/handler');
+    advanceTheaterQueue(channel.id);
+    res.json({ success: true });
+  } catch (err) {
+    pteroLog(`[Theater] Skip failed in channel ${channel.id}: ${err.message}`);
+    res.status(500).json({ error: 'Failed to skip current theater item' });
+  }
 });
 
 // GET /:channelId/settings
