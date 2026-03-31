@@ -855,6 +855,7 @@ db.exec(`
     channel_id      TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
     current_item_id TEXT REFERENCES theater_queue(id) ON DELETE SET NULL,
     position_ms     INTEGER NOT NULL DEFAULT 0,
+    duration_ms     INTEGER NOT NULL DEFAULT 0,
     playing         INTEGER NOT NULL DEFAULT 0,
     host_user_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
     updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
@@ -882,6 +883,12 @@ db.exec(`
     PRIMARY KEY (channel_id, domain)
   );
 `);
+
+const theaterStateColumns = db.prepare('PRAGMA table_info(theater_state)').all().map((c) => c.name);
+if (!theaterStateColumns.includes('duration_ms')) {
+  db.prepare('ALTER TABLE theater_state ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0').run();
+  pteroLog('[CatRealm] Added theater_state.duration_ms column');
+}
 
 // Add theater columns to channel_settings
 const theaterSettingsCols = db.prepare('PRAGMA table_info(channel_settings)').all().map((c) => c.name);
