@@ -15,7 +15,8 @@ RUN set -eux; \
       g++ \
       git \
       make \
-      python3; \
+      python3 \
+      tini; \
   elif command -v apt-get >/dev/null 2>&1; then \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -26,7 +27,8 @@ RUN set -eux; \
       g++ \
       git \
       make \
-      python3; \
+      python3 \
+      tini; \
     rm -rf /var/lib/apt/lists/*; \
   else \
     echo "Unsupported base image: no apk or apt-get available"; \
@@ -38,3 +40,5 @@ RUN set -eux; \
   ffmpeg -version | head -n 1
 
 USER container
+
+ENTRYPOINT ["/sbin/tini", "--"]
