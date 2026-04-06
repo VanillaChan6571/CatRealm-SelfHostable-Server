@@ -42,3 +42,4 @@ RUN set -eux; \
 USER container
 
 ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/bin/ash", "/entrypoint.sh"]
