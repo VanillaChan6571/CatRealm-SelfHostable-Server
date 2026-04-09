@@ -20,6 +20,7 @@ function buildFallbackIceServers() {
   // Self-hosters needing relay should set TURN_MODE=custom with their own coturn.
   return [
     { urls: 'stun:catrealm.app:3478' },
+    { urls: 'stun:stun.l.google.com:19302' }, // port 19302 works on networks that block 3478
   ];
 }
 
@@ -104,16 +105,18 @@ router.get('/credentials', (req, res) => {
   const credential = hmac.digest('base64');
 
   const iceServers = [
-      // STUN servers
+      // STUN — multiple ports so at least one passes restrictive firewalls
       { urls: `stun:${serverHost}:${turnPort}` },
-      { urls: 'stun:catrealm.app:3478' }, // Fallback STUN
+      { urls: 'stun:stun.l.google.com:19302' },
 
-      // TURN TCP endpoint (more reliable on restrictive networks)
-      {
-        urls: `turn:${serverHost}:${turnPort}?transport=tcp`,
-        username,
-        credential,
-      },
+      // TURN port 3478 — UDP then TCP
+      { urls: `turn:${serverHost}:${turnPort}`, username, credential },
+      { urls: `turn:${serverHost}:${turnPort}?transport=tcp`, username, credential },
+
+      // TURN port 3479 — aux port, same credentials
+      { urls: `turn:${serverHost}:3479`, username, credential },
+      { urls: `turn:${serverHost}:3479?transport=tcp`, username, credential },
+
     ];
 
   // Optional UDP TURN endpoint
