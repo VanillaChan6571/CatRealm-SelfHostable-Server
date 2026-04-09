@@ -854,6 +854,17 @@ function setupSocketHandlers(io) {
       socket.join(`theater:${channelId}`);
       pteroLog(`[Theater] ${theaterUser.username} (${user.id}) joined channel ${channelId} — ${room.size} viewer(s)`);
 
+      // Assign host if there is none or the current host is no longer in the room
+      const hostCheck = db.prepare('SELECT host_user_id FROM theater_state WHERE channel_id = ?').get(channelId);
+      if (!hostCheck?.host_user_id || !room.has(hostCheck.host_user_id)) {
+        db.prepare(`
+          INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
+          ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
+        `).run(channelId, user.id);
+        io.to(`theater:${channelId}`).emit('theater:host-changed', { channelId, hostUserId: user.id });
+        pteroLog(`[Theater] ${theaterUser.username} (${user.id}) assigned as host in channel ${channelId}`);
+      }
+
       // Start sync interval if not running
       if (!theaterSyncIntervals.has(channelId)) {
         const interval = setInterval(() => {
@@ -1643,6 +1654,19 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
     theaterRoomStartedAt.delete(channelId);
     emitTheaterRoomPresence(io, channelId);
   } else {
+    // If the leaving user was the host, migrate host to the next user in the room
+    const currentState = db.prepare('SELECT host_user_id FROM theater_state WHERE channel_id = ?').get(channelId);
+    if (currentState?.host_user_id === userId) {
+      const nextHostId = room.keys().next().value;
+      if (nextHostId) {
+        db.prepare(`
+          INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
+          ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
+        `).run(channelId, nextHostId);
+        io.to(`theater:${channelId}`).emit('theater:host-changed', { channelId, hostUserId: nextHostId });
+        pteroLog(`[Theater] Host migrated to ${nextHostId} in channel ${channelId} after ${userId} left`);
+      }
+    }
     emitTheaterRoomPresence(io, channelId);
   }
   if (socket.currentTheaterChannel === channelId) {
