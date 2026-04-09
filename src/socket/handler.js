@@ -907,12 +907,19 @@ function setupSocketHandlers(io) {
       if (!channelId || !to || !data) return;
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
 
-      // Only allow camera, block screenshare SDP
+      // Block SDPs where the user is actively sending video without camera permission.
+      // recvonly video sections are allowed (needed for audio-only peers to negotiate).
       const sdp = data && typeof data === 'object' && typeof data.sdp === 'string' ? data.sdp : '';
-      if (sdp && /\bm=video\b/i.test(sdp)) {
-        if (!hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db)) {
-          socket.emit('error', 'Missing permission: camera');
-          return;
+      if (sdp) {
+        const videoIdx = sdp.search(/\bm=video\b/i);
+        if (videoIdx !== -1) {
+          const nextMIdx = sdp.indexOf('\nm=', videoIdx + 1);
+          const videoSection = nextMIdx === -1 ? sdp.slice(videoIdx) : sdp.slice(videoIdx, nextMIdx);
+          const isSendingVideo = /\ba=(sendrecv|sendonly)\b/i.test(videoSection);
+          if (isSendingVideo && !hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db)) {
+            socket.emit('error', 'Missing permission: camera');
+            return;
+          }
         }
       }
 
