@@ -903,6 +903,26 @@ function setupSocketHandlers(io) {
       leaveTheaterRoom(io, socket, channelId, user.id);
     });
 
+    socket.on('theater:kick', ({ channelId, userId }) => {
+      if (!channelId || !userId) return;
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.MANAGE_CHANNELS, db)) {
+        socket.emit('error', 'Missing permission: manage_channels');
+        return;
+      }
+      const room = theaterRooms.get(channelId);
+      if (!room || !room.has(userId)) return;
+      const entry = room.get(userId);
+      const targetSocket = entry?.socketId ? io.sockets.sockets.get(entry.socketId) : null;
+      if (targetSocket) {
+        targetSocket.emit('theater:kicked', { channelId });
+        leaveTheaterRoom(io, targetSocket, channelId, userId);
+      } else {
+        room.delete(userId);
+        emitTheaterRoomPresence(io, channelId);
+      }
+      pteroLog(`[Theater] ${authUser.username || user.id} kicked ${userId} from channel ${channelId}`);
+    });
+
     socket.on('theater:signal', ({ channelId, to, data }) => {
       if (!channelId || !to || !data) return;
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
