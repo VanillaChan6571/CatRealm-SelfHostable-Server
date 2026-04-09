@@ -117,6 +117,9 @@ router.get('/credentials', (req, res) => {
       { urls: `turn:${serverHost}:3479`, username, credential },
       { urls: `turn:${serverHost}:3479?transport=tcp`, username, credential },
 
+      // TURN TCP port 443 — proxied by nginx; passes through firewalls that only allow HTTPS
+      { urls: `turn:${serverHost}:443?transport=tcp`, username, credential },
+
     ];
 
   // Optional UDP TURN endpoint
