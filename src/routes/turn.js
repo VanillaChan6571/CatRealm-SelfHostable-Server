@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const CENTRAL_TURN = {
   host: 'catrealm.app',
   port: '3478',
-  tlsPort: '5349',
+  tlsPort: '', // coturn has no TLS cert configured — omit turns: URL to avoid slow timeouts
   secret: '686a0bb7eae0a0f33080cf98ffb3d6164cbd8529aeb7518b3fe10de6bad17dd5b92ee8751628d6b7039b831f5cab5776',
 };
 
@@ -15,23 +15,11 @@ function getCentralTurnConfig() {
 }
 
 function buildFallbackIceServers() {
+  // openrelay.metered.ca (openrelayproject) credentials are deprecated and return 701.
+  // Only include public STUN as a fallback — direct/srflx connections still work.
+  // Self-hosters needing relay should set TURN_MODE=custom with their own coturn.
   return [
-    { urls: 'stun:stun.l.google.com:19302' },
-    {
-      urls: 'turn:openrelay.metered.ca:80?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turns:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
+    { urls: 'stun:catrealm.app:3478' },
   ];
 }
 
@@ -118,7 +106,7 @@ router.get('/credentials', (req, res) => {
   const iceServers = [
       // STUN servers
       { urls: `stun:${serverHost}:${turnPort}` },
-      { urls: 'stun:stun.l.google.com:19302' }, // Fallback
+      { urls: 'stun:catrealm.app:3478' }, // Fallback STUN
 
       // TURN TCP endpoint (more reliable on restrictive networks)
       {
