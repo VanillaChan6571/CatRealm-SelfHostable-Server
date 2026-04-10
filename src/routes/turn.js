@@ -4,7 +4,7 @@ const crypto = require('crypto');
 // Central TURN is intentionally baked into the server (not exposed in egg/.env).
 // Set the secret here for internal distributions.
 const CENTRAL_TURN = {
-  host: 'catrealm.app',
+  host: 'coturn.catrealm.app',
   port: '3478',
   tlsPort: '', // coturn has no TLS cert configured — omit turns: URL to avoid slow timeouts
   secret: '686a0bb7eae0a0f33080cf98ffb3d6164cbd8529aeb7518b3fe10de6bad17dd5b92ee8751628d6b7039b831f5cab5776',
@@ -19,7 +19,7 @@ function buildFallbackIceServers() {
   // Only include public STUN as a fallback — direct/srflx connections still work.
   // Self-hosters needing relay should set TURN_MODE=custom with their own coturn.
   return [
-    { urls: 'stun:catrealm.app:3478' },
+    { urls: 'stun:coturn.catrealm.app:3478' },
     { urls: 'stun:stun.l.google.com:19302' }, // port 19302 works on networks that block 3478
   ];
 }
