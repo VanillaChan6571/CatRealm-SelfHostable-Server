@@ -22,6 +22,8 @@ const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sti
 const onlineUsers = new Map();
 // Track voice rooms: channelId -> Map<userId, { socketId, muted, deafened, user }>
 const voiceRooms = new Map();
+// Track live screenshare senders in each voice room.
+const voiceLiveUsersByChannel = new Map();
 // Track when a voice room first became occupied, using server time as the source of truth.
 const voiceRoomStartedAt = new Map();
 // Track theater rooms: channelId -> Map<userId, { socketId, user }>
@@ -496,6 +498,7 @@ function setupSocketHandlers(io) {
           }
         }
       }
+      setVoiceLiveState(io, channelId, user.id, false);
       room.set(user.id, { socketId: socket.id, muted: !!muted, deafened: !!deafened, user: voiceUser });
       socket.currentVoiceChannel = channelId;
       socket.join(`voice:${channelId}`);
@@ -503,6 +506,7 @@ function setupSocketHandlers(io) {
       const payload = {
         channelId,
         users: Array.from(room.values()).map((entry) => entry.user),
+        liveUserIds: getVoiceLiveUserIds(channelId),
         startedAt: voiceRoomStartedAt.get(channelId) ?? Date.now(),
         you: user.id,
       };
@@ -530,6 +534,28 @@ function setupSocketHandlers(io) {
     socket.on('voice:rooms:get', (ack) => {
       if (typeof ack !== 'function') return;
       ack({ rooms: buildVoiceRoomCounts() });
+    });
+
+    socket.on('voice:live-state', ({ channelId, live }, ack) => {
+      if (!channelId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId' });
+        return;
+      }
+      const room = voiceRooms.get(channelId);
+      if (!room || !room.has(user.id)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Not in voice room' });
+        return;
+      }
+      if (live) {
+        const canSendVideo = hasChannelPermission(user, channelId, PERMISSIONS.SCREENSHARE, db)
+          || hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db);
+        if (!canSendVideo) {
+          if (typeof ack === 'function') ack({ ok: false, error: 'Missing permission: screenshare_or_camera' });
+          return;
+        }
+      }
+      setVoiceLiveState(io, channelId, user.id, !!live);
+      if (typeof ack === 'function') ack({ ok: true, channelId, live: !!live });
     });
 
     socket.on('theater:rooms:get', (ack) => {
@@ -569,6 +595,7 @@ function setupSocketHandlers(io) {
       io.to(`voice:${channelId}`).emit('voice:sync', {
         channelId,
         users: Array.from(room.values()).map((e) => e.user),
+        liveUserIds: getVoiceLiveUserIds(channelId),
       });
       emitVoiceRoomSync(io, channelId);
     });
@@ -1777,6 +1804,7 @@ function leaveVoiceRoom(io, socket, channelId, userId) {
   if (!room) return;
   if (room.has(userId)) {
     room.delete(userId);
+    setVoiceLiveState(io, channelId, userId, false);
     socket.leave(`voice:${channelId}`);
     io.to(`voice:${channelId}`).emit('voice:user-left', { channelId, userId });
     if (room.size > 0) {
@@ -1809,6 +1837,7 @@ function emitVoiceRoomSync(io, channelId) {
   io.emit('voice:room-sync', {
     channelId,
     users: room ? Array.from(room.values()).map((entry) => entry.user) : [],
+    liveUserIds: getVoiceLiveUserIds(channelId),
     startedAt: room && room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
   });
 }
@@ -1818,6 +1847,43 @@ function buildVoiceRoomCounts() {
     channelId,
     count: room.size,
     users: Array.from(room.values()).map((entry) => entry.user),
+    liveUserIds: getVoiceLiveUserIds(channelId),
     startedAt: room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
   }));
+}
+
+function getVoiceLiveUserIds(channelId) {
+  const liveUsers = voiceLiveUsersByChannel.get(channelId);
+  if (!liveUsers || liveUsers.size === 0) return [];
+  return Array.from(liveUsers);
+}
+
+function emitVoiceLiveSync(io, channelId) {
+  io.emit('voice:live-sync', {
+    channelId,
+    userIds: getVoiceLiveUserIds(channelId),
+  });
+}
+
+function setVoiceLiveState(io, channelId, userId, live) {
+  if (!channelId || !userId) return;
+  const room = voiceRooms.get(channelId);
+  const liveUsers = voiceLiveUsersByChannel.get(channelId) ?? new Set();
+  const hadUser = liveUsers.has(userId);
+
+  if (!live || !room || !room.has(userId)) {
+    if (!hadUser) return;
+    liveUsers.delete(userId);
+    if (liveUsers.size === 0) voiceLiveUsersByChannel.delete(channelId);
+    else voiceLiveUsersByChannel.set(channelId, liveUsers);
+    emitVoiceLiveSync(io, channelId);
+    emitVoiceRoomSync(io, channelId);
+    return;
+  }
+
+  if (hadUser) return;
+  liveUsers.add(userId);
+  voiceLiveUsersByChannel.set(channelId, liveUsers);
+  emitVoiceLiveSync(io, channelId);
+  emitVoiceRoomSync(io, channelId);
 }
