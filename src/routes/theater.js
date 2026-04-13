@@ -163,7 +163,8 @@ function getQueue(channelId) {
 }
 
 function getState(channelId) {
-  return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  return normalizeTheaterPlaybackState(channelId, state);
 }
 
 function getVideoUrl(cachedPath, channelId) {
@@ -171,6 +172,46 @@ function getVideoUrl(cachedPath, channelId) {
   if (cachedPath.startsWith('youtube:')) return cachedPath;
   const basename = path.basename(cachedPath);
   return `/ugc/temp-theater/${channelId}/${basename}`;
+}
+
+function normalizeTheaterPlaybackState(channelId, state) {
+  if (!state) return null;
+
+  const nowMs = Date.now();
+  const durationMs = Math.max(0, Number(state.duration_ms) || 0);
+  let positionMs = Math.max(0, Number(state.position_ms) || 0);
+  let playing = !!state.playing;
+  let updatedAtSec = Math.max(0, Number(state.updated_at) || Math.floor(nowMs / 1000));
+  let changed = false;
+
+  if (durationMs > 0 && positionMs > durationMs) {
+    positionMs = durationMs;
+    changed = true;
+  }
+
+  if (playing && durationMs > 0) {
+    const updatedAtMs = updatedAtSec * 1000;
+    const expectedMs = positionMs + Math.max(0, nowMs - updatedAtMs);
+    if (expectedMs >= Math.max(0, durationMs - 1000)) {
+      const settings = getTheaterSettings(channelId);
+      if (settings.theater_auto_advance) {
+        const { advanceTheaterQueue } = require('../socket/handler');
+        advanceTheaterQueue(channelId);
+        return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+      }
+      playing = false;
+      positionMs = durationMs;
+      updatedAtSec = Math.floor(nowMs / 1000);
+      changed = true;
+    }
+  }
+
+  if (!changed) return state;
+
+  db.prepare('UPDATE theater_state SET position_ms = ?, playing = ?, updated_at = ? WHERE channel_id = ?')
+    .run(positionMs, playing ? 1 : 0, updatedAtSec, channelId);
+
+  return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
 }
 
 // ── Upload handler ─────────────────────────────────────────────────────────────

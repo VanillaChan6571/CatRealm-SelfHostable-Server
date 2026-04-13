@@ -1659,7 +1659,10 @@ function emitTheaterRoomPresence(io, channelId) {
 }
 
 function buildTheaterPlaybackState(channelId) {
-  const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  const state = normalizeTheaterPlaybackState(
+    channelId,
+    db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId),
+  );
   if (!state) return null;
   let videoUrl = null;
   if (state.current_item_id) {
@@ -1729,7 +1732,10 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
 }
 
 function emitTheaterSync(io, channelId, logSync = false) {
-  const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  const state = normalizeTheaterPlaybackState(
+    channelId,
+    db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId),
+  );
   if (!state) {
     io.to(`theater:${channelId}`).emit('theater:sync', {
       channelId,
@@ -1765,6 +1771,45 @@ function emitTheaterSync(io, channelId, logSync = false) {
     hostUserId: state.host_user_id,
     videoUrl,
   });
+}
+
+function normalizeTheaterPlaybackState(channelId, state) {
+  if (!state) return null;
+
+  const nowMs = Date.now();
+  const durationMs = Math.max(0, Number(state.duration_ms) || 0);
+  let positionMs = Math.max(0, Number(state.position_ms) || 0);
+  let playing = !!state.playing;
+  let updatedAtSec = Math.max(0, Number(state.updated_at) || Math.floor(nowMs / 1000));
+  let changed = false;
+
+  if (durationMs > 0 && positionMs > durationMs) {
+    positionMs = durationMs;
+    changed = true;
+  }
+
+  if (playing && durationMs > 0) {
+    const updatedAtMs = updatedAtSec * 1000;
+    const expectedMs = positionMs + Math.max(0, nowMs - updatedAtMs);
+    if (expectedMs >= Math.max(0, durationMs - 1000)) {
+      const settings = db.prepare('SELECT theater_auto_advance FROM channel_settings WHERE channel_id = ?').get(channelId);
+      if (settings?.theater_auto_advance) {
+        advanceTheaterQueue(channelId);
+        return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+      }
+      playing = false;
+      positionMs = durationMs;
+      updatedAtSec = Math.floor(nowMs / 1000);
+      changed = true;
+    }
+  }
+
+  if (!changed) return state;
+
+  db.prepare('UPDATE theater_state SET position_ms = ?, playing = ?, updated_at = ? WHERE channel_id = ?')
+    .run(positionMs, playing ? 1 : 0, updatedAtSec, channelId);
+
+  return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
 }
 
 function advanceTheaterQueue(channelId) {
