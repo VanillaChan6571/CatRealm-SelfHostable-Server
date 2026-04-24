@@ -552,8 +552,6 @@ router.delete('/:channelId/queue/:itemId', (req, res) => {
     return res.status(403).json({ error: 'Missing permission' });
   }
 
-  pteroLog(`[Theater] Queue item removed by ${req.user.username}: "${item.title}" (${item.id}) from channel ${channel.id}`);
-
   // Delete cached file
   if (item.cached_path && !item.cached_path.startsWith('youtube:')) {
     fs.unlink(item.cached_path, (err) => {
@@ -568,7 +566,13 @@ router.delete('/:channelId/queue/:itemId', (req, res) => {
   }
 
   db.prepare('DELETE FROM theater_queue WHERE id = ?').run(item.id);
+  pteroLog(`[Theater] Queue item removed by ${req.user.username}: "${item.title}" (${item.id}) from channel ${channel.id}`);
+
+  const { broadcastTheaterQueueUpdate, broadcastTheaterSync, clearPendingTheaterAutoAdvance } = require('../socket/handler');
+  clearPendingTheaterAutoAdvance(channel.id);
+  normalizeTheaterPlaybackState(channel.id, getState(channel.id));
   broadcastTheaterQueueUpdate(channel.id);
+  broadcastTheaterSync(channel.id);
   res.json({ success: true });
 });
 
