@@ -1916,8 +1916,7 @@ function maybeAdvanceCompletedTheaterItem(channelId, stateOverride = null) {
   const expectedMs = positionMs + (state.playing ? Math.max(0, Date.now() - updatedAtMs) : 0);
   if (expectedMs < Math.max(0, durationMs - 1000)) return false;
 
-  const settings = db.prepare('SELECT theater_auto_advance FROM channel_settings WHERE channel_id = ?').get(channelId);
-  if (!settings?.theater_auto_advance) return false;
+  if (!isTheaterAutoAdvanceEnabled(channelId)) return false;
 
   if (scheduleTheaterAutoAdvance(channelId, state.current_item_id || null)) {
     return true;
@@ -1926,6 +1925,11 @@ function maybeAdvanceCompletedTheaterItem(channelId, stateOverride = null) {
   advanceTheaterQueue(channelId);
   broadcastTheaterQueueAndSync(channelId);
   return true;
+}
+
+function isTheaterAutoAdvanceEnabled(channelId) {
+  const settings = db.prepare('SELECT theater_auto_advance FROM channel_settings WHERE channel_id = ?').get(channelId);
+  return settings?.theater_auto_advance !== 0;
 }
 
 function getNextReadyTheaterItem(channelId, currentItemId) {
