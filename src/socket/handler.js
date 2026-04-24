@@ -927,7 +927,7 @@ function setupSocketHandlers(io) {
       if (!hostCheck?.host_user_id || !room.has(hostCheck.host_user_id)) {
         db.prepare(`
           INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
-          ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
+          ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id
         `).run(channelId, user.id);
         io.to(`theater:${channelId}`).emit('theater:host-changed', { channelId, hostUserId: user.id });
         pteroLog(`[Theater] ${theaterUser.username} (${user.id}) assigned as host in channel ${channelId}`);
@@ -1165,7 +1165,7 @@ function setupSocketHandlers(io) {
       pteroLog(`[Theater] Host granted to ${targetUser?.username || userId} by ${authUser.username || user.id} in channel ${channelId}`);
       db.prepare(`
         INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
-        ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
+        ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id
       `).run(channelId, userId);
       io.to(`theater:${channelId}`).emit('theater:host-changed', { channelId, hostUserId: userId });
       if (typeof ack === 'function') ack({ ok: true });
@@ -1777,7 +1777,7 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
       if (nextHostId) {
         db.prepare(`
           INSERT INTO theater_state (channel_id, host_user_id, updated_at) VALUES (?, ?, unixepoch())
-          ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id, updated_at = unixepoch()
+          ON CONFLICT(channel_id) DO UPDATE SET host_user_id = excluded.host_user_id
         `).run(channelId, nextHostId);
         io.to(`theater:${channelId}`).emit('theater:host-changed', { channelId, hostUserId: nextHostId });
         pteroLog(`[Theater] Host migrated to ${nextHostId} in channel ${channelId} after ${userId} left`);
