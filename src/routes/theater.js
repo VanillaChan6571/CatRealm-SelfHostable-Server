@@ -189,9 +189,9 @@ function normalizeTheaterPlaybackState(channelId, state) {
     changed = true;
   }
 
-  if (playing && durationMs > 0) {
+  if (durationMs > 0) {
     const updatedAtMs = updatedAtSec * 1000;
-    const expectedMs = positionMs + Math.max(0, nowMs - updatedAtMs);
+    const expectedMs = positionMs + (playing ? Math.max(0, nowMs - updatedAtMs) : 0);
     if (expectedMs >= Math.max(0, durationMs - 1000)) {
       const settings = getTheaterSettings(channelId);
       if (settings.theater_auto_advance) {
@@ -711,6 +711,10 @@ router.patch('/:channelId/state', (req, res) => {
     ON CONFLICT(channel_id) DO NOTHING
   `).run(channel.id);
   db.prepare(`UPDATE theater_state SET ${fields.join(', ')} WHERE channel_id = ?`).run(...values);
+  normalizeTheaterPlaybackState(
+    channel.id,
+    db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channel.id),
+  );
 
   const { broadcastTheaterSync } = require('../socket/handler');
   broadcastTheaterSync(channel.id);

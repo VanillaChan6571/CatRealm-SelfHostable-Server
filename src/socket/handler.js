@@ -1117,6 +1117,7 @@ function setupSocketHandlers(io) {
       }
       values.push(channelId);
       db.prepare(`UPDATE theater_state SET ${fields.join(', ')} WHERE channel_id = ?`).run(...values);
+      maybeAdvanceCompletedTheaterItem(channelId);
       emitTheaterSync(io, channelId, true);
       if (typeof ack === 'function') ack({ ok: true });
     });
@@ -1848,17 +1849,11 @@ function normalizeTheaterPlaybackState(channelId, state) {
     changed = true;
   }
 
-  if (playing && durationMs > 0) {
+  if (durationMs > 0) {
     const updatedAtMs = updatedAtSec * 1000;
-    const expectedMs = positionMs + Math.max(0, nowMs - updatedAtMs);
+    const expectedMs = positionMs + (playing ? Math.max(0, nowMs - updatedAtMs) : 0);
     if (expectedMs >= Math.max(0, durationMs - 1000)) {
-      const settings = db.prepare('SELECT theater_auto_advance FROM channel_settings WHERE channel_id = ?').get(channelId);
-      if (settings?.theater_auto_advance) {
-        if (scheduleTheaterAutoAdvance(channelId, state.current_item_id || null)) {
-          return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
-        }
-        advanceTheaterQueue(channelId);
-        broadcastTheaterQueueAndSync(channelId);
+      if (maybeAdvanceCompletedTheaterItem(channelId, state)) {
         return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
       }
       playing = false;
@@ -1907,6 +1902,30 @@ function advanceTheaterQueue(channelId) {
       playing = excluded.playing,
       updated_at = unixepoch()
   `).run(channelId, nextItem?.id || null, nextItem ? 1 : 0);
+}
+
+function maybeAdvanceCompletedTheaterItem(channelId, stateOverride = null) {
+  const state = stateOverride || db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+  if (!state?.current_item_id) return false;
+
+  const durationMs = Math.max(0, Number(state.duration_ms) || 0);
+  if (durationMs <= 0) return false;
+
+  const positionMs = Math.max(0, Number(state.position_ms) || 0);
+  const updatedAtMs = Math.max(0, Number(state.updated_at) || 0) * 1000;
+  const expectedMs = positionMs + (state.playing ? Math.max(0, Date.now() - updatedAtMs) : 0);
+  if (expectedMs < Math.max(0, durationMs - 1000)) return false;
+
+  const settings = db.prepare('SELECT theater_auto_advance FROM channel_settings WHERE channel_id = ?').get(channelId);
+  if (!settings?.theater_auto_advance) return false;
+
+  if (scheduleTheaterAutoAdvance(channelId, state.current_item_id || null)) {
+    return true;
+  }
+
+  advanceTheaterQueue(channelId);
+  broadcastTheaterQueueAndSync(channelId);
+  return true;
 }
 
 function getNextReadyTheaterItem(channelId, currentItemId) {
