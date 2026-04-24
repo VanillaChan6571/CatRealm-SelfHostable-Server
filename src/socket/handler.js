@@ -30,10 +30,48 @@ const voiceRoomStartedAt = new Map();
 const theaterRooms = new Map();
 // Track when a theater room first became occupied (server-authoritative start time)
 const theaterRoomStartedAt = new Map();
+// Briefly preserve room authority across transient Socket.IO reconnects.
+const REALTIME_DISCONNECT_GRACE_MS = 5000;
+const pendingVoiceDisconnectTimers = new Map();
+const pendingTheaterDisconnectTimers = new Map();
 // Per-theater-room sync intervals
 const theaterSyncIntervals = new Map();
+const THEATER_AUTO_ADVANCE_DELAY_MS = 20000;
+const pendingTheaterAutoAdvances = new Map();
 // Per-user reaction rate limiting: userId -> { count, resetAt }
 const theaterReactionLimits = new Map();
+
+function clearPendingVoiceDisconnect(userId) {
+  const timer = pendingVoiceDisconnectTimers.get(userId);
+  if (!timer) return;
+  clearTimeout(timer);
+  pendingVoiceDisconnectTimers.delete(userId);
+}
+
+function clearPendingTheaterDisconnect(userId) {
+  const timer = pendingTheaterDisconnectTimers.get(userId);
+  if (!timer) return;
+  clearTimeout(timer);
+  pendingTheaterDisconnectTimers.delete(userId);
+}
+
+function schedulePendingVoiceDisconnect(io, socket, channelId, userId) {
+  clearPendingVoiceDisconnect(userId);
+  const timer = setTimeout(() => {
+    pendingVoiceDisconnectTimers.delete(userId);
+    leaveVoiceRoom(io, socket, channelId, userId);
+  }, REALTIME_DISCONNECT_GRACE_MS);
+  pendingVoiceDisconnectTimers.set(userId, timer);
+}
+
+function schedulePendingTheaterDisconnect(io, socket, channelId, userId) {
+  clearPendingTheaterDisconnect(userId);
+  const timer = setTimeout(() => {
+    pendingTheaterDisconnectTimers.delete(userId);
+    leaveTheaterRoom(io, socket, channelId, userId);
+  }, REALTIME_DISCONNECT_GRACE_MS);
+  pendingTheaterDisconnectTimers.set(userId, timer);
+}
 
 // Cleanup expired voice messages hourly
 setInterval(() => {
@@ -426,6 +464,7 @@ function setupSocketHandlers(io) {
         }
       }
 
+      clearPendingVoiceDisconnect(user.id);
       pteroLog(`[CatRealm] ${authUser.username} join voice ${channelId}`);
       if (socket.currentVoiceChannel && socket.currentVoiceChannel !== channelId) {
         leaveVoiceRoom(io, socket, socket.currentVoiceChannel, user.id);
@@ -528,6 +567,7 @@ function setupSocketHandlers(io) {
 
     socket.on('voice:leave', ({ channelId }) => {
       if (!channelId) return;
+      clearPendingVoiceDisconnect(user.id);
       leaveVoiceRoom(io, socket, channelId, user.id);
     });
 
@@ -825,6 +865,7 @@ function setupSocketHandlers(io) {
         return;
       }
 
+      clearPendingTheaterDisconnect(user.id);
       const online = onlineUsers.get(user.id);
       const theaterUser = {
         id: user.id,
@@ -926,6 +967,7 @@ function setupSocketHandlers(io) {
 
     socket.on('theater:leave', ({ channelId }) => {
       if (!channelId) return;
+      clearPendingTheaterDisconnect(user.id);
       pteroLog(`[Theater] ${authUser.username || user.id} left channel ${channelId}`);
       leaveTheaterRoom(io, socket, channelId, user.id);
     });
@@ -1067,6 +1109,7 @@ function setupSocketHandlers(io) {
       }
       if (affectsPlaybackClock) {
         fields.push('updated_at = unixepoch()');
+        clearPendingTheaterAutoAdvance(channelId);
       }
       if (fields.length === 0) {
         if (typeof ack === 'function') ack({ ok: true });
@@ -1451,10 +1494,10 @@ function setupSocketHandlers(io) {
       }
       io.emit('presence:update', buildOnlineList());
       if (socket.currentVoiceChannel) {
-        leaveVoiceRoom(io, socket, socket.currentVoiceChannel, user.id);
+        schedulePendingVoiceDisconnect(io, socket, socket.currentVoiceChannel, user.id);
       }
       if (socket.currentTheaterChannel) {
-        leaveTheaterRoom(io, socket, socket.currentTheaterChannel, user.id);
+        schedulePendingTheaterDisconnect(io, socket, socket.currentTheaterChannel, user.id);
       }
     });
   });
@@ -1643,9 +1686,11 @@ module.exports.broadcastTheaterSync = (channelId) => {
 };
 module.exports.advanceTheaterQueue = (channelId) => {
   advanceTheaterQueue(channelId);
-  if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
-  if (ioInstance) emitTheaterSync(ioInstance, channelId, true);
+  broadcastTheaterQueueAndSync(channelId);
 };
+module.exports.scheduleTheaterAutoAdvance = (channelId, currentItemId) => scheduleTheaterAutoAdvance(channelId, currentItemId);
+module.exports.getPendingTheaterAutoAdvance = (channelId) => serializePendingTheaterAutoAdvance(channelId);
+module.exports.clearPendingTheaterAutoAdvance = (channelId) => clearPendingTheaterAutoAdvance(channelId);
 
 // ── Theater helpers ────────────────────────────────────────────────────────────
 function emitTheaterRoomPresence(io, channelId) {
@@ -1685,12 +1730,24 @@ function buildTheaterPlaybackState(channelId) {
 
 function leaveTheaterRoom(io, socket, channelId, userId) {
   const room = theaterRooms.get(channelId);
-  if (!room) return;
-  if (room.has(userId)) {
-    room.delete(userId);
-    socket.leave(`theater:${channelId}`);
-    io.to(`theater:${channelId}`).emit('theater:user-left', { channelId, userId });
+  if (!room) {
+    if (socket.currentTheaterChannel === channelId) {
+      socket.currentTheaterChannel = null;
+    }
+    return false;
   }
+  const entry = room.get(userId);
+  if (!entry || entry.socketId !== socket.id) {
+    socket.leave(`theater:${channelId}`);
+    if (socket.currentTheaterChannel === channelId) {
+      socket.currentTheaterChannel = null;
+    }
+    return false;
+  }
+  clearPendingTheaterDisconnect(userId);
+  room.delete(userId);
+  socket.leave(`theater:${channelId}`);
+  io.to(`theater:${channelId}`).emit('theater:user-left', { channelId, userId });
   if (room.size === 0) {
     theaterRooms.delete(channelId);
     // Stop sync interval
@@ -1700,6 +1757,7 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
       theaterSyncIntervals.delete(channelId);
     }
     // Clear state and cleanup cache
+    clearPendingTheaterAutoAdvance(channelId);
     db.prepare('UPDATE theater_state SET playing = 0 WHERE channel_id = ?').run(channelId);
     const { deleteChannelCache } = require('../lib/theaterDownload');
     deleteChannelCache(channelId).catch(() => {});
@@ -1729,6 +1787,7 @@ function leaveTheaterRoom(io, socket, channelId, userId) {
   if (socket.currentTheaterChannel === channelId) {
     socket.currentTheaterChannel = null;
   }
+  return true;
 }
 
 function emitTheaterSync(io, channelId, logSync = false) {
@@ -1770,6 +1829,7 @@ function emitTheaterSync(io, channelId, logSync = false) {
     updatedAt: state.updated_at * 1000,
     hostUserId: state.host_user_id,
     videoUrl,
+    pendingAutoAdvance: serializePendingTheaterAutoAdvance(channelId),
   });
 }
 
@@ -1794,7 +1854,11 @@ function normalizeTheaterPlaybackState(channelId, state) {
     if (expectedMs >= Math.max(0, durationMs - 1000)) {
       const settings = db.prepare('SELECT theater_auto_advance FROM channel_settings WHERE channel_id = ?').get(channelId);
       if (settings?.theater_auto_advance) {
+        if (scheduleTheaterAutoAdvance(channelId, state.current_item_id || null)) {
+          return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+        }
         advanceTheaterQueue(channelId);
+        broadcastTheaterQueueAndSync(channelId);
         return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
       }
       playing = false;
@@ -1813,6 +1877,7 @@ function normalizeTheaterPlaybackState(channelId, state) {
 }
 
 function advanceTheaterQueue(channelId) {
+  clearPendingTheaterAutoAdvance(channelId);
   const state = db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
   const currentItemId = state?.current_item_id;
 
@@ -1844,18 +1909,107 @@ function advanceTheaterQueue(channelId) {
   `).run(channelId, nextItem?.id || null, nextItem ? 1 : 0);
 }
 
+function getNextReadyTheaterItem(channelId, currentItemId) {
+  return db.prepare(`
+    SELECT tq.id, tq.title, u.username as added_by_username
+    FROM theater_queue tq
+    LEFT JOIN users u ON u.id = tq.added_by
+    WHERE tq.channel_id = ? AND tq.cache_status = 'ready' AND tq.id != COALESCE(?, '')
+    ORDER BY tq.position ASC, tq.created_at ASC
+    LIMIT 1
+  `).get(channelId, currentItemId || null);
+}
+
+function scheduleTheaterAutoAdvance(channelId, currentItemId) {
+  const existing = pendingTheaterAutoAdvances.get(channelId);
+  if (existing && existing.currentItemId === currentItemId) return true;
+
+  clearPendingTheaterAutoAdvance(channelId);
+  const nextItem = getNextReadyTheaterItem(channelId, currentItemId);
+  if (!nextItem) return false;
+
+  const startedAt = Date.now();
+  const pending = {
+    currentItemId,
+    nextItemId: nextItem.id,
+    nextTitle: nextItem.title || 'Untitled video',
+    nextAddedByUsername: nextItem.added_by_username || null,
+    startedAt,
+    endsAt: startedAt + THEATER_AUTO_ADVANCE_DELAY_MS,
+    timer: setTimeout(() => {
+      completePendingTheaterAutoAdvance(channelId, currentItemId);
+    }, THEATER_AUTO_ADVANCE_DELAY_MS),
+  };
+  pendingTheaterAutoAdvances.set(channelId, pending);
+  pteroLog(`[Theater] Auto-advance countdown started in channel ${channelId}: next="${pending.nextTitle}" in ${THEATER_AUTO_ADVANCE_DELAY_MS / 1000}s`);
+  if (ioInstance) emitTheaterSync(ioInstance, channelId, true);
+  return true;
+}
+
+function completePendingTheaterAutoAdvance(channelId, currentItemId) {
+  const pending = pendingTheaterAutoAdvances.get(channelId);
+  if (!pending || pending.currentItemId !== currentItemId) return;
+  pendingTheaterAutoAdvances.delete(channelId);
+  const state = db.prepare('SELECT current_item_id FROM theater_state WHERE channel_id = ?').get(channelId);
+  if ((state?.current_item_id || null) !== currentItemId) return;
+  pteroLog(`[Theater] Auto-advance countdown complete in channel ${channelId}`);
+  advanceTheaterQueue(channelId);
+  broadcastTheaterQueueAndSync(channelId);
+}
+
+function clearPendingTheaterAutoAdvance(channelId) {
+  const pending = pendingTheaterAutoAdvances.get(channelId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingTheaterAutoAdvances.delete(channelId);
+}
+
+function serializePendingTheaterAutoAdvance(channelId) {
+  const pending = pendingTheaterAutoAdvances.get(channelId);
+  if (!pending) return null;
+  return {
+    currentItemId: pending.currentItemId,
+    nextItemId: pending.nextItemId,
+    nextTitle: pending.nextTitle,
+    nextAddedByUsername: pending.nextAddedByUsername,
+    startedAt: pending.startedAt,
+    endsAt: pending.endsAt,
+  };
+}
+
+function broadcastTheaterQueueUpdate(channelId) {
+  if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
+}
+
+function broadcastTheaterQueueAndSync(channelId) {
+  broadcastTheaterQueueUpdate(channelId);
+  if (ioInstance) emitTheaterSync(ioInstance, channelId, true);
+}
+
 function leaveVoiceRoom(io, socket, channelId, userId) {
   const room = voiceRooms.get(channelId);
-  if (!room) return;
-  if (room.has(userId)) {
-    room.delete(userId);
-    setVoiceLiveState(io, channelId, userId, false);
-    socket.leave(`voice:${channelId}`);
-    io.to(`voice:${channelId}`).emit('voice:user-left', { channelId, userId });
-    if (room.size > 0) {
-      emitVoiceRoomCount(io, channelId);
-      emitVoiceRoomSync(io, channelId);
+  if (!room) {
+    if (socket.currentVoiceChannel === channelId) {
+      socket.currentVoiceChannel = null;
     }
+    return false;
+  }
+  const entry = room.get(userId);
+  if (!entry || entry.socketId !== socket.id) {
+    socket.leave(`voice:${channelId}`);
+    if (socket.currentVoiceChannel === channelId) {
+      socket.currentVoiceChannel = null;
+    }
+    return false;
+  }
+  clearPendingVoiceDisconnect(userId);
+  room.delete(userId);
+  setVoiceLiveState(io, channelId, userId, false);
+  socket.leave(`voice:${channelId}`);
+  io.to(`voice:${channelId}`).emit('voice:user-left', { channelId, userId });
+  if (room.size > 0) {
+    emitVoiceRoomCount(io, channelId);
+    emitVoiceRoomSync(io, channelId);
   }
   if (room.size === 0) {
     voiceRooms.delete(channelId);
@@ -1866,6 +2020,7 @@ function leaveVoiceRoom(io, socket, channelId, userId) {
   if (socket.currentVoiceChannel === channelId) {
     socket.currentVoiceChannel = null;
   }
+  return true;
 }
 
 function emitVoiceRoomCount(io, channelId) {

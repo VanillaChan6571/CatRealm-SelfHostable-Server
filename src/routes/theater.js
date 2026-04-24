@@ -195,7 +195,10 @@ function normalizeTheaterPlaybackState(channelId, state) {
     if (expectedMs >= Math.max(0, durationMs - 1000)) {
       const settings = getTheaterSettings(channelId);
       if (settings.theater_auto_advance) {
-        const { advanceTheaterQueue } = require('../socket/handler');
+        const { advanceTheaterQueue, scheduleTheaterAutoAdvance } = require('../socket/handler');
+        if (scheduleTheaterAutoAdvance(channelId, state.current_item_id || null)) {
+          return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
+        }
         advanceTheaterQueue(channelId);
         return db.prepare('SELECT * FROM theater_state WHERE channel_id = ?').get(channelId);
       }
@@ -272,9 +275,14 @@ router.get('/:channelId/queue', (req, res) => {
   res.json({
     items: enriched,
     state: state
-      ? { ...state, updated_at: state.updated_at * 1000, videoUrl: state.current_item_id ? getVideoUrl(
-          items.find((i) => i.id === state.current_item_id)?.cached_path, channel.id
-        ) : null }
+      ? {
+          ...state,
+          updated_at: state.updated_at * 1000,
+          videoUrl: state.current_item_id ? getVideoUrl(
+            items.find((i) => i.id === state.current_item_id)?.cached_path, channel.id
+          ) : null,
+          pendingAutoAdvance: require('../socket/handler').getPendingTheaterAutoAdvance(channel.id),
+        }
       : null,
     mySkipVote: skipVote,
     settings,
@@ -658,6 +666,7 @@ router.get('/:channelId/state', (req, res) => {
     state: {
       ...state,
       videoUrl: currentItem ? getVideoUrl(currentItem.cached_path, channel.id) : null,
+      pendingAutoAdvance: require('../socket/handler').getPendingTheaterAutoAdvance(channel.id),
     },
   });
 });
@@ -690,7 +699,10 @@ router.patch('/:channelId/state', (req, res) => {
     fields.push('current_item_id = ?');
     values.push(currentItemId || null);
   }
-  if (affectsPlaybackClock) fields.push('updated_at = unixepoch()');
+  if (affectsPlaybackClock) {
+    fields.push('updated_at = unixepoch()');
+    require('../socket/handler').clearPendingTheaterAutoAdvance(channel.id);
+  }
   if (fields.length === 0) return res.json({ success: true });
   values.push(channel.id);
 
