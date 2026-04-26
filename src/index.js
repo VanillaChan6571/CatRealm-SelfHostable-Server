@@ -524,6 +524,7 @@ const embedMediaRoutes = require('./routes/embedMedia');
 const webhooksRoutes = require('./routes/webhooks');
 const welcomeRoutes = require('./routes/welcome');
 const theaterRoutes = require('./routes/theater');
+const mediaRoutes = require('./routes/media').router;
 const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
@@ -593,6 +594,7 @@ app.use('/api/expressions', expressionsRoutes);
 app.use('/api/embed-media', embedMediaRoutes);
 app.use('/api/embeds', authenticateToken, embedsRoutes);
 app.use('/api/theater',  authenticateToken, theaterRoutes);
+app.use('/api/media', mediaRoutes);
 app.use('/api/webhooks', webhooksRoutes);
 app.use('/api', welcomeRoutes);
 

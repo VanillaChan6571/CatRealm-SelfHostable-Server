@@ -16,6 +16,11 @@ const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
+const {
+  createSelfHostMediaSession,
+  getSelfHostMediaContexts,
+} = require('../routes/media');
+const { getMediaCapability } = require('../lib/mediaConfig');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
@@ -417,6 +422,17 @@ function setupSocketHandlers(io) {
       mentionAlias,
       serverIcon,
       serverBanner,
+    });
+
+    socket.on('media:v1:capabilities', (ack) => {
+      if (typeof ack === 'function') ack({ ok: true, capability: getMediaCapability(getSelfHostMediaContexts()) });
+    });
+
+    socket.on('media:v1:token', ({ context, channelId } = {}, ack) => {
+      const result = createSelfHostMediaSession({ context, channelId, user });
+      if (typeof ack === 'function') {
+        ack(result.ok ? result : { ok: false, error: result.error, capability: getMediaCapability(getSelfHostMediaContexts()) });
+      }
     });
 
     // ── Voice: join/leave/signaling ───────────────────────────────────────────────
