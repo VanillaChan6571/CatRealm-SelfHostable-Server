@@ -2,6 +2,8 @@ ARG BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
 ARG LIVEKIT_VERSION=1.11.0
 FROM ${BASE_IMAGE}
 
+ARG LIVEKIT_VERSION
+
 USER root
 
 SHELL ["/bin/sh", "-c"]
