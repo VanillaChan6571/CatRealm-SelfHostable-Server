@@ -74,6 +74,49 @@ function logMediaDependencyStatus() {
   } else {
     pteroLog('[CatRealm] WARNING: ffmpeg not found. Theater YouTube downloads will be limited to progressive formats and media processing features may be reduced.');
   }
+
+  const livekit = spawnSync('livekit-server', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (livekit.status === 0) {
+    pteroLog(`[CatRealm] livekit-server detected: ${(livekit.stdout || livekit.stderr || '').trim()}`);
+  } else {
+    pteroLog('[CatRealm] livekit-server not detected in PATH. Bundled LiveKit requires the CatRealm Runtime image.');
+  }
+}
+
+function logLiveKitRuntimeStatus() {
+  const bundledRequested = isTruthy(process.env.HOST_LIVEKIT_MEDIA || process.env.CATREALM_HOST_LIVEKIT_MEDIA, false);
+  const enabled = isTruthy(process.env.MEDIA_LIVEKIT_ENABLED, false);
+  const apiKey = (process.env.MEDIA_LIVEKIT_API_KEY || process.env.LIVEKIT_API_KEY || '').trim();
+  const apiSecret = (process.env.MEDIA_LIVEKIT_API_SECRET || process.env.LIVEKIT_API_SECRET || '').trim();
+  const publicUrl = (
+    process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL ||
+    process.env.MEDIA_LIVEKIT_PUBLIC_URL ||
+    process.env.LIVEKIT_PUBLIC_WS_URL ||
+    process.env.LIVEKIT_URL ||
+    ''
+  ).trim();
+  const fallbackToLegacy = isTruthy(process.env.MEDIA_FALLBACK_TO_LEGACY, true);
+  const missing = [];
+  if (!apiKey) missing.push('apiKey');
+  if (!apiSecret) missing.push('apiSecret');
+  if (!publicUrl) missing.push('publicUrl');
+
+  if (enabled && missing.length === 0) {
+    pteroLog(`[CatRealm] LiveKit media: ENABLED (${bundledRequested ? 'bundled' : 'external'}) public=${publicUrl} fallbackLegacy=${fallbackToLegacy ? 'true' : 'false'}`);
+    return;
+  }
+
+  if (enabled) {
+    pteroLog(`[CatRealm] LiveKit media: MISCONFIGURED missing=${missing.join(',')} fallbackLegacy=${fallbackToLegacy ? 'true' : 'false'}`);
+    return;
+  }
+
+  if (bundledRequested) {
+    pteroLog('[CatRealm] WARNING: HOST_LIVEKIT_MEDIA=true but LiveKit media is not enabled. Start with node scripts/pterodactyl-bootstrap.js so bundled LiveKit can launch.');
+    return;
+  }
+
+  pteroLog(`[CatRealm] LiveKit media: DISABLED fallbackLegacy=${fallbackToLegacy ? 'true' : 'false'}`);
 }
 
 function ensureRepoReady(repoRoot, repo, branch) {
@@ -606,6 +649,7 @@ async function start() {
     getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
   });
   logMediaDependencyStatus();
+  logLiveKitRuntimeStatus();
 
   let httpServer;
   const sslCert = process.env.SSL_CERT_PATH;

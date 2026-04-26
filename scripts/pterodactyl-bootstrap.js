@@ -94,6 +94,7 @@ function getPublicLiveKitUrl(host, port) {
 
 function startBundledLiveKit() {
   if (!isTruthy(process.env.HOST_LIVEKIT_MEDIA || process.env.CATREALM_HOST_LIVEKIT_MEDIA, false)) {
+    console.log('[CatRealm] Bundled LiveKit media: disabled (set HOST_LIVEKIT_MEDIA=true to run LiveKit with this server).');
     return null;
   }
 
@@ -136,6 +137,14 @@ function startBundledLiveKit() {
     cwd: repoRoot,
     stdio: 'inherit',
     env: process.env,
+  });
+
+  child.on('spawn', () => {
+    console.log(`[CatRealm] Bundled LiveKit process started pid=${child.pid}`);
+  });
+
+  child.on('error', (err) => {
+    console.error(`[CatRealm] Failed to start bundled LiveKit: ${err.message}`);
   });
 
   child.on('exit', (code, signal) => {
