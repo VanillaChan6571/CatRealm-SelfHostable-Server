@@ -213,7 +213,7 @@
         },
         {
             "name": "LiveKit UDP Port Start",
-            "description": "Start of bundled LiveKit UDP media range. Allocate the full UDP range in Pterodactyl/firewall.",
+            "description": "First bundled LiveKit UDP media port. For one UDP allocation, set start and end to the same port.",
             "env_variable": "LIVEKIT_RTC_UDP_PORT_START",
             "default_value": "50000",
             "user_viewable": true,
@@ -223,9 +223,9 @@
         },
         {
             "name": "LiveKit UDP Port End",
-            "description": "End of bundled LiveKit UDP media range. Small servers can use 50000-50100; larger servers need more ports.",
+            "description": "Last bundled LiveKit UDP media port. Must match an allocated contiguous Docker/Pterodactyl UDP range. Default uses one port.",
             "env_variable": "LIVEKIT_RTC_UDP_PORT_END",
-            "default_value": "50100",
+            "default_value": "50000",
             "user_viewable": true,
             "user_editable": true,
             "rules": "nullable|numeric",

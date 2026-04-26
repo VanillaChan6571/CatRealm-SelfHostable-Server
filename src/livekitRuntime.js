@@ -127,8 +127,8 @@ function startBundledLiveKit(options = {}) {
 
   const signalingPort = numberEnv('LIVEKIT_SIGNALING_PORT', 7880);
   const tcpPort = numberEnv('LIVEKIT_RTC_TCP_PORT', 7881);
-  const udpStart = numberEnv('LIVEKIT_RTC_UDP_PORT_START', 50000);
-  const udpEnd = Math.max(udpStart, numberEnv('LIVEKIT_RTC_UDP_PORT_END', 50100));
+  const udpStart = numberEnv('LIVEKIT_RTC_UDP_PORT_START', numberEnv('LIVEKIT_RTC_UDP_PORT', 50000));
+  const udpEnd = Math.max(udpStart, numberEnv('LIVEKIT_RTC_UDP_PORT_END', udpStart));
   const publicHost = getPublicLiveKitHost();
   const { apiKey, apiSecret } = getLiveKitSecrets();
   const configPath = path.join(dataDir, 'livekit.yaml');
@@ -149,7 +149,10 @@ function startBundledLiveKit(options = {}) {
   log(`[CatRealm] Starting bundled LiveKit media server on ${internalUrl}`);
   log(`[CatRealm] LiveKit public URL: ${publicUrl}`);
   log('[CatRealm] LiveKit signaling proxy: enabled on CatRealm /rtc over HTTPS');
-  log(`[CatRealm] LiveKit RTC ports: tcp=${tcpPort}, udp=${udpStart}-${udpEnd}`);
+  log(`[CatRealm] LiveKit RTC ports: tcp=${tcpPort}, udp=${udpStart === udpEnd ? udpStart : `${udpStart}-${udpEnd}`}`);
+  if (udpEnd > udpStart) {
+    log(`[CatRealm] LiveKit UDP range requires every UDP port from ${udpStart} through ${udpEnd} to be allocated in Docker/Pterodactyl.`);
+  }
 
   livekitChild = spawn('livekit-server', ['--config', configPath], {
     cwd: repoRoot,
