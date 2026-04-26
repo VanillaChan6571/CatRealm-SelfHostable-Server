@@ -6,6 +6,7 @@ const readline = require('readline');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
+const { startBundledLiveKit } = require('./livekitRuntime');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -648,6 +649,7 @@ async function start() {
     getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
     getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
   });
+  startBundledLiveKit({ logger: pteroLog });
   logMediaDependencyStatus();
   logLiveKitRuntimeStatus();
 
