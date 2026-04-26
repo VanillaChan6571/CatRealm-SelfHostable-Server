@@ -81,6 +81,7 @@ function getPublicLiveKitUrl(host, port) {
 }
 
 function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd) {
+  const livekitUdpEnd = Math.max(udpStart + 1, udpEnd);
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(configPath, [
     `port: ${signalingPort}`,
@@ -88,7 +89,7 @@ function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPor
     'rtc:',
     `  tcp_port: ${tcpPort}`,
     `  port_range_start: ${udpStart}`,
-    `  port_range_end: ${udpEnd}`,
+    `  port_range_end: ${livekitUdpEnd}`,
     '  use_external_ip: true',
     'keys:',
     `  ${yamlQuote(apiKey)}: ${yamlQuote(apiSecret)}`,
@@ -152,6 +153,8 @@ function startBundledLiveKit(options = {}) {
   log(`[CatRealm] LiveKit RTC ports: tcp=${tcpPort}, udp=${udpStart === udpEnd ? udpStart : `${udpStart}-${udpEnd}`}`);
   if (udpEnd > udpStart) {
     log(`[CatRealm] LiveKit UDP range requires every UDP port from ${udpStart} through ${udpEnd} to be allocated in Docker/Pterodactyl.`);
+  } else {
+    log('[CatRealm] LiveKit UDP single-port mode: writing exclusive LiveKit range internally to avoid LiveKit single-port startup panic.');
   }
 
   livekitChild = spawn('livekit-server', ['--config', configPath], {

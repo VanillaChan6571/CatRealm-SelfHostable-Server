@@ -55,7 +55,7 @@ Pterodactyl port requirements for bundled mode:
 
 The signaling port is internal in the bundled setup and usually does not need public allocation. The CatRealm HTTPS port must remain public because it carries both CatRealm traffic and LiveKit `/rtc` signaling. `LIVEKIT_RTC_TCP_PORT` and the UDP range still need public allocation because WebRTC media uses those ports directly.
 
-For small Pterodactyl hosts, a single UDP media port is the safest default because Docker exposes only allocated ports. For more concurrent media sessions, allocate a contiguous UDP range and set start/end to exactly that range. LiveKit's official port guidance is at https://docs.livekit.io/home/self-hosting/ports-firewall/.
+For small Pterodactyl hosts, a single UDP media port is the safest default because Docker exposes only allocated ports. CatRealm writes LiveKit's internal config with an exclusive upper bound, so `50000` to `50000` in the egg still binds only UDP `50000`. For more concurrent media sessions, allocate a contiguous UDP range and set start/end to exactly that range. LiveKit's official port guidance is at https://docs.livekit.io/home/self-hosting/ports-firewall/.
 
 Do not put the LiveKit API secret in client-side config. CatRealm mints participant tokens server-side.
 
