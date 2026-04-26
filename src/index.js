@@ -7,6 +7,7 @@ const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
 const { startBundledLiveKit } = require('./livekitRuntime');
+const { attachLiveKitUpgradeProxy, createLiveKitHttpProxy } = require('./livekitProxy');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -616,6 +617,9 @@ app.use('/ugc/temp-theater', authenticateToken, (req, res, next) => {
   next();
 }, express.static(THEATER_CACHE_DIR, { maxAge: '0', etag: true }));
 
+// Proxies LiveKit signaling through CatRealm HTTPS for bundled Pterodactyl mode.
+app.use('/rtc', createLiveKitHttpProxy(pteroLog));
+
 // ── Landing page ───────────────────────────────────────────────────────────────
 app.use('/', landingRoutes);
 
@@ -696,6 +700,8 @@ async function start() {
     httpServer = http.createServer(app);
     pteroLog('[CatRealm] WARNING: SSL is not enabled. The web app at https://catrealm.app/app requires HTTPS to connect.');
   }
+
+  attachLiveKitUpgradeProxy(httpServer, pteroLog);
 
   // ── Socket.io ───────────────────────────────────────────────────────────────
   const io = new Server(httpServer, {

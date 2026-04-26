@@ -193,7 +193,7 @@
         },
         {
             "name": "LiveKit Signaling Port",
-            "description": "TCP WebSocket/signaling port for bundled LiveKit. Allocate this TCP port in Pterodactyl.",
+            "description": "Internal TCP WebSocket/signaling port for bundled LiveKit. CatRealm proxies /rtc over its HTTPS port, so this usually does not need public allocation.",
             "env_variable": "LIVEKIT_SIGNALING_PORT",
             "default_value": "7880",
             "user_viewable": true,

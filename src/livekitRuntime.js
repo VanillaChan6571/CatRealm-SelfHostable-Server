@@ -75,7 +75,8 @@ function getPublicLiveKitUrl(host, port) {
   const explicit = (process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL || process.env.MEDIA_LIVEKIT_PUBLIC_URL || '').trim();
   if (explicit) return explicit;
   if (!host) return `ws://127.0.0.1:${port}`;
-  const suffix = port === 443 ? '' : `:${port}`;
+  const publicPort = Number(process.env.LIVEKIT_PUBLIC_PORT || process.env.SERVER_PORT || process.env.PORT || port);
+  const suffix = publicPort === 443 ? '' : `:${publicPort}`;
   return `wss://${host}${suffix}`;
 }
 
@@ -138,6 +139,7 @@ function startBundledLiveKit(options = {}) {
 
   process.env.CATREALM_BUNDLED_LIVEKIT_STARTED = 'true';
   process.env.MEDIA_LIVEKIT_ENABLED = 'true';
+  process.env.MEDIA_LIVEKIT_PROXY_ENABLED = 'true';
   process.env.MEDIA_LIVEKIT_URL = internalUrl;
   process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL = publicUrl;
   process.env.MEDIA_LIVEKIT_API_KEY = apiKey;
@@ -146,6 +148,7 @@ function startBundledLiveKit(options = {}) {
 
   log(`[CatRealm] Starting bundled LiveKit media server on ${internalUrl}`);
   log(`[CatRealm] LiveKit public URL: ${publicUrl}`);
+  log('[CatRealm] LiveKit signaling proxy: enabled on CatRealm /rtc over HTTPS');
   log(`[CatRealm] LiveKit RTC ports: tcp=${tcpPort}, udp=${udpStart}-${udpEnd}`);
 
   livekitChild = spawn('livekit-server', ['--config', configPath], {

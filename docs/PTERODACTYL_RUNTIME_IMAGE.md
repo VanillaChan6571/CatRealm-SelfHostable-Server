@@ -38,21 +38,22 @@ Set these visible egg variables for bundled mode:
 
 - `HOST_LIVEKIT_MEDIA=true`
 - `LIVEKIT_PUBLIC_HOST`: public hostname clients use for LiveKit. Leave empty to reuse `SSL_DOMAIN`; only set it when media uses a different hostname.
-- `LIVEKIT_SIGNALING_PORT`: default `7880/tcp`.
+- `LIVEKIT_SIGNALING_PORT`: internal LiveKit signaling port, default `7880/tcp`. CatRealm proxies `/rtc` over the normal CatRealm HTTPS port.
 - `LIVEKIT_RTC_TCP_PORT`: default `7881/tcp`.
 - `LIVEKIT_RTC_UDP_PORT_START`: default `50000/udp`.
 - `LIVEKIT_RTC_UDP_PORT_END`: default `50100/udp`.
 - `MEDIA_FALLBACK_TO_LEGACY=true`: recommended while testing.
 
-When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically.
+When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically. The client-facing LiveKit URL uses CatRealm's HTTPS port, and CatRealm proxies `/rtc` traffic internally to the bundled LiveKit process.
 
 The external LiveKit URL, API key, API secret, and token TTL variables remain in the egg for advanced deployments, but they are hidden from regular server users. In bundled mode CatRealm generates and persists the LiveKit API secret automatically.
 
 Pterodactyl port requirements for bundled mode:
 
-- Allocate `LIVEKIT_SIGNALING_PORT` as TCP.
 - Allocate `LIVEKIT_RTC_TCP_PORT` as TCP.
 - Allocate the full UDP range from `LIVEKIT_RTC_UDP_PORT_START` through `LIVEKIT_RTC_UDP_PORT_END`.
+
+The signaling port is internal in the bundled setup and usually does not need public allocation. The CatRealm HTTPS port must remain public because it carries both CatRealm traffic and LiveKit `/rtc` signaling. `LIVEKIT_RTC_TCP_PORT` and the UDP range still need public allocation because WebRTC media uses those ports directly.
 
 For small hosts, `50000-50100/udp` is a reasonable test range. Larger servers need a wider UDP range. LiveKit's official port guidance is at https://docs.livekit.io/home/self-hosting/ports-firewall/.
 
