@@ -29,6 +29,30 @@ Using a custom runtime image fixes that permanently.
 
 Import the CatRealm egg and pick one of the `CatRealm Runtime` image options from the egg image list.
 
+## LiveKit Sidecar
+
+The CatRealm egg now exposes optional LiveKit media variables. These do not run LiveKit inside the CatRealm process; they connect CatRealm to a separate LiveKit media server that carries voice/video media.
+
+Recommended layout:
+
+- CatRealm server: this existing egg and runtime image.
+- LiveKit media server: a separate Pterodactyl server, VPS service, Docker Compose service, or LiveKit Cloud project.
+- Public media URL: a real TLS hostname such as `wss://media.example.com`.
+
+CatRealm egg variables:
+
+- `MEDIA_LIVEKIT_ENABLED`: set to `true` to enable LiveKit token/capability plumbing.
+- `MEDIA_LIVEKIT_URL`: CatRealm-to-LiveKit URL. Use the same value as public URL unless CatRealm can reach LiveKit over an internal address.
+- `MEDIA_LIVEKIT_PUBLIC_WS_URL`: client-facing URL, usually `wss://media.example.com`.
+- `MEDIA_LIVEKIT_API_KEY`: LiveKit API key.
+- `MEDIA_LIVEKIT_API_SECRET`: LiveKit API secret.
+- `MEDIA_FALLBACK_TO_LEGACY`: keep `true` while testing, so clients can fall back to legacy voice if the media sidecar is unavailable.
+- `MEDIA_TOKEN_TTL_SECONDS`: token lifetime, default `600`.
+
+Pterodactyl note: LiveKit needs WebRTC media ports exposed on the LiveKit server, not the CatRealm server. For small hosts, configure a smaller UDP range on LiveKit, then allocate that same UDP range in the panel/firewall. A typical LiveKit deployment also needs its signaling port reachable through HTTPS/WSS.
+
+Do not put the LiveKit API secret in client-side config. CatRealm mints participant tokens server-side.
+
 ## Existing deployed servers
 
 Existing servers will keep using their current runtime image until you change it in the panel.

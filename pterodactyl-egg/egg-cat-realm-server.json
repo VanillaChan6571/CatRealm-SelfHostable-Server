@@ -172,6 +172,76 @@
             "field_type": "text"
         },
         {
+            "name": "LiveKit Media Enabled",
+            "description": "Enable the LiveKit sidecar media path. Requires a separate LiveKit server or service.",
+            "env_variable": "MEDIA_LIVEKIT_ENABLED",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:true,false,1,0,yes,no,on,off",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit Internal URL",
+            "description": "Server-to-server LiveKit WebSocket URL, for example ws://127.0.0.1:7880 or wss://media.example.com.",
+            "env_variable": "MEDIA_LIVEKIT_URL",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit Public WS URL",
+            "description": "Client-facing LiveKit WebSocket URL, usually wss://media.example.com.",
+            "env_variable": "MEDIA_LIVEKIT_PUBLIC_WS_URL",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit API Key",
+            "description": "API key configured on the LiveKit sidecar.",
+            "env_variable": "MEDIA_LIVEKIT_API_KEY",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:128",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit API Secret",
+            "description": "API secret configured on the LiveKit sidecar. Keep this private.",
+            "env_variable": "MEDIA_LIVEKIT_API_SECRET",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": true,
+            "rules": "nullable|string|max:256",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit Fallback To Legacy",
+            "description": "When true, clients fall back to legacy voice if LiveKit is unavailable or disabled.",
+            "env_variable": "MEDIA_FALLBACK_TO_LEGACY",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:true,false,1,0,yes,no,on,off",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit Token TTL Seconds",
+            "description": "Lifetime for CatRealm-issued LiveKit access tokens.",
+            "env_variable": "MEDIA_TOKEN_TTL_SECONDS",
+            "default_value": "600",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
             "name": "Auto Update",
             "description": "If true, startup will fetch and reset to origin branch when this server folder is a git repository.",
             "env_variable": "AUTO_UPDATE",
