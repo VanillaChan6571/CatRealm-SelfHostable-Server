@@ -3,6 +3,7 @@
 CatRealm now includes a public Pterodactyl runtime image definition that adds the OS tools the server expects at runtime:
 
 - `ffmpeg`
+- `livekit-server`
 - `yt-dlp`
 - `git`
 - `python3`
@@ -29,27 +30,31 @@ Using a custom runtime image fixes that permanently.
 
 Import the CatRealm egg and pick one of the `CatRealm Runtime` image options from the egg image list.
 
-## LiveKit Sidecar
+## Bundled LiveKit
 
-The CatRealm egg now exposes optional LiveKit media variables. These do not run LiveKit inside the CatRealm process; they connect CatRealm to a separate LiveKit media server that carries voice/video media.
+The CatRealm runtime image includes `livekit-server`, so one Pterodactyl server can run CatRealm plus LiveKit media together. LiveKit still runs as a sidecar process; it is not embedded into the CatRealm Node process.
 
-Recommended layout:
+Set these egg variables for bundled mode:
 
-- CatRealm server: this existing egg and runtime image.
-- LiveKit media server: a separate Pterodactyl server, VPS service, Docker Compose service, or LiveKit Cloud project.
-- Public media URL: a real TLS hostname such as `wss://media.example.com`.
+- `HOST_LIVEKIT_MEDIA=true`
+- `LIVEKIT_PUBLIC_HOST`: public hostname clients use for LiveKit. Leave empty to reuse `SSL_DOMAIN`.
+- `LIVEKIT_SIGNALING_PORT`: default `7880/tcp`.
+- `LIVEKIT_RTC_TCP_PORT`: default `7881/tcp`.
+- `LIVEKIT_RTC_UDP_PORT_START`: default `50000/udp`.
+- `LIVEKIT_RTC_UDP_PORT_END`: default `50100/udp`.
+- `MEDIA_LIVEKIT_API_KEY`: optional. If blank, CatRealm generates and persists one.
+- `MEDIA_LIVEKIT_API_SECRET`: optional. If blank, CatRealm generates and persists one.
+- `MEDIA_FALLBACK_TO_LEGACY=true`: recommended while testing.
 
-CatRealm egg variables:
+When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically.
 
-- `MEDIA_LIVEKIT_ENABLED`: set to `true` to enable LiveKit token/capability plumbing.
-- `MEDIA_LIVEKIT_URL`: CatRealm-to-LiveKit URL. Use the same value as public URL unless CatRealm can reach LiveKit over an internal address.
-- `MEDIA_LIVEKIT_PUBLIC_WS_URL`: client-facing URL, usually `wss://media.example.com`.
-- `MEDIA_LIVEKIT_API_KEY`: LiveKit API key.
-- `MEDIA_LIVEKIT_API_SECRET`: LiveKit API secret.
-- `MEDIA_FALLBACK_TO_LEGACY`: keep `true` while testing, so clients can fall back to legacy voice if the media sidecar is unavailable.
-- `MEDIA_TOKEN_TTL_SECONDS`: token lifetime, default `600`.
+Pterodactyl port requirements for bundled mode:
 
-Pterodactyl note: LiveKit needs WebRTC media ports exposed on the LiveKit server, not the CatRealm server. For small hosts, configure a smaller UDP range on LiveKit, then allocate that same UDP range in the panel/firewall. A typical LiveKit deployment also needs its signaling port reachable through HTTPS/WSS.
+- Allocate `LIVEKIT_SIGNALING_PORT` as TCP.
+- Allocate `LIVEKIT_RTC_TCP_PORT` as TCP.
+- Allocate the full UDP range from `LIVEKIT_RTC_UDP_PORT_START` through `LIVEKIT_RTC_UDP_PORT_END`.
+
+For small hosts, `50000-50100/udp` is a reasonable test range. Larger servers need a wider UDP range. LiveKit's official port guidance is at https://docs.livekit.io/home/self-hosting/ports-firewall/.
 
 Do not put the LiveKit API secret in client-side config. CatRealm mints participant tokens server-side.
 
@@ -62,7 +67,7 @@ To move an existing server:
 1. Update or re-import the CatRealm egg.
 2. Change the server Docker image to one of the CatRealm runtime tags above.
 3. Rebuild or reinstall the server so Pterodactyl recreates the container on that image.
-4. Start the server and confirm startup logs show both `yt-dlp` and `ffmpeg` detected.
+4. Start the server and confirm startup logs show `yt-dlp`, `ffmpeg`, and `livekit-server` detected.
 
 ## Manual build
 

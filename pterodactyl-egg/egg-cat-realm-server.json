@@ -7,13 +7,13 @@
     "exported_at": "2026-02-12T11:41:25-07:00",
     "name": "CatRealm Server",
     "author": "admin@nekohosting.gg",
-    "description": "Self-hosted fantasy chat server. Users connect by IP\/domain using the CatRealm client.",
+    "description": "Self-hosted fantasy chat server. Users connect by IP/domain using the CatRealm client.",
     "features": [
         "eula"
     ],
     "docker_images": {
-        "CatRealm Runtime (NodeJS 20 + FFmpeg)": "ghcr.io\/vanillachan6571\/catrealm-selfhostable-server-yolk:nodejs_20",
-        "NodeJS 20": "ghcr.io\/pterodactyl\/yolks:nodejs_20"
+        "CatRealm Runtime (NodeJS 20 + FFmpeg + LiveKit)": "ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_20",
+        "NodeJS 20": "ghcr.io/pterodactyl/yolks:nodejs_20"
     },
     "file_denylist": [],
     "startup": "node scripts/pterodactyl-bootstrap.js",
@@ -25,8 +25,8 @@
     },
     "scripts": {
         "installation": {
-            "script": "#!\/bin\/bash\n# CatRealm Server - Pterodactyl Install Script\n\napt-get update -y\napt-get install -y curl git python3 make g++ ffmpeg yt-dlp\n\n# Install Node.js 20 if not present\nif ! command -v node &> \/dev\/null; then\n  curl -fsSL https:\/\/deb.nodesource.com\/setup_20.x | bash -\n  apt-get install -y nodejs\nfi\n\necho \"Node version: $(node -v)\"\n\n# Download latest release from GitHub\ncd \/mnt\/server\n\ngit config --global --add safe.directory \/mnt\/server || true\n\nif [ -d \".git\" ]; then\n  echo \"Updating existing installation...\"\n  git fetch --all --prune || true\n  git reset --hard origin\/${GIT_BRANCH:-main} || git pull\nelse\n  echo \"Fresh install...\"\n  git clone ${GIT_REPO:-https:\/\/github.com\/VanillaChan6571\/CatRealm-SelfHostable-Server.git} . || {\n    echo \"Git clone failed - manual install may be required\"\n    exit 1\n  }\n  git config --global --add safe.directory \/mnt\/server || true\n  git checkout ${GIT_BRANCH:-main} || true\nfi\n\nchmod +x scripts\/auto-update-start.sh || true\n\n# Create data directory\nmkdir -p \/mnt\/server\/data\n\n# Preserve the existing environment file before rewriting it on reinstall\nif [ -f \/mnt\/server\/.env ]; then\n  mkdir -p \/mnt\/server\/backup-before-reinstall\n  cp \/mnt\/server\/.env \"\/mnt\/server\/backup-before-reinstall\/.env-$(date +%Y%m%d-%H%M%S)\"\nfi\n\n# Write .env from Pterodactyl environment variables\ncp \/mnt\/server\/.env.example \/mnt\/server\/.env\n\nset_env() {\n  python3 - \"$1\" \"$2\" \/mnt\/server\/.env <<'PYEOF'\nimport sys, re\nkey, val, path = sys.argv[1], sys.argv[2], sys.argv[3]\nwith open(path) as f: content = f.read()\npattern = re.compile(r'^#*' + re.escape(key) + r'=.*', re.MULTILINE)\nif pattern.search(content):\n    content = pattern.sub(key + '=' + val, content, count=1)\nelse:\n    content += '\\n' + key + '=' + val + '\\n'\nwith open(path, 'w') as f: f.write(content)\nPYEOF\n}\n\nset_env \"PORT\"                    \"${SERVER_PORT}\"\nset_env \"SERVER_URL\"              \"http:\/\/0.0.0.0:${SERVER_PORT}\"\nset_env \"SERVER_NAME\"             \"${SERVER_NAME}\"\nset_env \"SERVER_DESCRIPTION\"      \"${SERVER_DESCRIPTION}\"\nset_env \"REGISTRATION_OPEN\"       \"${REGISTRATION_OPEN}\"\nset_env \"SERVER_MODE\"             \"${SERVER_MODE}\"\nset_env \"DB_PATH\"                 \"\/mnt\/server\/data\/catrealm.db\"\nset_env \"CLIENT_URL\"              \"*\"\nset_env \"TURN_MODE\"               \"${TURN_MODE}\"\nset_env \"TURN_SECRET\"             \"${TURN_SECRET}\"\nset_env \"TURN_HOST\"               \"${TURN_HOST}\"\nset_env \"TURN_PORT\"               \"${TURN_PORT}\"\nset_env \"TURN_TLS_PORT\"           \"${TURN_TLS_PORT}\"\nset_env \"TURN_FORCE_TCP\"          \"${TURN_FORCE_TCP}\"\nset_env \"SSL_DOMAIN\"              \"${SSL_DOMAIN}\"\nset_env \"SSL_EMAIL\"               \"${SSL_EMAIL}\"\nset_env \"SSL_DNS_PROVIDER\"        \"${SSL_DNS_PROVIDER}\"\nset_env \"SSL_DNS_API_TOKEN\"       \"${SSL_DNS_API_TOKEN}\"\nset_env \"SSL_CERT_PATH\"           \"${SSL_CERT_PATH}\"\nset_env \"SSL_KEY_PATH\"            \"${SSL_KEY_PATH}\"\nset_env \"AUTO_UPDATE\"             \"${AUTO_UPDATE}\"\nset_env \"AUTO_UPDATE_RESTART_ON_START\" \"true\"\nset_env \"GIT_REPO\"                \"${GIT_REPO}\"\nset_env \"GIT_BRANCH\"              \"${GIT_BRANCH}\"\n\nmkdir -p \/mnt\/server\/ssl\necho \"CatRealm installation complete!\"",
-            "container": "ghcr.io\/pterodactyl\/installers:debian",
+            "script": "#!/bin/bash\n# CatRealm Server - Pterodactyl Install Script\n\napt-get update -y\napt-get install -y curl git python3 make g++ ffmpeg yt-dlp\n\n# Install Node.js 20 if not present\nif ! command -v node &> /dev/null; then\n  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -\n  apt-get install -y nodejs\nfi\n\necho \"Node version: $(node -v)\"\n\n# Download latest release from GitHub\ncd /mnt/server\n\ngit config --global --add safe.directory /mnt/server || true\n\nif [ -d \".git\" ]; then\n  echo \"Updating existing installation...\"\n  git fetch --all --prune || true\n  git reset --hard origin/${GIT_BRANCH:-main} || git pull\nelse\n  echo \"Fresh install...\"\n  git clone ${GIT_REPO:-https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git} . || {\n    echo \"Git clone failed - manual install may be required\"\n    exit 1\n  }\n  git config --global --add safe.directory /mnt/server || true\n  git checkout ${GIT_BRANCH:-main} || true\nfi\n\nchmod +x scripts/auto-update-start.sh || true\n\n# Create data directory\nmkdir -p /mnt/server/data\n\n# Preserve the existing environment file before rewriting it on reinstall\nif [ -f /mnt/server/.env ]; then\n  mkdir -p /mnt/server/backup-before-reinstall\n  cp /mnt/server/.env \"/mnt/server/backup-before-reinstall/.env-$(date +%Y%m%d-%H%M%S)\"\nfi\n\n# Write .env from Pterodactyl environment variables\ncp /mnt/server/.env.example /mnt/server/.env\n\nset_env() {\n  python3 - \"$1\" \"$2\" /mnt/server/.env <<'PYEOF'\nimport sys, re\nkey, val, path = sys.argv[1], sys.argv[2], sys.argv[3]\nwith open(path) as f: content = f.read()\npattern = re.compile(r'^#*' + re.escape(key) + r'=.*', re.MULTILINE)\nif pattern.search(content):\n    content = pattern.sub(key + '=' + val, content, count=1)\nelse:\n    content += '\\n' + key + '=' + val + '\\n'\nwith open(path, 'w') as f: f.write(content)\nPYEOF\n}\n\nset_env \"PORT\"                    \"${SERVER_PORT}\"\nset_env \"SERVER_URL\"              \"http://0.0.0.0:${SERVER_PORT}\"\nset_env \"SERVER_NAME\"             \"${SERVER_NAME}\"\nset_env \"SERVER_DESCRIPTION\"      \"${SERVER_DESCRIPTION}\"\nset_env \"REGISTRATION_OPEN\"       \"${REGISTRATION_OPEN}\"\nset_env \"SERVER_MODE\"             \"${SERVER_MODE}\"\nset_env \"DB_PATH\"                 \"/mnt/server/data/catrealm.db\"\nset_env \"CLIENT_URL\"              \"*\"\nset_env \"TURN_MODE\"               \"${TURN_MODE}\"\nset_env \"TURN_SECRET\"             \"${TURN_SECRET}\"\nset_env \"TURN_HOST\"               \"${TURN_HOST}\"\nset_env \"TURN_PORT\"               \"${TURN_PORT}\"\nset_env \"TURN_TLS_PORT\"           \"${TURN_TLS_PORT}\"\nset_env \"TURN_FORCE_TCP\"          \"${TURN_FORCE_TCP}\"\nset_env \"HOST_LIVEKIT_MEDIA\"      \"${HOST_LIVEKIT_MEDIA}\"\nset_env \"LIVEKIT_PUBLIC_HOST\"     \"${LIVEKIT_PUBLIC_HOST}\"\nset_env \"LIVEKIT_SIGNALING_PORT\"  \"${LIVEKIT_SIGNALING_PORT}\"\nset_env \"LIVEKIT_RTC_TCP_PORT\"    \"${LIVEKIT_RTC_TCP_PORT}\"\nset_env \"LIVEKIT_RTC_UDP_PORT_START\" \"${LIVEKIT_RTC_UDP_PORT_START}\"\nset_env \"LIVEKIT_RTC_UDP_PORT_END\" \"${LIVEKIT_RTC_UDP_PORT_END}\"\nset_env \"MEDIA_LIVEKIT_ENABLED\"   \"${MEDIA_LIVEKIT_ENABLED}\"\nset_env \"MEDIA_LIVEKIT_URL\"       \"${MEDIA_LIVEKIT_URL}\"\nset_env \"MEDIA_LIVEKIT_PUBLIC_WS_URL\" \"${MEDIA_LIVEKIT_PUBLIC_WS_URL}\"\nset_env \"MEDIA_LIVEKIT_API_KEY\"   \"${MEDIA_LIVEKIT_API_KEY}\"\nset_env \"MEDIA_LIVEKIT_API_SECRET\" \"${MEDIA_LIVEKIT_API_SECRET}\"\nset_env \"MEDIA_FALLBACK_TO_LEGACY\" \"${MEDIA_FALLBACK_TO_LEGACY}\"\nset_env \"MEDIA_TOKEN_TTL_SECONDS\"  \"${MEDIA_TOKEN_TTL_SECONDS}\"\nset_env \"SSL_DOMAIN\"              \"${SSL_DOMAIN}\"\nset_env \"SSL_EMAIL\"               \"${SSL_EMAIL}\"\nset_env \"SSL_DNS_PROVIDER\"        \"${SSL_DNS_PROVIDER}\"\nset_env \"SSL_DNS_API_TOKEN\"       \"${SSL_DNS_API_TOKEN}\"\nset_env \"SSL_CERT_PATH\"           \"${SSL_CERT_PATH}\"\nset_env \"SSL_KEY_PATH\"            \"${SSL_KEY_PATH}\"\nset_env \"AUTO_UPDATE\"             \"${AUTO_UPDATE}\"\nset_env \"AUTO_UPDATE_RESTART_ON_START\" \"true\"\nset_env \"GIT_REPO\"                \"${GIT_REPO}\"\nset_env \"GIT_BRANCH\"              \"${GIT_BRANCH}\"\n\nmkdir -p /mnt/server/ssl\necho \"CatRealm installation complete!\"",
+            "container": "ghcr.io/pterodactyl/installers:debian",
             "entrypoint": "bash"
         }
     },
@@ -83,7 +83,7 @@
         },
         {
             "name": "SSL Certificate Path",
-            "description": "Path to SSL certificate file (e.g. .\/ssl\/cert.pem). Leave empty for plain HTTP.",
+            "description": "Path to SSL certificate file (e.g. ./ssl/cert.pem). Leave empty for plain HTTP.",
             "env_variable": "SSL_CERT_PATH",
             "default_value": "",
             "user_viewable": true,
@@ -93,7 +93,7 @@
         },
         {
             "name": "SSL Key Path",
-            "description": "Path to SSL private key file (e.g. .\/ssl\/key.pem). Leave empty for plain HTTP.",
+            "description": "Path to SSL private key file (e.g. ./ssl/key.pem). Leave empty for plain HTTP.",
             "env_variable": "SSL_KEY_PATH",
             "default_value": "",
             "user_viewable": true,
@@ -172,8 +172,68 @@
             "field_type": "text"
         },
         {
-            "name": "LiveKit Media Enabled",
-            "description": "Enable the LiveKit sidecar media path. Requires a separate LiveKit server or service.",
+            "name": "Host LiveKit Media w/ Server",
+            "description": "Starts bundled livekit-server in the same CatRealm runtime container. Requires the CatRealm Runtime image and LiveKit port allocations.",
+            "env_variable": "HOST_LIVEKIT_MEDIA",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|in:true,false,1,0,yes,no,on,off",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit Public Host",
+            "description": "Public hostname clients use for LiveKit. Leave empty to use SSL Domain. Example: media.example.com",
+            "env_variable": "LIVEKIT_PUBLIC_HOST",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit Signaling Port",
+            "description": "TCP WebSocket/signaling port for bundled LiveKit. Allocate this TCP port in Pterodactyl.",
+            "env_variable": "LIVEKIT_SIGNALING_PORT",
+            "default_value": "7880",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit RTC TCP Port",
+            "description": "TCP fallback RTC port for bundled LiveKit. Allocate this TCP port in Pterodactyl.",
+            "env_variable": "LIVEKIT_RTC_TCP_PORT",
+            "default_value": "7881",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit UDP Port Start",
+            "description": "Start of bundled LiveKit UDP media range. Allocate the full UDP range in Pterodactyl/firewall.",
+            "env_variable": "LIVEKIT_RTC_UDP_PORT_START",
+            "default_value": "50000",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
+            "name": "LiveKit UDP Port End",
+            "description": "End of bundled LiveKit UDP media range. Small servers can use 50000-50100; larger servers need more ports.",
+            "env_variable": "LIVEKIT_RTC_UDP_PORT_END",
+            "default_value": "50100",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric",
+            "field_type": "text"
+        },
+        {
+            "name": "External LiveKit Enabled",
+            "description": "Advanced: enable an external LiveKit server instead of the bundled sidecar. Bundled mode sets this automatically.",
             "env_variable": "MEDIA_LIVEKIT_ENABLED",
             "default_value": "false",
             "user_viewable": true,
@@ -182,8 +242,8 @@
             "field_type": "text"
         },
         {
-            "name": "LiveKit Internal URL",
-            "description": "Server-to-server LiveKit WebSocket URL, for example ws://127.0.0.1:7880 or wss://media.example.com.",
+            "name": "External LiveKit Internal URL",
+            "description": "Advanced: CatRealm-to-LiveKit URL for external LiveKit, e.g. ws://10.0.0.5:7880 or wss://media.example.com.",
             "env_variable": "MEDIA_LIVEKIT_URL",
             "default_value": "",
             "user_viewable": true,
@@ -192,8 +252,8 @@
             "field_type": "text"
         },
         {
-            "name": "LiveKit Public WS URL",
-            "description": "Client-facing LiveKit WebSocket URL, usually wss://media.example.com.",
+            "name": "External LiveKit Public WS URL",
+            "description": "Advanced: client-facing external LiveKit URL, usually wss://media.example.com.",
             "env_variable": "MEDIA_LIVEKIT_PUBLIC_WS_URL",
             "default_value": "",
             "user_viewable": true,
