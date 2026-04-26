@@ -34,19 +34,19 @@ Import the CatRealm egg and pick one of the `CatRealm Runtime` image options fro
 
 The CatRealm runtime image includes `livekit-server`, so one Pterodactyl server can run CatRealm plus LiveKit media together. LiveKit still runs as a sidecar process; it is not embedded into the CatRealm Node process.
 
-Set these egg variables for bundled mode:
+Set these visible egg variables for bundled mode:
 
 - `HOST_LIVEKIT_MEDIA=true`
-- `LIVEKIT_PUBLIC_HOST`: public hostname clients use for LiveKit. Leave empty to reuse `SSL_DOMAIN`.
+- `LIVEKIT_PUBLIC_HOST`: public hostname clients use for LiveKit. Leave empty to reuse `SSL_DOMAIN`; only set it when media uses a different hostname.
 - `LIVEKIT_SIGNALING_PORT`: default `7880/tcp`.
 - `LIVEKIT_RTC_TCP_PORT`: default `7881/tcp`.
 - `LIVEKIT_RTC_UDP_PORT_START`: default `50000/udp`.
 - `LIVEKIT_RTC_UDP_PORT_END`: default `50100/udp`.
-- `MEDIA_LIVEKIT_API_KEY`: optional. If blank, CatRealm generates and persists one.
-- `MEDIA_LIVEKIT_API_SECRET`: optional. If blank, CatRealm generates and persists one.
 - `MEDIA_FALLBACK_TO_LEGACY=true`: recommended while testing.
 
 When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically.
+
+The external LiveKit URL, API key, API secret, and token TTL variables remain in the egg for advanced deployments, but they are hidden from regular server users. In bundled mode CatRealm generates and persists the LiveKit API secret automatically.
 
 Pterodactyl port requirements for bundled mode:
 
