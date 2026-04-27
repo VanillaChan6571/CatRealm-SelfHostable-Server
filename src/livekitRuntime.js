@@ -91,6 +91,22 @@ function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPor
     `  port_range_start: ${udpStart}`,
     `  port_range_end: ${livekitUdpEnd}`,
     '  use_external_ip: true',
+    // Reordering buffer — explicit so it survives LiveKit upgrades.
+    '  packet_buffer_size: 500',
+    // PLI throttle: controls how often the SFU requests a keyframe from
+    // publishers. Each keyframe at 1440p is a large burst that spikes the
+    // pacer and resets the GCC's smooth ramp. These thresholds (0-1 quality
+    // scores) only trigger PLIs when the link is genuinely bad, not on every
+    // minor fluctuation — which is what causes the choppy "every few seconds
+    // it freezes" pattern during heavy game screen shares.
+    '  pli_throttle:',
+    '    low_quality_threshold: 0.1',
+    '    mid_quality_threshold: 0.2',
+    '    high_quality_threshold: 0.4',
+    // Room cleanup: prevents ghost rooms accumulating and holding SFU resources.
+    'room:',
+    '  empty_timeout: 300',
+    '  departure_timeout: 20',
     'keys:',
     `  ${yamlQuote(apiKey)}: ${yamlQuote(apiSecret)}`,
     '',
