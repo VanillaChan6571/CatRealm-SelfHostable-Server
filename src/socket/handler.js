@@ -109,7 +109,11 @@ setInterval(() => {
     const now = Math.floor(Date.now() / 1000);
     const due = db.prepare(`
       SELECT m.*, u.username, u.avatar,
-        COALESCE(dno.display_name, u.display_name) as display_name
+        COALESCE(dno.display_name, u.display_name) as display_name,
+        (SELECT r.color FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_color,
+        (SELECT r.icon  FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_icon,
+        (SELECT r.style_type   FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_style_type,
+        (SELECT r.style_colors FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_style_colors
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = m.user_id
@@ -129,6 +133,10 @@ setInterval(() => {
         user_id: msg.user_id, username: msg.username, avatar: msg.avatar || null,
         display_name: msg.display_name || null, content: decryptMessageContent(msg.content),
         edited: 0, created_at: msg.created_at, scheduled_at: null,
+        role_color: msg.role_color || null,
+        role_icon: msg.role_icon || null,
+        role_style_type: msg.role_style_type || 'solid',
+        role_style_colors: msg.role_style_colors || null,
         attachment_url: msg.attachment_url, attachments,
         nsfw_tags: nsfwTags, message_type: msg.message_type || 'user',
         embeds_enabled: msg.embeds_enabled, voice_expires_at: msg.voice_expires_at ?? null,
@@ -1377,7 +1385,7 @@ function setupSocketHandlers(io) {
       }
 
       const topRole = db.prepare(`
-        SELECT r.color, r.hoist, r.icon FROM roles r
+        SELECT r.color, r.hoist, r.icon, r.style_type, r.style_colors FROM roles r
         JOIN user_roles ur ON ur.role_id = r.id
         WHERE ur.user_id = ?
         ORDER BY r.position DESC
@@ -1398,6 +1406,9 @@ function setupSocketHandlers(io) {
         edited:     0,
         is_owner:   authUser.is_owner ? 1 : 0,
         role_color: topRole?.color || null,
+        role_icon: topRole?.icon || null,
+        role_style_type: topRole?.style_type || 'solid',
+        role_style_colors: topRole?.style_colors || null,
         avatar: userInfo?.avatar || null,
         display_name: userInfo?.display_name || null,
         verified: authUser.verified || false,
