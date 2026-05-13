@@ -4,8 +4,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 const pteroLog = require('../logger');
 
-const RELAY_ENABLED = !!(process.env.CENTRAL_SERVER_URL && process.env.PUSH_RELAY_SECRET);
-const CENTRAL_URL = (process.env.CENTRAL_SERVER_URL || '').replace(/\/+$/, '');
+const RELAY_ENABLED = !!process.env.PUSH_RELAY_SECRET;
+const CENTRAL_URL = (process.env.AUTH_SERVER_URL || 'https://auth.catrealm.app').replace(/\/+$/, '');
 const RELAY_SECRET = process.env.PUSH_RELAY_SECRET || '';
 const SERVER_URL = (process.env.SERVER_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 
