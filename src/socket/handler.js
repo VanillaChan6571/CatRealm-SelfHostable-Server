@@ -381,9 +381,13 @@ function setupSocketHandlers(io) {
     pteroLog(`[CatRealm] ${authUser.username} connected`);
 
     // Register as online
+    const clientType = socket.handshake.auth?.clientType === 'mobile' ? 'mobile' : 'desktop';
+    socket.clientType = clientType;
+
     const existingEntry = onlineUsers.get(authUser.id);
     if (existingEntry) {
       existingEntry.sockets.add(socket.id);
+      existingEntry.clientSockets.set(socket.id, clientType);
       existingEntry.lastActivityAt = Date.now();
       // Reconnect wakes a sleeping user (e.g. mobile reopening app)
       if (existingEntry.status === 'sleeping') {
@@ -427,6 +431,7 @@ function setupSocketHandlers(io) {
         verified: authUser.verified || false,
         lastActivityAt: Date.now(),
         sockets: new Set([socket.id]),
+        clientSockets: new Map([[socket.id, clientType]]),
       });
     }
     io.emit('presence:update', buildOnlineList());
@@ -1592,6 +1597,7 @@ function setupSocketHandlers(io) {
       const entry = onlineUsers.get(authUser.id);
       if (entry) {
         entry.sockets.delete(socket.id);
+        entry.clientSockets.delete(socket.id);
         if (entry.sockets.size === 0) {
           onlineUsers.delete(authUser.id);
         }
@@ -1629,6 +1635,7 @@ function buildOnlineList() {
     activityStartedAt: info.activity_started_at || null,
     accountType: info.account_type || 'local',
     verified: info.verified || false,
+    clients: [...new Set((info.clientSockets || new Map()).values())],
   }));
 }
 
