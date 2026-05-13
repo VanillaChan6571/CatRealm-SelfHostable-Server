@@ -1458,10 +1458,15 @@ function setupSocketHandlers(io) {
               const allMembers = db.prepare('SELECT id, username FROM users').all();
               const mentioned = allMembers.filter((m) => {
                 if (m.id === user.id) return false;
-                return (
+                const isMentioned = (
                   new RegExp(`(^|\\s)@${escapeRegex(m.username)}(\\b|$)`, 'i').test(trimmed) ||
                   new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed)
                 );
+                if (!isMentioned) return false;
+                // Skip push if user is online and actively present
+                const onlineEntry = onlineUsers.get(m.id);
+                if (onlineEntry && onlineEntry.status === 'online') return false;
+                return true;
               });
               if (mentioned.length > 0) {
                 const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
