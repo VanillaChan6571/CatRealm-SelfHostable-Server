@@ -28,8 +28,10 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
+// Track online users: userId -> { username, role, is_owner, role_color, avatar, status, lastActivityAt, sockets: Set<socketId> }
 const onlineUsers = new Map();
+
+const SLEEP_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes of no activity → sleeping
 // Track voice rooms: channelId -> Map<userId, { socketId, muted, deafened, user }>
 const voiceRooms = new Map();
 // Track live screenshare senders in each voice room.
@@ -50,6 +52,33 @@ const THEATER_AUTO_ADVANCE_DELAY_MS = 20000;
 const pendingTheaterAutoAdvances = new Map();
 // Per-user reaction rate limiting: userId -> { count, resetAt }
 const theaterReactionLimits = new Map();
+
+// Reset activity timestamp; wake a sleeping user back to online
+function touchActivity(userId) {
+  const entry = onlineUsers.get(userId);
+  if (!entry) return;
+  entry.lastActivityAt = Date.now();
+  if (entry.status === 'sleeping') {
+    entry.status = 'online';
+    db.prepare('UPDATE users SET status = ? WHERE id = ?').run('online', userId);
+    if (ioInstance) ioInstance.emit('presence:update', buildOnlineList());
+  }
+}
+
+// Auto-sleep users idle for SLEEP_TIMEOUT_MS
+setInterval(() => {
+  if (!ioInstance) return;
+  const now = Date.now();
+  let changed = false;
+  for (const [userId, entry] of onlineUsers.entries()) {
+    if (entry.status === 'online' && now - (entry.lastActivityAt || now) >= SLEEP_TIMEOUT_MS) {
+      entry.status = 'sleeping';
+      db.prepare('UPDATE users SET status = ? WHERE id = ?').run('sleeping', userId);
+      changed = true;
+    }
+  }
+  if (changed) ioInstance.emit('presence:update', buildOnlineList());
+}, 60 * 1000);
 
 function clearPendingVoiceDisconnect(userId) {
   const timer = pendingVoiceDisconnectTimers.get(userId);
@@ -355,6 +384,12 @@ function setupSocketHandlers(io) {
     const existingEntry = onlineUsers.get(authUser.id);
     if (existingEntry) {
       existingEntry.sockets.add(socket.id);
+      existingEntry.lastActivityAt = Date.now();
+      // Reconnect wakes a sleeping user (e.g. mobile reopening app)
+      if (existingEntry.status === 'sleeping') {
+        existingEntry.status = 'online';
+        db.prepare('UPDATE users SET status = ? WHERE id = ?').run('online', authUser.id);
+      }
     } else {
       const topRole = db.prepare(`
         SELECT r.color, r.hoist, r.icon, r.name, r.position, r.style_type, r.style_colors FROM roles r
@@ -390,6 +425,7 @@ function setupSocketHandlers(io) {
         activity_started_at: userRow?.activity_started_at || null,
         account_type: userRow?.account_type || 'local',
         verified: authUser.verified || false,
+        lastActivityAt: Date.now(),
         sockets: new Set([socket.id]),
       });
     }
@@ -1221,6 +1257,7 @@ function setupSocketHandlers(io) {
 
     // ── Send a message ─────────────────────────────────────────────────────────
     socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at }) => {
+      touchActivity(user.id);
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
         .filter((a) => a && typeof a.url === 'string');
@@ -1538,6 +1575,7 @@ function setupSocketHandlers(io) {
 
     // ── Typing indicator ───────────────────────────────────────────────────────
     socket.on('typing:start', ({ channelId }) => {
+      touchActivity(user.id);
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
       if (!canSendToChannel(user, channelId, db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId)?.type, null)) return;
       socket.to(channelId).emit('typing:update', { userId: user.id, username: authUser.username, typing: true });
