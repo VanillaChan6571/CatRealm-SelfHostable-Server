@@ -16,12 +16,17 @@ const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
+const { relayMentionPush } = require('../lib/pushRelay');
 const {
   createSelfHostMediaSession,
   getSelfHostMediaContexts,
 } = require('../routes/media');
 const { getMediaCapability } = require('../lib/mediaConfig');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
 const onlineUsers = new Map();
@@ -1445,6 +1450,34 @@ function setupSocketHandlers(io) {
           io.to(channelId).emit('message:new', message);
         }
         queueMessageCreatedEvent(message);
+
+        // @mention push relay — only runs if CENTRAL_SERVER_URL + PUSH_RELAY_SECRET configured
+        if (trimmed && trimmed.includes('@')) {
+          void (async () => {
+            try {
+              const allMembers = db.prepare('SELECT id, username FROM users').all();
+              const mentioned = allMembers.filter((m) => {
+                if (m.id === user.id) return false;
+                return (
+                  new RegExp(`(^|\\s)@${escapeRegex(m.username)}(\\b|$)`, 'i').test(trimmed) ||
+                  new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed)
+                );
+              });
+              if (mentioned.length > 0) {
+                const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
+                await relayMentionPush({
+                  recipientUserIds: mentioned.map((m) => m.id),
+                  channelId,
+                  channelName: ch?.name ?? channelId,
+                  senderUsername: authUser.username,
+                  contentPreview: trimmed,
+                });
+              }
+            } catch (err) {
+              pteroLog(`[PushRelay] Mention detection error: ${err.message}`);
+            }
+          })();
+        }
       }
 
       // Auto-reaction (if configured)
