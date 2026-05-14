@@ -202,6 +202,10 @@ function collectMessageAttachmentUrls(message) {
           if (typeof att?.url === 'string' && att.url.startsWith('/ugc/images/')) {
             urls.add(att.url);
           }
+          const thumbnailUrl = att?.thumbnailUrl || att?.thumbnail_url;
+          if (typeof thumbnailUrl === 'string' && thumbnailUrl.startsWith('/ugc/images/')) {
+            urls.add(thumbnailUrl);
+          }
         }
       }
     } catch {}

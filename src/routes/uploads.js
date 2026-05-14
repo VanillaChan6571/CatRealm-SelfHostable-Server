@@ -11,8 +11,17 @@ const {
   enqueueChatVideoCompression,
 } = require('../mediaCompression');
 
+let sharp = null;
+try {
+  sharp = require('sharp');
+} catch (_err) {
+  sharp = null;
+}
+
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
 if (!fs.existsSync(UGC_IMAGES_DIR)) fs.mkdirSync(UGC_IMAGES_DIR, { recursive: true });
+const UGC_THUMBS_DIR = path.join(UGC_IMAGES_DIR, 'thumbs');
+if (!fs.existsSync(UGC_THUMBS_DIR)) fs.mkdirSync(UGC_THUMBS_DIR, { recursive: true });
 
 const MEDIA_REMOVE_LIMITS = (() => {
   const value = String(process.env.MEDIA_REMOVE_LIMITS || '').trim().toLowerCase();
@@ -30,6 +39,32 @@ const MIME_TO_EXT = {
   'audio/mpeg': '.mp3',
   'audio/wav': '.wav',
 };
+
+const THUMBNAIL_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/avif',
+]);
+
+async function generateChatThumbnail(file) {
+  if (!sharp || !file?.path || !THUMBNAIL_IMAGE_MIME_TYPES.has(file.mimetype)) return null;
+  const base = path.basename(file.filename, path.extname(file.filename));
+  const thumbFilename = `${base}.webp`;
+  const thumbPath = path.join(UGC_THUMBS_DIR, thumbFilename);
+  try {
+    await sharp(file.path, { animated: false })
+      .rotate()
+      .resize({ width: 480, height: 360, fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 72 })
+      .toFile(thumbPath);
+    return `/ugc/images/thumbs/${thumbFilename}`;
+  } catch (_err) {
+    try { fs.unlinkSync(thumbPath); } catch {}
+    return null;
+  }
+}
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UGC_IMAGES_DIR),
@@ -97,10 +132,13 @@ router.post('/chat', upload.single('file'), async (req, res) => {
     enqueueChatVideoCompression(req.file);
   }
 
+  const thumbnailUrl = await generateChatThumbnail(req.file);
+
   res.json({
     url: `/ugc/images/${req.file.filename}`,
     mime: req.file.mimetype,
     size: finalSize,
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
   });
 });
 
