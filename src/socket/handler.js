@@ -16,38 +16,10 @@ const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
-const { relayMentionPush } = require('../lib/pushRelay');
-const {
-  createSelfHostMediaSession,
-  getSelfHostMediaContexts,
-} = require('../routes/media');
-const { getMediaCapability } = require('../lib/mediaConfig');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
 
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Track online users: userId -> { username, role, is_owner, role_color, avatar, status, lastActivityAt, sockets: Set<socketId> }
+// Track online users: userId -> { username, role, is_owner, role_color, avatar, status, sockets: Set<socketId> }
 const onlineUsers = new Map();
-// Tracks which socketIds have the app in foreground. Desktop sockets are always foreground;
-// mobile sockets only count as foreground when the app emits client:foreground.
-const socketForeground = new Set();
-
-// Returns true if the user has at least one socket that can actively receive messages
-// (a desktop socket, or a mobile socket in foreground). A suspended mobile socket keeps
-// the TCP connection alive but the app is frozen and cannot display notifications.
-function isUserForegrounded(userId) {
-  const entry = onlineUsers.get(userId);
-  if (!entry || !entry.sockets.size) return false;
-  for (const socketId of entry.sockets) {
-    const clientType = entry.clientSockets.get(socketId) || 'desktop';
-    if (clientType !== 'mobile' || socketForeground.has(socketId)) return true;
-  }
-  return false;
-}
-
-const SLEEP_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes of no activity → sleeping
 // Track voice rooms: channelId -> Map<userId, { socketId, muted, deafened, user }>
 const voiceRooms = new Map();
 // Track live screenshare senders in each voice room.
@@ -68,33 +40,6 @@ const THEATER_AUTO_ADVANCE_DELAY_MS = 20000;
 const pendingTheaterAutoAdvances = new Map();
 // Per-user reaction rate limiting: userId -> { count, resetAt }
 const theaterReactionLimits = new Map();
-
-// Reset activity timestamp; wake a sleeping user back to online
-function touchActivity(userId) {
-  const entry = onlineUsers.get(userId);
-  if (!entry) return;
-  entry.lastActivityAt = Date.now();
-  if (entry.status === 'sleeping') {
-    entry.status = 'online';
-    db.prepare('UPDATE users SET status = ? WHERE id = ?').run('online', userId);
-    if (ioInstance) ioInstance.emit('presence:update', buildOnlineList());
-  }
-}
-
-// Auto-sleep users idle for SLEEP_TIMEOUT_MS
-setInterval(() => {
-  if (!ioInstance) return;
-  const now = Date.now();
-  let changed = false;
-  for (const [userId, entry] of onlineUsers.entries()) {
-    if (entry.status === 'online' && now - (entry.lastActivityAt || now) >= SLEEP_TIMEOUT_MS) {
-      entry.status = 'sleeping';
-      db.prepare('UPDATE users SET status = ? WHERE id = ?').run('sleeping', userId);
-      changed = true;
-    }
-  }
-  if (changed) ioInstance.emit('presence:update', buildOnlineList());
-}, 60 * 1000);
 
 function clearPendingVoiceDisconnect(userId) {
   const timer = pendingVoiceDisconnectTimers.get(userId);
@@ -159,11 +104,7 @@ setInterval(() => {
     const now = Math.floor(Date.now() / 1000);
     const due = db.prepare(`
       SELECT m.*, u.username, u.avatar,
-        COALESCE(dno.display_name, u.display_name) as display_name,
-        (SELECT r.color FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_color,
-        (SELECT r.icon  FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_icon,
-        (SELECT r.style_type   FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_style_type,
-        (SELECT r.style_colors FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_style_colors
+        COALESCE(dno.display_name, u.display_name) as display_name
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = m.user_id
@@ -183,10 +124,6 @@ setInterval(() => {
         user_id: msg.user_id, username: msg.username, avatar: msg.avatar || null,
         display_name: msg.display_name || null, content: decryptMessageContent(msg.content),
         edited: 0, created_at: msg.created_at, scheduled_at: null,
-        role_color: msg.role_color || null,
-        role_icon: msg.role_icon || null,
-        role_style_type: msg.role_style_type || 'solid',
-        role_style_colors: msg.role_style_colors || null,
         attachment_url: msg.attachment_url, attachments,
         nsfw_tags: nsfwTags, message_type: msg.message_type || 'user',
         embeds_enabled: msg.embeds_enabled, voice_expires_at: msg.voice_expires_at ?? null,
@@ -217,10 +154,6 @@ function collectMessageAttachmentUrls(message) {
         for (const att of attachments) {
           if (typeof att?.url === 'string' && att.url.startsWith('/ugc/images/')) {
             urls.add(att.url);
-          }
-          const thumbnailUrl = att?.thumbnailUrl || att?.thumbnail_url;
-          if (typeof thumbnailUrl === 'string' && thumbnailUrl.startsWith('/ugc/images/')) {
-            urls.add(thumbnailUrl);
           }
         }
       }
@@ -401,25 +334,9 @@ function setupSocketHandlers(io) {
     pteroLog(`[CatRealm] ${authUser.username} connected`);
 
     // Register as online
-    const clientType = socket.handshake.auth?.clientType === 'mobile' ? 'mobile' : 'desktop';
-    socket.clientType = clientType;
-
-    // Desktop is always foreground; mobile defaults to foreground until it reports otherwise
-    if (clientType !== 'mobile') socketForeground.add(socket.id);
-
-    socket.on('client:foreground', () => { socketForeground.add(socket.id); });
-    socket.on('client:background', () => { socketForeground.delete(socket.id); });
-
     const existingEntry = onlineUsers.get(authUser.id);
     if (existingEntry) {
       existingEntry.sockets.add(socket.id);
-      existingEntry.clientSockets.set(socket.id, clientType);
-      existingEntry.lastActivityAt = Date.now();
-      // Reconnect wakes a sleeping user (e.g. mobile reopening app)
-      if (existingEntry.status === 'sleeping') {
-        existingEntry.status = 'online';
-        db.prepare('UPDATE users SET status = ? WHERE id = ?').run('online', authUser.id);
-      }
     } else {
       const topRole = db.prepare(`
         SELECT r.color, r.hoist, r.icon, r.name, r.position, r.style_type, r.style_colors FROM roles r
@@ -455,9 +372,7 @@ function setupSocketHandlers(io) {
         activity_started_at: userRow?.activity_started_at || null,
         account_type: userRow?.account_type || 'local',
         verified: authUser.verified || false,
-        lastActivityAt: Date.now(),
         sockets: new Set([socket.id]),
-        clientSockets: new Map([[socket.id, clientType]]),
       });
     }
     io.emit('presence:update', buildOnlineList());
@@ -502,17 +417,6 @@ function setupSocketHandlers(io) {
       mentionAlias,
       serverIcon,
       serverBanner,
-    });
-
-    socket.on('media:v1:capabilities', (ack) => {
-      if (typeof ack === 'function') ack({ ok: true, capability: getMediaCapability(getSelfHostMediaContexts()) });
-    });
-
-    socket.on('media:v1:token', ({ context, channelId } = {}, ack) => {
-      const result = createSelfHostMediaSession({ context, channelId, user });
-      if (typeof ack === 'function') {
-        ack(result.ok ? result : { ok: false, error: result.error, capability: getMediaCapability(getSelfHostMediaContexts()) });
-      }
     });
 
     // ── Voice: join/leave/signaling ───────────────────────────────────────────────
@@ -1288,7 +1192,6 @@ function setupSocketHandlers(io) {
 
     // ── Send a message ─────────────────────────────────────────────────────────
     socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at }) => {
-      touchActivity(user.id);
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
         .filter((a) => a && typeof a.url === 'string');
@@ -1458,7 +1361,7 @@ function setupSocketHandlers(io) {
       }
 
       const topRole = db.prepare(`
-        SELECT r.color, r.hoist, r.icon, r.style_type, r.style_colors FROM roles r
+        SELECT r.color, r.hoist, r.icon FROM roles r
         JOIN user_roles ur ON ur.role_id = r.id
         WHERE ur.user_id = ?
         ORDER BY r.position DESC
@@ -1479,9 +1382,6 @@ function setupSocketHandlers(io) {
         edited:     0,
         is_owner:   authUser.is_owner ? 1 : 0,
         role_color: topRole?.color || null,
-        role_icon: topRole?.icon || null,
-        role_style_type: topRole?.style_type || 'solid',
-        role_style_colors: topRole?.style_colors || null,
         avatar: userInfo?.avatar || null,
         display_name: userInfo?.display_name || null,
         verified: authUser.verified || false,
@@ -1518,43 +1418,6 @@ function setupSocketHandlers(io) {
           io.to(channelId).emit('message:new', message);
         }
         queueMessageCreatedEvent(message);
-
-        // @mention push relay — only runs if CENTRAL_SERVER_URL + PUSH_RELAY_SECRET configured
-        if (trimmed && trimmed.includes('@')) {
-          void (async () => {
-            try {
-              const allMembers = db.prepare('SELECT id, username, central_id FROM users').all();
-              const mentioned = allMembers.filter((m) => {
-                if (m.id === user.id) return false;
-                const isMentioned = (
-                  new RegExp(`(^|\\s)@${escapeRegex(m.username)}(\\b|$)`, 'i').test(trimmed) ||
-                  new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed)
-                );
-                if (!isMentioned) return false;
-                // Skip push only if the user has an active foregrounded session
-                if (isUserForegrounded(m.id)) return false;
-                return true;
-              });
-              if (mentioned.length > 0) {
-                const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
-                // Use central_id when available — the central push server indexes tokens by
-                // central user ID, not the local UUID the self-hosted server assigns.
-                // Local-only users without a central account have no push token registered there
-                // so they're filtered out by dispatchPush anyway; no harm including them.
-                await relayMentionPush({
-                  recipientUserIds: mentioned.map((m) => m.central_id || m.id),
-                  channelId,
-                  channelName: ch?.name ?? channelId,
-                  senderUsername: authUser.username,
-                  senderAvatarUrl: userInfo?.avatar || null,
-                  contentPreview: trimmed,
-                });
-              }
-            } catch (err) {
-              pteroLog(`[PushRelay] Mention detection error: ${err.message}`);
-            }
-          })();
-        }
       }
 
       // Auto-reaction (if configured)
@@ -1610,7 +1473,6 @@ function setupSocketHandlers(io) {
 
     // ── Typing indicator ───────────────────────────────────────────────────────
     socket.on('typing:start', ({ channelId }) => {
-      touchActivity(user.id);
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
       if (!canSendToChannel(user, channelId, db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId)?.type, null)) return;
       socket.to(channelId).emit('typing:update', { userId: user.id, username: authUser.username, typing: true });
@@ -1624,11 +1486,9 @@ function setupSocketHandlers(io) {
     // ── Disconnect ─────────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       pteroLog(`[CatRealm] ${authUser.username} disconnected`);
-      socketForeground.delete(socket.id);
       const entry = onlineUsers.get(authUser.id);
       if (entry) {
         entry.sockets.delete(socket.id);
-        entry.clientSockets.delete(socket.id);
         if (entry.sockets.size === 0) {
           onlineUsers.delete(authUser.id);
         }
@@ -1666,7 +1526,6 @@ function buildOnlineList() {
     activityStartedAt: info.activity_started_at || null,
     accountType: info.account_type || 'local',
     verified: info.verified || false,
-    clients: [...new Set((info.clientSockets || new Map()).values())],
   }));
 }
 
