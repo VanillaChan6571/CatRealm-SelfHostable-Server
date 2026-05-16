@@ -30,6 +30,22 @@ function escapeRegex(str) {
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, lastActivityAt, sockets: Set<socketId> }
 const onlineUsers = new Map();
+// Tracks which socketIds have the app in foreground. Desktop sockets are always foreground;
+// mobile sockets only count as foreground when the app emits client:foreground.
+const socketForeground = new Set();
+
+// Returns true if the user has at least one socket that can actively receive messages
+// (a desktop socket, or a mobile socket in foreground). A suspended mobile socket keeps
+// the TCP connection alive but the app is frozen and cannot display notifications.
+function isUserForegrounded(userId) {
+  const entry = onlineUsers.get(userId);
+  if (!entry || !entry.sockets.size) return false;
+  for (const socketId of entry.sockets) {
+    const clientType = entry.clientSockets.get(socketId) || 'desktop';
+    if (clientType !== 'mobile' || socketForeground.has(socketId)) return true;
+  }
+  return false;
+}
 
 const SLEEP_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes of no activity → sleeping
 // Track voice rooms: channelId -> Map<userId, { socketId, muted, deafened, user }>
@@ -387,6 +403,12 @@ function setupSocketHandlers(io) {
     // Register as online
     const clientType = socket.handshake.auth?.clientType === 'mobile' ? 'mobile' : 'desktop';
     socket.clientType = clientType;
+
+    // Desktop is always foreground; mobile defaults to foreground until it reports otherwise
+    if (clientType !== 'mobile') socketForeground.add(socket.id);
+
+    socket.on('client:foreground', () => { socketForeground.add(socket.id); });
+    socket.on('client:background', () => { socketForeground.delete(socket.id); });
 
     const existingEntry = onlineUsers.get(authUser.id);
     if (existingEntry) {
@@ -1501,7 +1523,7 @@ function setupSocketHandlers(io) {
         if (trimmed && trimmed.includes('@')) {
           void (async () => {
             try {
-              const allMembers = db.prepare('SELECT id, username FROM users').all();
+              const allMembers = db.prepare('SELECT id, username, central_id FROM users').all();
               const mentioned = allMembers.filter((m) => {
                 if (m.id === user.id) return false;
                 const isMentioned = (
@@ -1509,18 +1531,22 @@ function setupSocketHandlers(io) {
                   new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed)
                 );
                 if (!isMentioned) return false;
-                // Skip push if user is online and actively present
-                const onlineEntry = onlineUsers.get(m.id);
-                if (onlineEntry && onlineEntry.status === 'online') return false;
+                // Skip push only if the user has an active foregrounded session
+                if (isUserForegrounded(m.id)) return false;
                 return true;
               });
               if (mentioned.length > 0) {
                 const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
+                // Use central_id when available — the central push server indexes tokens by
+                // central user ID, not the local UUID the self-hosted server assigns.
+                // Local-only users without a central account have no push token registered there
+                // so they're filtered out by dispatchPush anyway; no harm including them.
                 await relayMentionPush({
-                  recipientUserIds: mentioned.map((m) => m.id),
+                  recipientUserIds: mentioned.map((m) => m.central_id || m.id),
                   channelId,
                   channelName: ch?.name ?? channelId,
                   senderUsername: authUser.username,
+                  senderAvatarUrl: userInfo?.avatar || null,
                   contentPreview: trimmed,
                 });
               }
@@ -1598,6 +1624,7 @@ function setupSocketHandlers(io) {
     // ── Disconnect ─────────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       pteroLog(`[CatRealm] ${authUser.username} disconnected`);
+      socketForeground.delete(socket.id);
       const entry = onlineUsers.get(authUser.id);
       if (entry) {
         entry.sockets.delete(socket.id);

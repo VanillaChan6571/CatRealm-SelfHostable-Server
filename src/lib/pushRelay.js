@@ -11,6 +11,16 @@ const SERVER_URL = (process.env.SERVER_URL || process.env.PUBLIC_URL || '').repl
 
 let registered = false;
 
+function toServerPublicUrl(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (!SERVER_URL) return null;
+  if (trimmed.startsWith('/')) return `${SERVER_URL}${trimmed}`;
+  return `${SERVER_URL}/${trimmed}`;
+}
+
 async function ensureRegistered() {
   if (registered || !RELAY_ENABLED || !SERVER_URL) return;
   try {
@@ -34,6 +44,7 @@ async function ensureRegistered() {
  *   channelId: string,
  *   channelName: string,
  *   senderUsername: string,
+ *   senderAvatarUrl?: string,
  *   contentPreview: string,
  * }} payload
  */
@@ -50,6 +61,7 @@ async function relayMentionPush(payload) {
     channelId: payload.channelId,
     channelName: payload.channelName,
     senderUsername: payload.senderUsername,
+    senderAvatarUrl: toServerPublicUrl(payload.senderAvatarUrl),
     contentPreview: (payload.contentPreview || '').slice(0, 200),
   });
 
