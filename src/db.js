@@ -674,15 +674,10 @@ if (!channelColumns.includes('category_id')) {
 }
 
 const { ALL_PERMISSIONS, PERMISSIONS } = require('./permissions');
-const LEGACY_DEFAULT_MEMBER_PERMISSIONS =
+const DEFAULT_MEMBER_PERMISSIONS =
   PERMISSIONS.VIEW_CHANNELS |
   PERMISSIONS.READ_CHAT_HISTORY |
   PERMISSIONS.SEND_MESSAGES;
-const DEFAULT_MEMBER_PERMISSIONS =
-  LEGACY_DEFAULT_MEMBER_PERMISSIONS |
-  PERMISSIONS.CONNECT_TO_VOICE |
-  PERMISSIONS.USE_VOICE_ACTIVITY |
-  PERMISSIONS.USE_PUSH_TO_TALK;
 db.exec(`
   CREATE TABLE IF NOT EXISTS role_categories (
     id          TEXT PRIMARY KEY,
@@ -758,12 +753,6 @@ if (adminRole && (adminRole.permissions & ALL_PERMISSIONS) !== ALL_PERMISSIONS) 
 // Ensure all users have the default role
 const defaultRole = db.prepare('SELECT id FROM roles WHERE is_default = 1').get();
 if (defaultRole) {
-  const defaultRoleRow = db.prepare('SELECT id, permissions FROM roles WHERE id = ?').get(defaultRole.id);
-  if (defaultRoleRow && defaultRoleRow.permissions === LEGACY_DEFAULT_MEMBER_PERMISSIONS) {
-    db.prepare('UPDATE roles SET permissions = ? WHERE id = ?').run(DEFAULT_MEMBER_PERMISSIONS, defaultRole.id);
-    pteroLog('[CatRealm] Updated default Member role voice permissions');
-  }
-
   const usersWithout = db.prepare(`
     SELECT u.id FROM users u
     LEFT JOIN user_roles ur ON ur.user_id = u.id
