@@ -35,7 +35,9 @@ function readLiveKitConfig() {
     process.env.LIVEKIT_URL ||
     ''
   ).trim();
-  const fallbackToLegacy = isTruthy(process.env.MEDIA_FALLBACK_TO_LEGACY, true);
+  const centralLiveKitFallback = isTruthy(process.env.CENTRAL_LIVEKIT_FALLBACK, false)
+    && (process.env.PUSH_RELAY_SECRET || '').trim().length >= 32
+    && !!(process.env.SERVER_URL || process.env.PUBLIC_URL || '').trim();
   const ttlSeconds = Math.max(
     60,
     Math.min(60 * 60, Number(process.env.MEDIA_TOKEN_TTL_SECONDS || DEFAULT_TOKEN_TTL_SECONDS) || DEFAULT_TOKEN_TTL_SECONDS),
@@ -50,7 +52,7 @@ function readLiveKitConfig() {
     publicUrl,
     apiKey,
     apiSecret,
-    fallbackToLegacy,
+    centralLiveKitFallback,
     ttlSeconds,
   };
 }
@@ -73,12 +75,16 @@ function getSelfHostServerId() {
 
 function getMediaCapability(contexts) {
   const config = readLiveKitConfig();
+  const liveKitFallbackContexts = !config.enabled && config.centralLiveKitFallback
+    ? ['voice', 'theater']
+    : [];
+  const hasLiveKitPath = config.enabled || liveKitFallbackContexts.length > 0;
   return {
     version: 1,
     provider: config.provider,
     enabled: config.enabled,
     configured: config.configured,
-    fallbackToLegacy: config.fallbackToLegacy,
+    liveKitFallbackContexts,
     publicUrl: config.enabled ? config.publicUrl : null,
     contexts,
     roomNamespace: {
@@ -90,10 +96,14 @@ function getMediaCapability(contexts) {
     participantIdentity: 'catrealm-user-id',
     trackSources: Object.values(TRACK_SOURCES),
     privacy: {
-      mediaPath: config.enabled ? 'sfu' : 'legacy',
+      mediaPath: config.enabled ? 'sfu' : (liveKitFallbackContexts.length > 0 ? 'central-sfu' : 'unavailable'),
       e2ee: false,
-      transportEncrypted: config.enabled,
-      label: config.enabled ? 'Transport encrypted, SFU routed' : 'Legacy P2P path',
+      transportEncrypted: hasLiveKitPath,
+      label: config.enabled
+        ? 'Transport encrypted, SFU routed'
+        : (liveKitFallbackContexts.length > 0
+          ? 'Transport encrypted, central SFU routed'
+          : 'Media unavailable'),
     },
   };
 }

@@ -145,8 +145,6 @@ function startBundledLiveKit(options = {}) {
   process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL = publicUrl;
   process.env.MEDIA_LIVEKIT_API_KEY = apiKey;
   process.env.MEDIA_LIVEKIT_API_SECRET = apiSecret;
-  process.env.MEDIA_FALLBACK_TO_LEGACY = process.env.MEDIA_FALLBACK_TO_LEGACY || 'true';
-
   log(`[CatRealm] Starting bundled LiveKit media server on ${internalUrl}`);
   log(`[CatRealm] LiveKit public URL: ${publicUrl}`);
   log('[CatRealm] LiveKit signaling proxy: enabled on CatRealm /rtc over HTTPS');

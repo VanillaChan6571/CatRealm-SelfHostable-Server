@@ -11,6 +11,7 @@ const {
   getMediaCapability,
   getSelfHostServerId,
 } = require('../lib/mediaConfig');
+const { requestFederatedMediaToken } = require('../lib/centralMediaFallback');
 
 function getSelfHostMediaContexts() {
   return ['voice', 'theater'];
@@ -102,13 +103,38 @@ function createSelfHostMediaSession({ context, channelId, user }) {
   };
 }
 
+async function createSelfHostMediaSessionWithFallback({ context, channelId, user }) {
+  const result = createSelfHostMediaSession({ context, channelId, user });
+  if (result.ok || !['voice', 'theater'].includes(context) || !channelId || result.status !== 503) {
+    return result;
+  }
+
+  try {
+    const userProfile = getUserProfile(user.id);
+    const { publishSources } = buildPublishSources(user, channelId);
+    const fallback = await requestFederatedMediaToken({
+      context,
+      channelId,
+      userId: user.id,
+      displayName: userProfile?.effective_display_name || userProfile?.display_name || userProfile?.username || null,
+      avatar: userProfile?.avatar || null,
+      publishSources,
+    });
+    if (fallback?.ok) return fallback;
+  } catch {
+    // Fall through to the original local-media error.
+  }
+
+  return result;
+}
+
 router.get('/capabilities', (_req, res) => {
   res.json({ ok: true, capability: getMediaCapability(getSelfHostMediaContexts()) });
 });
 
-router.post('/token', authenticateToken, (req, res) => {
+router.post('/token', authenticateToken, async (req, res) => {
   const { context, channelId } = req.body || {};
-  const result = createSelfHostMediaSession({ context, channelId, user: req.user });
+  const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user: req.user });
   if (!result.ok) {
     return res.status(result.status || 400).json({
       ok: false,
@@ -122,5 +148,6 @@ router.post('/token', authenticateToken, (req, res) => {
 module.exports = {
   router,
   createSelfHostMediaSession,
+  createSelfHostMediaSessionWithFallback,
   getSelfHostMediaContexts,
 };

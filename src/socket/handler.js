@@ -16,9 +16,9 @@ const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
-const { relayMentionPush } = require('../lib/pushRelay');
+const { relayMentionPush, relayMentionNotifications } = require('../lib/pushRelay');
 const {
-  createSelfHostMediaSession,
+  createSelfHostMediaSessionWithFallback,
   getSelfHostMediaContexts,
 } = require('../routes/media');
 const { getMediaCapability } = require('../lib/mediaConfig');
@@ -30,19 +30,20 @@ function escapeRegex(str) {
 
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, lastActivityAt, sockets: Set<socketId> }
 const onlineUsers = new Map();
-// Tracks which socketIds have the app in foreground. Desktop sockets are always foreground;
-// mobile sockets only count as foreground when the app emits client:foreground.
+// Tracks which socketIds are actively foregrounded. Desktop sockets default to foreground
+// on connect, but central desktop clients can mark non-active Realm sockets background while
+// the user is browsing another Realm or Home. Mobile sockets only count as foreground when
+// the app emits client:foreground.
 const socketForeground = new Set();
 
-// Returns true if the user has at least one socket that can actively receive messages
-// (a desktop socket, or a mobile socket in foreground). A suspended mobile socket keeps
-// the TCP connection alive but the app is frozen and cannot display notifications.
+// Returns true if the user has at least one socket that can actively receive messages.
+// A suspended mobile socket or a central desktop background-Realm socket keeps the TCP
+// connection alive but should not suppress mobile mention notifications.
 function isUserForegrounded(userId) {
   const entry = onlineUsers.get(userId);
   if (!entry || !entry.sockets.size) return false;
   for (const socketId of entry.sockets) {
-    const clientType = entry.clientSockets.get(socketId) || 'desktop';
-    if (clientType !== 'mobile' || socketForeground.has(socketId)) return true;
+    if (socketForeground.has(socketId)) return true;
   }
   return false;
 }
@@ -404,7 +405,9 @@ function setupSocketHandlers(io) {
     const clientType = socket.handshake.auth?.clientType === 'mobile' ? 'mobile' : 'desktop';
     socket.clientType = clientType;
 
-    // Desktop is always foreground; mobile defaults to foreground until it reports otherwise
+    // Desktop defaults to foreground; central desktop clients can later mark background
+    // Realm sockets inactive via client:background. Mobile defaults to background until it
+    // reports otherwise from AppState.
     if (clientType !== 'mobile') socketForeground.add(socket.id);
 
     socket.on('client:foreground', () => { socketForeground.add(socket.id); });
@@ -508,14 +511,14 @@ function setupSocketHandlers(io) {
       if (typeof ack === 'function') ack({ ok: true, capability: getMediaCapability(getSelfHostMediaContexts()) });
     });
 
-    socket.on('media:v1:token', ({ context, channelId } = {}, ack) => {
-      const result = createSelfHostMediaSession({ context, channelId, user });
+    socket.on('media:v1:token', async ({ context, channelId } = {}, ack) => {
+      const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user });
       if (typeof ack === 'function') {
         ack(result.ok ? result : { ok: false, error: result.error, capability: getMediaCapability(getSelfHostMediaContexts()) });
       }
     });
 
-    // ── Voice: join/leave/signaling ───────────────────────────────────────────────
+    // ── Voice: join/leave/presence ────────────────────────────────────────────────
     socket.on('voice:join', ({ channelId, muted = false, deafened = false }, ack) => {
       if (!channelId) {
         if (typeof ack === 'function') ack({ ok: false, channelId, error: 'Missing channel' });
@@ -734,44 +737,6 @@ function setupSocketHandlers(io) {
         liveUserIds: getVoiceLiveUserIds(channelId),
       });
       emitVoiceRoomSync(io, channelId);
-    });
-
-    socket.on('voice:signal', ({ channelId, to, data }) => {
-      if (!channelId || !to || !data) return;
-      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
-
-      const sdp = data && typeof data === 'object' && typeof data.sdp === 'string' ? data.sdp : '';
-      if (sdp && /\bm=video\b/i.test(sdp)) {
-        const canSendVideo = hasChannelPermission(user, channelId, PERMISSIONS.SCREENSHARE, db)
-          || hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db);
-        if (!canSendVideo) {
-          socket.emit('error', 'Missing permission: screenshare_or_camera');
-          return;
-        }
-      }
-
-      const room = voiceRooms.get(channelId);
-      if (!room) return;
-      if (!room.get(user.id)) return;
-      const target = room.get(to);
-      if (target && io.sockets.sockets.has(target.socketId)) {
-        io.to(target.socketId).emit('voice:signal', {
-          channelId,
-          from: user.id,
-          data,
-        });
-        return;
-      }
-      // Fallback for stale room socket mappings (e.g. reconnects / multi-session).
-      const online = onlineUsers.get(to);
-      if (!online?.sockets?.size) return;
-      for (const socketId of online.sockets) {
-        io.to(socketId).emit('voice:signal', {
-          channelId,
-          from: user.id,
-          data,
-        });
-      }
     });
 
     socket.on('voice:mod:state', ({ channelId, userId, muted, deafened }, ack) => {
@@ -1086,40 +1051,6 @@ function setupSocketHandlers(io) {
         emitTheaterRoomPresence(io, channelId);
       }
       pteroLog(`[Theater] ${authUser.username || user.id} kicked ${userId} from channel ${channelId}`);
-    });
-
-    socket.on('theater:signal', ({ channelId, to, data }) => {
-      if (!channelId || !to || !data) return;
-      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
-
-      // Block SDPs where the user is actively sending video without camera permission.
-      // recvonly video sections are allowed (needed for audio-only peers to negotiate).
-      const sdp = data && typeof data === 'object' && typeof data.sdp === 'string' ? data.sdp : '';
-      if (sdp) {
-        const videoIdx = sdp.search(/\bm=video\b/i);
-        if (videoIdx !== -1) {
-          const nextMIdx = sdp.indexOf('\nm=', videoIdx + 1);
-          const videoSection = nextMIdx === -1 ? sdp.slice(videoIdx) : sdp.slice(videoIdx, nextMIdx);
-          const isSendingVideo = /\ba=(sendrecv|sendonly)\b/i.test(videoSection);
-          if (isSendingVideo && !hasChannelPermission(user, channelId, PERMISSIONS.CAMERA, db)) {
-            socket.emit('error', 'Missing permission: camera');
-            return;
-          }
-        }
-      }
-
-      const room = theaterRooms.get(channelId);
-      if (!room || !room.get(user.id)) return;
-      const target = room.get(to);
-      if (target && io.sockets.sockets.has(target.socketId)) {
-        io.to(target.socketId).emit('theater:signal', { channelId, from: user.id, data });
-        return;
-      }
-      const online = onlineUsers.get(to);
-      if (!online?.sockets?.size) return;
-      for (const socketId of online.sockets) {
-        io.to(socketId).emit('theater:signal', { channelId, from: user.id, data });
-      }
     });
 
     socket.on('theater:camera-state', ({ channelId, cameraEnabled }) => {
@@ -1537,12 +1468,24 @@ function setupSocketHandlers(io) {
               });
               if (mentioned.length > 0) {
                 const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
+                const signedRelayRecipients = await relayMentionNotifications({
+                  recipientLocalUserIds: mentioned.map((m) => m.id),
+                  channelId,
+                  channelName: ch?.name ?? channelId,
+                  messageId: id,
+                  messageCreatedAt: now,
+                  senderUsername: authUser.username,
+                  senderAvatarUrl: userInfo?.avatar || null,
+                  contentPreview: trimmed,
+                });
                 // Use central_id when available — the central push server indexes tokens by
                 // central user ID, not the local UUID the self-hosted server assigns.
                 // Local-only users without a central account have no push token registered there
                 // so they're filtered out by dispatchPush anyway; no harm including them.
                 await relayMentionPush({
-                  recipientUserIds: mentioned.map((m) => m.central_id || m.id),
+                  recipientUserIds: mentioned
+                    .filter((m) => !signedRelayRecipients.has(m.id))
+                    .map((m) => m.central_id || m.id),
                   channelId,
                   channelName: ch?.name ?? channelId,
                   senderUsername: authUser.username,

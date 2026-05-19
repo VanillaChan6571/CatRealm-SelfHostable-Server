@@ -150,6 +150,19 @@ db.exec(`
     value TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS realm_notification_whitelist (
+    grant_id              TEXT PRIMARY KEY,
+    central_user_id       TEXT NOT NULL,
+    local_user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    realm_instance_id     TEXT NOT NULL,
+    central_grant_payload TEXT NOT NULL,
+    created_at            INTEGER NOT NULL DEFAULT (unixepoch()),
+    revoked_at            INTEGER,
+    superseded_at         INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_realm_notification_whitelist_lookup
+    ON realm_notification_whitelist(central_user_id, local_user_id, revoked_at, superseded_at);
+
   CREATE TABLE IF NOT EXISTS role_categories (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,

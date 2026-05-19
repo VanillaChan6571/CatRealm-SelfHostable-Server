@@ -42,11 +42,12 @@ Set these visible egg variables for bundled mode:
 - `LIVEKIT_RTC_TCP_PORT`: default `7881/tcp`.
 - `LIVEKIT_RTC_UDP_PORT_START`: default `50000/udp`.
 - `LIVEKIT_RTC_UDP_PORT_END`: default `50000/udp`. Set this higher only when every UDP port in the range is allocated.
-- `MEDIA_FALLBACK_TO_LEGACY=true`: recommended while testing.
 
 When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically. The client-facing LiveKit URL uses CatRealm's HTTPS port, and CatRealm proxies `/rtc` traffic internally to the bundled LiveKit process.
 
 The external LiveKit URL, API key, API secret, and token TTL variables remain in the egg for advanced deployments, but they are hidden from regular server users. In bundled mode CatRealm generates and persists the LiveKit API secret automatically.
+
+If a server should use CatRealm central LiveKit instead of hosting local media, set `CENTRAL_LIVEKIT_FALLBACK=true` and configure a `PUSH_RELAY_SECRET` so the server can authenticate fallback token requests. That fallback covers both voice and theater rooms.
 
 Pterodactyl port requirements for bundled mode:
 
