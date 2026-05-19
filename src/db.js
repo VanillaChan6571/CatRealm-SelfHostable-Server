@@ -955,9 +955,9 @@ db.exec(`
   );
 `);
 
-const adminExists = db.prepare(`SELECT id FROM users WHERE role IN ('admin', 'owner') OR is_owner = 1`).get();
+const ownerExists = db.prepare(`SELECT id FROM users WHERE role = 'owner' OR is_owner = 1`).get();
 const tokenRow = db.prepare('SELECT token FROM admin_tokens').get();
-if (!adminExists && !tokenRow) {
+if (!ownerExists && !tokenRow) {
   const token = crypto.randomBytes(16).toString('hex');
   db.prepare('INSERT INTO admin_tokens (token) VALUES (?)').run(token);
   pteroLog('╔══════════════════════════════════════════════════════════╗');
@@ -965,7 +965,7 @@ if (!adminExists && !tokenRow) {
   pteroLog(`║  ${token}  ║`);
   pteroLog('║  Register an account, then use this token to claim owner ║');
   pteroLog('╚══════════════════════════════════════════════════════════╝');
-} else if (!adminExists && tokenRow) {
+} else if (!ownerExists && tokenRow) {
   pteroLog('╔══════════════════════════════════════════════════════════╗');
   pteroLog('║              OWNER SETUP TOKEN (unclaimed)              ║');
   pteroLog(`║  ${tokenRow.token}  ║`);
