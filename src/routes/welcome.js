@@ -4,7 +4,7 @@ const db = require('../db');
 const { getSetting, setSetting } = require('../settings');
 const { authenticateToken } = require('../middleware/auth');
 const { PERMISSIONS, hasPermission } = require('../permissions');
-const { broadcastChannelUpdate } = require('../socket/handler');
+const { broadcastChannelUpdate, emitPermissionsChanged, emitServerInfoUpdate } = require('../socket/handler');
 
 function requireManageServer(req, res, next) {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_SERVER)) {
@@ -102,6 +102,20 @@ function syncServerRulesChannelIfEnabled({ broadcast = false } = {}) {
 
 syncServerRulesChannelIfEnabled();
 
+function resetMemberOnboarding() {
+  return db.prepare(`
+    UPDATE users
+    SET onboarding_completed = 0
+    WHERE COALESCE(is_member, 1) = 1
+      AND username != '__catrealm_webhook__'
+  `).run().changes || 0;
+}
+
+function emitWelcomeBoardState(enabled) {
+  emitServerInfoUpdate({ welcomeBoardEnabled: !!enabled });
+  emitPermissionsChanged();
+}
+
 // ── Public/Authenticated ──────────────────────────────────────────────────────
 
 // GET /api/welcome/settings
@@ -194,7 +208,11 @@ router.put('/admin/welcome/settings', authenticateToken, requireManageServer, (r
     }
     setSetting('welcome_board_enabled', enabling ? '1' : '0');
     if (enabling) {
+      resetMemberOnboarding();
       syncServerRulesChannelIfEnabled({ broadcast: true });
+      emitWelcomeBoardState(true);
+    } else {
+      emitWelcomeBoardState(false);
     }
   }
 
@@ -203,13 +221,9 @@ router.put('/admin/welcome/settings', authenticateToken, requireManageServer, (r
 
 // POST /api/admin/welcome/reset-onboarding
 router.post('/admin/welcome/reset-onboarding', authenticateToken, requireManageServer, (_req, res) => {
-  const result = db.prepare(`
-    UPDATE users
-    SET onboarding_completed = 0
-    WHERE COALESCE(is_member, 1) = 1
-      AND username != '__catrealm_webhook__'
-  `).run();
-  res.json({ ok: true, resetCount: result.changes || 0 });
+  const resetCount = resetMemberOnboarding();
+  emitPermissionsChanged();
+  res.json({ ok: true, resetCount });
 });
 
 // PUT /api/admin/welcome/rules

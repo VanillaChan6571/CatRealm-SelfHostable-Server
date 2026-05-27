@@ -245,6 +245,7 @@ router.post('/central', async (req, res) => {
 
   // Look up or create a local user record for this central account
   let localUser = db.prepare('SELECT * FROM users WHERE central_id = ?').get(centralUser.id);
+  const welcomeEnabled = getSetting('welcome_board_enabled', '0') === '1';
 
   if (!localUser) {
     // Check username conflict
@@ -252,8 +253,8 @@ router.post('/central', async (req, res) => {
     const username = existingByName ? `${centralUser.username}_central` : centralUser.username;
 
     const id = randomUUID();
-    db.prepare('INSERT INTO users (id, username, password, role, central_id, account_type, avatar) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, username, '', 'member', centralUser.id, 'central', DEFAULT_AVATAR_URL || null);
+    db.prepare('INSERT INTO users (id, username, password, role, central_id, account_type, avatar, onboarding_completed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, username, '', 'member', centralUser.id, 'central', DEFAULT_AVATAR_URL || null, welcomeEnabled ? 0 : 1);
 
     // Assign default role
     const defaultRole = db.prepare('SELECT id FROM roles WHERE is_default = 1').get();
@@ -274,6 +275,9 @@ router.post('/central', async (req, res) => {
       return res.status(inviteResult.status).json({ error: inviteResult.error });
     }
     db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(localUser.id);
+    if (welcomeEnabled) {
+      db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(localUser.id);
+    }
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
   }
 
@@ -346,6 +350,7 @@ router.post('/central', async (req, res) => {
       avatar: localUser.avatar || null,
       banner: localUser.banner || null,
       verified: centralUser.verified || false,
+      onboardingCompleted: localUser.onboarding_completed !== 0,
     },
   });
 });

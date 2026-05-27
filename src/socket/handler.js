@@ -497,6 +497,7 @@ function setupSocketHandlers(io) {
     const mentionAlias = getSetting('mention_alias', '@everyone');
     const serverIcon = getSetting('server_icon', null);
     const serverBanner = getSetting('server_banner', null);
+    const welcomeBoardEnabled = getSetting('welcome_board_enabled', '0') === '1';
     socket.emit('server:info', {
       name: serverName,
       description: serverDescription,
@@ -505,6 +506,7 @@ function setupSocketHandlers(io) {
       mentionAlias,
       serverIcon,
       serverBanner,
+      welcomeBoardEnabled,
     });
 
     socket.on('media:v1:capabilities', (ack) => {
