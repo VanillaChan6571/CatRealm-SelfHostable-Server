@@ -4,6 +4,7 @@ const db = require('../db');
 const { getSetting, setSetting } = require('../settings');
 const { authenticateToken } = require('../middleware/auth');
 const { PERMISSIONS, hasPermission } = require('../permissions');
+const { broadcastChannelUpdate } = require('../socket/handler');
 
 function requireManageServer(req, res, next) {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_SERVER)) {
@@ -57,6 +58,51 @@ function toAbsoluteAssetUrl(req, value) {
   const host = req.get('x-forwarded-host')?.split(',')[0]?.trim() || req.get('host') || '';
   return host ? `${proto}://${host}${raw}` : raw;
 }
+
+function ensureServerRulesChannel() {
+  const existing = db.prepare(`
+    SELECT id FROM channels
+    WHERE type = 'rules' OR lower(name) IN ('server rules', 'server-rules')
+    ORDER BY CASE WHEN type = 'rules' THEN 0 ELSE 1 END, position ASC
+    LIMIT 1
+  `).get();
+  const minUncategorized = db.prepare(`
+    SELECT COALESCE(MIN(position), 0) AS m
+    FROM channels
+    WHERE category_id IS NULL
+  `).get().m;
+  const position = Number(minUncategorized) - 1;
+
+  if (existing) {
+    db.prepare(`
+      UPDATE channels
+      SET name = 'Server Rules',
+          description = 'Read the realm rules',
+          type = 'rules',
+          category_id = NULL,
+          position = CASE WHEN position > ? THEN ? ELSE position END
+      WHERE id = ?
+    `).run(position, position, existing.id);
+    return existing.id;
+  }
+
+  const id = randomUUID();
+  db.prepare(`
+    INSERT INTO channels (id, name, description, type, position, category_id)
+    VALUES (?, 'Server Rules', 'Read the realm rules', 'rules', ?, NULL)
+  `).run(id, position);
+  return id;
+}
+
+function syncServerRulesChannelIfEnabled({ broadcast = false } = {}) {
+  if (getSetting('welcome_board_enabled', '0') !== '1') return null;
+  if (!isBoardReady()) return null;
+  const channelId = ensureServerRulesChannel();
+  if (broadcast) broadcastChannelUpdate();
+  return channelId;
+}
+
+syncServerRulesChannelIfEnabled();
 
 // ── Public/Authenticated ──────────────────────────────────────────────────────
 
@@ -123,6 +169,7 @@ router.post('/welcome/complete', authenticateToken, (req, res) => {
 
 // GET /api/admin/welcome
 router.get('/admin/welcome', authenticateToken, requireManageServer, (req, res) => {
+  syncServerRulesChannelIfEnabled({ broadcast: true });
   const enabled = getSetting('welcome_board_enabled', '0') === '1';
   const bg = toAbsoluteAssetUrl(req, getSetting('welcome_board_bg', ''));
   const serverIcon = toAbsoluteAssetUrl(req, getSetting('server_icon', null));
@@ -148,6 +195,9 @@ router.put('/admin/welcome/settings', authenticateToken, requireManageServer, (r
       });
     }
     setSetting('welcome_board_enabled', enabling ? '1' : '0');
+    if (enabling) {
+      syncServerRulesChannelIfEnabled({ broadcast: true });
+    }
   }
 
   res.json({ ok: true });
@@ -182,6 +232,8 @@ router.put('/admin/welcome/rules', authenticateToken, requireManageServer, (req,
     });
     txn();
   }
+
+  syncServerRulesChannelIfEnabled({ broadcast: true });
 
   res.json({ ok: true });
 });
