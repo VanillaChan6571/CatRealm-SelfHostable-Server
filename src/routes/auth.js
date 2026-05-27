@@ -80,8 +80,7 @@ router.post('/login', (req, res) => {
     return res.status(403).json({ error: 'You are banned from this server' });
   }
   if (Number(user.is_member ?? 1) !== 1) {
-    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(user.id);
-    user.is_member = 1;
+    return res.status(403).json({ error: 'You were removed from this server' });
   }
 
   const permissions = computePermissionsForUser(user.id, user.role, user.is_owner, db);
@@ -239,9 +238,10 @@ router.post('/central', async (req, res) => {
     }
 
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  } else if (Number(localUser.is_member ?? 1) !== 1) {
-    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(localUser.id);
-    localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
+  }
+
+  if (Number(localUser.is_member ?? 1) !== 1) {
+    return res.status(403).json({ error: 'You were removed from this server' });
   }
 
   if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(localUser.id)) {
