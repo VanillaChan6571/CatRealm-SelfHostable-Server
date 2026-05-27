@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { startBundledLiveKit } = require('../src/livekitRuntime');
 
 const repoRoot = path.join(__dirname, '..');
 const nodeModulesDir = path.join(repoRoot, 'node_modules');
@@ -35,5 +36,7 @@ function installDependencies() {
 if (needsInstall()) {
   installDependencies();
 }
+
+startBundledLiveKit({ logDisabled: true });
 
 require(path.join(repoRoot, 'src', 'index.js'));

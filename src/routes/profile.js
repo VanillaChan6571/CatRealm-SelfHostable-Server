@@ -223,8 +223,10 @@ router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
       COALESCE(dno.display_name, u.display_name) as effective_display_name
     FROM users u
     LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-    WHERE u.id = ?
-  `).get(userId);
+    WHERE u.id = ? OR u.central_id = ?
+    ORDER BY CASE WHEN u.id = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(userId, userId, userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   res.json({

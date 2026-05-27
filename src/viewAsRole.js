@@ -55,6 +55,10 @@ function applyRoleViewToUser(user, db) {
     return { user, session: null };
   }
 
+  if (user.is_owner || user.role === 'owner') {
+    return { user, session: getRoleViewSession(user.id) };
+  }
+
   const session = getRoleViewSession(user.id);
   if (!session?.roleId) {
     return { user, session: null };

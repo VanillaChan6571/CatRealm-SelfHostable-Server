@@ -78,6 +78,10 @@ function listChannelOverwrites(channelId) {
   `).all(channelId);
 }
 
+function isSystemRulesChannel(channel) {
+  return channel?.type === 'rules';
+}
+
 // GET /api/channels - list all channels
 router.get('/', (req, res) => {
   const channels = db.prepare('SELECT * FROM channels ORDER BY position ASC').all();
@@ -113,6 +117,9 @@ router.delete('/:id', (req, res) => {
   }
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (isSystemRulesChannel(channel)) {
+    return res.status(400).json({ error: 'Realm Rules is a system channel and cannot be deleted' });
+  }
   queueChannelDeletedEvent(channel);
   db.prepare('DELETE FROM channels WHERE id = ?').run(req.params.id);
   broadcastChannelUpdate();
@@ -127,14 +134,28 @@ router.patch('/:id', (req, res) => {
   const { name, description, type, categoryId, position, allowDisplayName, forumLayout } = req.body ?? {};
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  const systemRulesChannel = isSystemRulesChannel(channel);
   if (typeof name === 'string' && name.trim().length >= 2) {
-    const nextName =
-      allowDisplayName === true
+    const nextName = systemRulesChannel
+      ? name.trim()
+      : allowDisplayName === true
         ? name.trim()
         : allowDisplayName === false
           ? name.toLowerCase().replace(/\s+/g, '-')
           : name.trim();
     db.prepare('UPDATE channels SET name = ? WHERE id = ?').run(nextName, req.params.id);
+  }
+  if (systemRulesChannel) {
+    db.prepare(`
+      UPDATE channels
+      SET description = 'Read the realm rules',
+          type = 'rules',
+          category_id = NULL
+      WHERE id = ?
+    `).run(req.params.id);
+    const updated = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
+    broadcastChannelUpdate();
+    return res.json(updated);
   }
   if (typeof description === 'string') {
     db.prepare('UPDATE channels SET description = ? WHERE id = ?').run(description.trim(), req.params.id);
@@ -166,6 +187,9 @@ router.post('/:id/duplicate', (req, res) => {
   }
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  if (isSystemRulesChannel(channel)) {
+    return res.status(400).json({ error: 'Realm Rules is a system channel and cannot be duplicated' });
+  }
   const maxPos = db.prepare('SELECT MAX(position) as m FROM channels').get().m || 0;
   const id = randomUUID();
   const name = `${channel.name}-copy`;

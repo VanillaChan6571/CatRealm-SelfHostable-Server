@@ -3,6 +3,7 @@
 CatRealm now includes a public Pterodactyl runtime image definition that adds the OS tools the server expects at runtime:
 
 - `ffmpeg`
+- `livekit-server`
 - `yt-dlp`
 - `git`
 - `python3`
@@ -29,6 +30,36 @@ Using a custom runtime image fixes that permanently.
 
 Import the CatRealm egg and pick one of the `CatRealm Runtime` image options from the egg image list.
 
+## Bundled LiveKit
+
+The CatRealm runtime image includes `livekit-server`, so one Pterodactyl server can run CatRealm plus LiveKit media together. LiveKit still runs as a sidecar process; it is not embedded into the CatRealm Node process.
+
+Set these visible egg variables for bundled mode:
+
+- `HOST_LIVEKIT_MEDIA=true`
+- `LIVEKIT_PUBLIC_HOST`: public hostname clients use for LiveKit. Leave empty to reuse `SSL_DOMAIN`; only set it when media uses a different hostname.
+- `LIVEKIT_SIGNALING_PORT`: internal LiveKit signaling port, default `7880/tcp`. CatRealm proxies `/rtc` over the normal CatRealm HTTPS port.
+- `LIVEKIT_RTC_TCP_PORT`: default `7881/tcp`.
+- `LIVEKIT_RTC_UDP_PORT_START`: default `50000/udp`.
+- `LIVEKIT_RTC_UDP_PORT_END`: default `50000/udp`. Set this higher only when every UDP port in the range is allocated.
+
+When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically. The client-facing LiveKit URL uses CatRealm's HTTPS port, and CatRealm proxies `/rtc` traffic internally to the bundled LiveKit process.
+
+The external LiveKit URL, API key, API secret, and token TTL variables remain in the egg for advanced deployments, but they are hidden from regular server users. In bundled mode CatRealm generates and persists the LiveKit API secret automatically.
+
+If a server should use CatRealm central LiveKit instead of hosting local media, set `CENTRAL_LIVEKIT_FALLBACK=true` and configure a `PUSH_RELAY_SECRET` so the server can authenticate fallback token requests. That fallback covers both voice and theater rooms.
+
+Pterodactyl port requirements for bundled mode:
+
+- Allocate `LIVEKIT_RTC_TCP_PORT` as TCP.
+- Allocate the full UDP range from `LIVEKIT_RTC_UDP_PORT_START` through `LIVEKIT_RTC_UDP_PORT_END`. For one UDP allocation, set both values to the same port.
+
+The signaling port is internal in the bundled setup and usually does not need public allocation. The CatRealm HTTPS port must remain public because it carries both CatRealm traffic and LiveKit `/rtc` signaling. `LIVEKIT_RTC_TCP_PORT` and the UDP range still need public allocation because WebRTC media uses those ports directly.
+
+For small Pterodactyl hosts, a single UDP media port is the safest default because Docker exposes only allocated ports. CatRealm writes LiveKit's internal config with an exclusive upper bound, so `50000` to `50000` in the egg still binds only UDP `50000`. For more concurrent media sessions, allocate a contiguous UDP range and set start/end to exactly that range. LiveKit's official port guidance is at https://docs.livekit.io/home/self-hosting/ports-firewall/.
+
+Do not put the LiveKit API secret in client-side config. CatRealm mints participant tokens server-side.
+
 ## Existing deployed servers
 
 Existing servers will keep using their current runtime image until you change it in the panel.
@@ -38,7 +69,7 @@ To move an existing server:
 1. Update or re-import the CatRealm egg.
 2. Change the server Docker image to one of the CatRealm runtime tags above.
 3. Rebuild or reinstall the server so Pterodactyl recreates the container on that image.
-4. Start the server and confirm startup logs show both `yt-dlp` and `ffmpeg` detected.
+4. Start the server and confirm startup logs show `yt-dlp`, `ffmpeg`, and `livekit-server` detected.
 
 ## Manual build
 

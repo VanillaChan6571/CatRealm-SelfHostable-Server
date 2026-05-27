@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - main
+      - overhaul/livekit-media-core
     paths:
       - ".github/workflows/publish-pterodactyl-yolk.yml"
       - "docker/pterodactyl-yolk/Dockerfile"
@@ -48,3 +49,4 @@ jobs:
             BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
           tags: |
             ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_20
+            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_20-livekit

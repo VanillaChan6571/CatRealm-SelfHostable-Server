@@ -150,6 +150,19 @@ db.exec(`
     value TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS realm_notification_whitelist (
+    grant_id              TEXT PRIMARY KEY,
+    central_user_id       TEXT NOT NULL,
+    local_user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    realm_instance_id     TEXT NOT NULL,
+    central_grant_payload TEXT NOT NULL,
+    created_at            INTEGER NOT NULL DEFAULT (unixepoch()),
+    revoked_at            INTEGER,
+    superseded_at         INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_realm_notification_whitelist_lookup
+    ON realm_notification_whitelist(central_user_id, local_user_id, revoked_at, superseded_at);
+
   CREATE TABLE IF NOT EXISTS role_categories (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -942,9 +955,9 @@ db.exec(`
   );
 `);
 
-const adminExists = db.prepare(`SELECT id FROM users WHERE role IN ('admin', 'owner') OR is_owner = 1`).get();
+const ownerExists = db.prepare(`SELECT id FROM users WHERE role = 'owner' OR is_owner = 1`).get();
 const tokenRow = db.prepare('SELECT token FROM admin_tokens').get();
-if (!adminExists && !tokenRow) {
+if (!ownerExists && !tokenRow) {
   const token = crypto.randomBytes(16).toString('hex');
   db.prepare('INSERT INTO admin_tokens (token) VALUES (?)').run(token);
   pteroLog('╔══════════════════════════════════════════════════════════╗');
@@ -952,7 +965,7 @@ if (!adminExists && !tokenRow) {
   pteroLog(`║  ${token}  ║`);
   pteroLog('║  Register an account, then use this token to claim owner ║');
   pteroLog('╚══════════════════════════════════════════════════════════╝');
-} else if (!adminExists && tokenRow) {
+} else if (!ownerExists && tokenRow) {
   pteroLog('╔══════════════════════════════════════════════════════════╗');
   pteroLog('║              OWNER SETUP TOKEN (unclaimed)              ║');
   pteroLog(`║  ${tokenRow.token}  ║`);

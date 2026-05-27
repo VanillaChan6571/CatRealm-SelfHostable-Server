@@ -14,6 +14,30 @@ const DEFAULT_AVATAR_URL = (
   'https://catrealm.app/uploads/avatars/default.jpg'
 ).trim();
 
+function consumeInviteForRejoin(inviteCode) {
+  const code = String(inviteCode || '').trim();
+  if (!/^[A-Za-z0-9_-]{4,128}$/.test(code)) {
+    return { ok: false, status: 403, error: 'A valid invite is required to rejoin this server' };
+  }
+
+  const invite = db.prepare('SELECT * FROM invites WHERE code = ?').get(code);
+  if (!invite) {
+    return { ok: false, status: 404, error: 'Invalid invite code' };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (invite.expires_at && invite.expires_at < now) {
+    return { ok: false, status: 410, error: 'Invite expired' };
+  }
+
+  if (invite.max_uses > 0 && invite.current_uses >= invite.max_uses) {
+    return { ok: false, status: 410, error: 'Invite has reached maximum uses' };
+  }
+
+  db.prepare('UPDATE invites SET current_uses = current_uses + 1 WHERE code = ?').run(code);
+  return { ok: true };
+}
+
 // POST /api/auth/register  (local/decentral accounts only)
 router.post('/register', async (req, res) => {
   if (SERVER_MODE === 'central_only') {
@@ -80,8 +104,7 @@ router.post('/login', (req, res) => {
     return res.status(403).json({ error: 'You are banned from this server' });
   }
   if (Number(user.is_member ?? 1) !== 1) {
-    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(user.id);
-    user.is_member = 1;
+    return res.status(403).json({ error: 'You were removed from this server' });
   }
 
   const permissions = computePermissionsForUser(user.id, user.role, user.is_owner, db);
@@ -201,7 +224,7 @@ router.post('/central', async (req, res) => {
     return res.status(403).json({ error: 'This server only accepts local accounts' });
   }
 
-  const { token } = req.body;
+  const { token, inviteCode } = req.body;
   if (!token) return res.status(400).json({ error: 'Central token required' });
 
   // Verify the central token with the auth server
@@ -222,6 +245,7 @@ router.post('/central', async (req, res) => {
 
   // Look up or create a local user record for this central account
   let localUser = db.prepare('SELECT * FROM users WHERE central_id = ?').get(centralUser.id);
+  const welcomeEnabled = getSetting('welcome_board_enabled', '0') === '1';
 
   if (!localUser) {
     // Check username conflict
@@ -229,8 +253,8 @@ router.post('/central', async (req, res) => {
     const username = existingByName ? `${centralUser.username}_central` : centralUser.username;
 
     const id = randomUUID();
-    db.prepare('INSERT INTO users (id, username, password, role, central_id, account_type, avatar) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, username, '', 'member', centralUser.id, 'central', DEFAULT_AVATAR_URL || null);
+    db.prepare('INSERT INTO users (id, username, password, role, central_id, account_type, avatar, onboarding_completed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, username, '', 'member', centralUser.id, 'central', DEFAULT_AVATAR_URL || null, welcomeEnabled ? 0 : 1);
 
     // Assign default role
     const defaultRole = db.prepare('SELECT id FROM roles WHERE is_default = 1').get();
@@ -239,13 +263,22 @@ router.post('/central', async (req, res) => {
     }
 
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  } else if (Number(localUser.is_member ?? 1) !== 1) {
-    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(localUser.id);
-    localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
   }
 
   if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(localUser.id)) {
     return res.status(403).json({ error: 'You are banned from this server' });
+  }
+
+  if (Number(localUser.is_member ?? 1) !== 1) {
+    const inviteResult = consumeInviteForRejoin(inviteCode);
+    if (!inviteResult.ok) {
+      return res.status(inviteResult.status).json({ error: inviteResult.error });
+    }
+    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(localUser.id);
+    if (welcomeEnabled) {
+      db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(localUser.id);
+    }
+    localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
   }
 
   // Sync central avatar into local record when no server-specific avatar is set
@@ -317,6 +350,7 @@ router.post('/central', async (req, res) => {
       avatar: localUser.avatar || null,
       banner: localUser.banner || null,
       verified: centralUser.verified || false,
+      onboardingCompleted: localUser.onboarding_completed !== 0,
     },
   });
 });

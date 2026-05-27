@@ -6,6 +6,8 @@ const readline = require('readline');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
+const { startBundledLiveKit } = require('./livekitRuntime');
+const { attachLiveKitUpgradeProxy, createLiveKitHttpProxy } = require('./livekitProxy');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -74,6 +76,48 @@ function logMediaDependencyStatus() {
   } else {
     pteroLog('[CatRealm] WARNING: ffmpeg not found. Theater YouTube downloads will be limited to progressive formats and media processing features may be reduced.');
   }
+
+  const livekit = spawnSync('livekit-server', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (livekit.status === 0) {
+    pteroLog(`[CatRealm] livekit-server detected: ${(livekit.stdout || livekit.stderr || '').trim()}`);
+  } else {
+    pteroLog('[CatRealm] livekit-server not detected in PATH. Bundled LiveKit requires the CatRealm Runtime image.');
+  }
+}
+
+function logLiveKitRuntimeStatus() {
+  const bundledRequested = isTruthy(process.env.HOST_LIVEKIT_MEDIA || process.env.CATREALM_HOST_LIVEKIT_MEDIA, false);
+  const enabled = isTruthy(process.env.MEDIA_LIVEKIT_ENABLED, false);
+  const apiKey = (process.env.MEDIA_LIVEKIT_API_KEY || process.env.LIVEKIT_API_KEY || '').trim();
+  const apiSecret = (process.env.MEDIA_LIVEKIT_API_SECRET || process.env.LIVEKIT_API_SECRET || '').trim();
+  const publicUrl = (
+    process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL ||
+    process.env.MEDIA_LIVEKIT_PUBLIC_URL ||
+    process.env.LIVEKIT_PUBLIC_WS_URL ||
+    process.env.LIVEKIT_URL ||
+    ''
+  ).trim();
+  const missing = [];
+  if (!apiKey) missing.push('apiKey');
+  if (!apiSecret) missing.push('apiSecret');
+  if (!publicUrl) missing.push('publicUrl');
+
+  if (enabled && missing.length === 0) {
+    pteroLog(`[CatRealm] LiveKit media: ENABLED (${bundledRequested ? 'bundled' : 'external'}) public=${publicUrl}`);
+    return;
+  }
+
+  if (enabled) {
+    pteroLog(`[CatRealm] LiveKit media: MISCONFIGURED missing=${missing.join(',')}`);
+    return;
+  }
+
+  if (bundledRequested) {
+    pteroLog('[CatRealm] WARNING: HOST_LIVEKIT_MEDIA=true but LiveKit media is not enabled. Start with node scripts/pterodactyl-bootstrap.js so bundled LiveKit can launch.');
+    return;
+  }
+
+  pteroLog('[CatRealm] LiveKit media: DISABLED');
 }
 
 function ensureRepoReady(repoRoot, repo, branch) {
@@ -323,73 +367,6 @@ function ensureServerUrl(scheme, domain) {
   pteroLog(`[CatRealm] Updated SERVER_URL to ${newUrl}`);
 }
 
-function ensureTurnSecretIfPlaceholder() {
-  const modeRaw = (process.env.TURN_MODE || '').trim().toLowerCase();
-  if (modeRaw && modeRaw !== 'custom') return;
-
-  const envPath = path.join(__dirname, '../.env');
-  if (!fs.existsSync(envPath)) return;
-
-  let envContents = fs.readFileSync(envPath, 'utf8');
-  const match = envContents.match(/^TURN_SECRET=(.*)$/m);
-  if (!match) return;
-
-  const current = (match[1] || '').trim();
-  if (current !== 'replace-with-a-long-random-secret') return;
-
-  const secret = crypto.randomBytes(48).toString('hex');
-  envContents = envContents.replace(/^TURN_SECRET=.*$/m, `TURN_SECRET=${secret}`);
-  fs.writeFileSync(envPath, envContents, 'utf8');
-  process.env.TURN_SECRET = secret;
-  pteroLog('[CatRealm] Replaced placeholder TURN_SECRET with a generated secret');
-}
-
-function logTurnStatus() {
-  const modeRaw = (process.env.TURN_MODE || '').trim().toLowerCase();
-  const mode = modeRaw || 'central';
-  const turnSecret = (process.env.TURN_SECRET || '').trim();
-  const turnHost = (process.env.TURN_HOST || '').trim();
-  const turnPort = (process.env.TURN_PORT || '3478').trim();
-  const turnTlsPort = (process.env.TURN_TLS_PORT || '').trim();
-  if (mode === 'central') {
-    const turnModule = require('./routes/turn');
-    const centralCfg = typeof turnModule.getCentralTurnConfig === 'function'
-      ? turnModule.getCentralTurnConfig()
-      : { host: '', secret: '' };
-    const centralHost = (centralCfg.host || '').trim();
-    const centralSecret = (centralCfg.secret || '').trim();
-    pteroLog('[CatRealm] TURN: mode=central (baked-in central TURN config).');
-    if (centralHost && centralSecret) {
-      pteroLog('[CatRealm] TURN: Keys SUCCESSFUL. Using native selection.');
-    } else {
-      pteroLog('[CatRealm] TURN: Keys FAILED. Using fallback method.');
-    }
-    return;
-  }
-
-  if (mode === 'fallback') {
-    pteroLog('[CatRealm] TURN: fallback mode (TURN_SECRET is not set).');
-    pteroLog('[CatRealm] TURN: using public fallback relay from /api/turn/credentials.');
-    pteroLog('[CatRealm] TURN: Keys FAILED. Using fallback method.');
-    return;
-  }
-
-  if (/^https?:\/\//i.test(turnHost)) {
-    pteroLog('[CatRealm] TURN: WARNING TURN_HOST should be hostname only (no http/https, no port).');
-  }
-
-  const hostLabel = turnHost || 'request-host auto-detect';
-  const tlsLabel = turnTlsPort || 'disabled';
-  if (!turnSecret) {
-    pteroLog('[CatRealm] TURN: mode=custom but TURN_SECRET is empty. Route will fallback.');
-    pteroLog('[CatRealm] TURN: Keys FAILED. Using fallback method.');
-    return;
-  }
-  pteroLog(`[CatRealm] TURN: mode=custom host=${hostLabel} port=${turnPort} tlsPort=${tlsLabel}`);
-  pteroLog('[CatRealm] TURN: ensure coturn static-auth-secret matches TURN_SECRET and ports are publicly reachable.');
-  pteroLog('[CatRealm] TURN: Keys SUCCESSFUL. Using native selection.');
-}
-
 function setupConsoleCommands(db) {
   if (!process.stdin || typeof process.stdin.on !== 'function') return;
 
@@ -494,8 +471,6 @@ function setupConsoleCommands(db) {
 
 ensureJwtSecret();
 ensurePortSync();
-ensureTurnSecretIfPlaceholder();
-logTurnStatus();
 
 const express = require('express');
 const http = require('http');
@@ -516,7 +491,6 @@ const categoryRoutes = require('./routes/categories');
 const threadRoutes = require('./routes/threads');
 const usersRoutes = require('./routes/users');
 const rolesRoutes = require('./routes/roles');
-const turnRoutes = require('./routes/turn');
 const invitesRoutes = require('./routes/invites');
 const expressionsRoutes = require('./routes/expressions');
 const embedsRoutes = require('./routes/embeds');
@@ -524,6 +498,7 @@ const embedMediaRoutes = require('./routes/embedMedia');
 const webhooksRoutes = require('./routes/webhooks');
 const welcomeRoutes = require('./routes/welcome');
 const theaterRoutes = require('./routes/theater');
+const mediaRoutes = require('./routes/media').router;
 const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
@@ -571,6 +546,9 @@ app.use('/ugc/temp-theater', authenticateToken, (req, res, next) => {
   next();
 }, express.static(THEATER_CACHE_DIR, { maxAge: '0', etag: true }));
 
+// Proxies LiveKit signaling through CatRealm HTTPS for bundled Pterodactyl mode.
+app.use('/rtc', createLiveKitHttpProxy(pteroLog));
+
 // ── Landing page ───────────────────────────────────────────────────────────────
 app.use('/', landingRoutes);
 
@@ -588,11 +566,11 @@ app.use('/api/threads', authenticateToken, threadRoutes);
 app.use('/api/users', authenticateToken, usersRoutes);
 app.use('/api/roles', authenticateToken, rolesRoutes);
 app.use('/api/invites', invitesRoutes); // Some endpoints public, some require auth
-app.use('/api/turn', turnRoutes); // TURN/STUN credentials (no auth required)
 app.use('/api/expressions', expressionsRoutes);
 app.use('/api/embed-media', embedMediaRoutes);
 app.use('/api/embeds', authenticateToken, embedsRoutes);
 app.use('/api/theater',  authenticateToken, theaterRoutes);
+app.use('/api/media', mediaRoutes);
 app.use('/api/webhooks', webhooksRoutes);
 app.use('/api', welcomeRoutes);
 
@@ -603,7 +581,9 @@ async function start() {
     getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
     getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
   });
+  startBundledLiveKit({ logger: pteroLog });
   logMediaDependencyStatus();
+  logLiveKitRuntimeStatus();
 
   let httpServer;
   const sslCert = process.env.SSL_CERT_PATH;
@@ -648,6 +628,8 @@ async function start() {
     httpServer = http.createServer(app);
     pteroLog('[CatRealm] WARNING: SSL is not enabled. The web app at https://catrealm.app/app requires HTTPS to connect.');
   }
+
+  attachLiveKitUpgradeProxy(httpServer, pteroLog);
 
   // ── Socket.io ───────────────────────────────────────────────────────────────
   const io = new Server(httpServer, {

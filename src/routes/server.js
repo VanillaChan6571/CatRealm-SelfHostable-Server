@@ -1,9 +1,12 @@
 const router = require('express').Router();
 const db = require('../db');
 const { getSetting } = require('../settings');
+const { authenticateToken } = require('../middleware/auth');
 const { execSync } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { getPublicRealmIdentity, signRelayPayload } = require('../lib/realmIdentity');
 
 // Read version from package.json
 let packageVersion = '1.0.0';
@@ -70,6 +73,82 @@ router.get('/', (req, res) => {
     gitHash: gitHash,
     buildInfo: `v${packageVersion} (${gitHash})`
   });
+});
+
+// GET /api/server/identity — stable Realm trust identity.
+// A changed instance ID or key fingerprint at the same URL means the Realm was
+// reset/replaced and central clients must ask the user to re-approve trust.
+router.get('/identity', (_req, res) => {
+  res.json(getPublicRealmIdentity());
+});
+
+// POST /api/server/identity/attestation — signed proof that the authenticated
+// local central-linked user belongs to the requested central identity.
+router.post('/identity/attestation', authenticateToken, (req, res) => {
+  if (req.user?.accountType !== 'central') {
+    return res.status(403).json({ error: 'Central account required' });
+  }
+  const localUser = db.prepare('SELECT id, central_id FROM users WHERE id = ?').get(req.user.id);
+  if (!localUser?.central_id) {
+    return res.status(409).json({ error: 'Local account is not linked to a central account' });
+  }
+  const nonce = typeof req.body?.nonce === 'string' && req.body.nonce.trim()
+    ? req.body.nonce.trim()
+    : crypto.randomUUID();
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const identity = getPublicRealmIdentity();
+  const payload = {
+    centralUserId: localUser.central_id,
+    issuedAt,
+    localUserId: localUser.id,
+    nonce,
+    realmInstanceId: identity.realmInstanceId,
+    realmKeyFingerprint: identity.realmKeyFingerprint,
+  };
+  const signed = signRelayPayload(payload);
+  res.json({
+    payload,
+    realmPublicKeyPem: identity.realmPublicKeyPem,
+    signature: signed.signature,
+  });
+});
+
+// POST /api/server/notification-grants — install a Central-issued grant ID for
+// this authenticated linked local user. Central remains the final verifier when
+// relays arrive, so a fake grant ID is harmless: later relays are rejected.
+router.post('/notification-grants', authenticateToken, (req, res) => {
+  if (req.user?.accountType !== 'central') {
+    return res.status(403).json({ error: 'Central account required' });
+  }
+  const grantId = typeof req.body?.grantId === 'string' ? req.body.grantId.trim() : '';
+  const centralUserId = typeof req.body?.centralUserId === 'string' ? req.body.centralUserId.trim() : '';
+  if (!grantId || !centralUserId) {
+    return res.status(400).json({ error: 'grantId and centralUserId are required' });
+  }
+  const localUser = db.prepare('SELECT id, central_id FROM users WHERE id = ?').get(req.user.id);
+  if (!localUser?.central_id || localUser.central_id !== centralUserId) {
+    return res.status(403).json({ error: 'Central identity does not match local link' });
+  }
+  const identity = getPublicRealmIdentity();
+  db.prepare(`
+    INSERT INTO realm_notification_whitelist (
+      grant_id, central_user_id, local_user_id, realm_instance_id, central_grant_payload
+    ) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(grant_id) DO UPDATE SET
+      central_user_id = excluded.central_user_id,
+      local_user_id = excluded.local_user_id,
+      realm_instance_id = excluded.realm_instance_id,
+      central_grant_payload = excluded.central_grant_payload,
+      revoked_at = NULL,
+      superseded_at = NULL
+  `).run(
+    grantId,
+    centralUserId,
+    localUser.id,
+    identity.realmInstanceId,
+    JSON.stringify(req.body?.grant ?? {}),
+  );
+  res.json({ success: true, grantId, realmInstanceId: identity.realmInstanceId });
 });
 
 module.exports = router;
