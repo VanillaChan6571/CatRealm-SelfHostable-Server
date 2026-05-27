@@ -62,8 +62,8 @@ function toAbsoluteAssetUrl(req, value) {
 function ensureServerRulesChannel() {
   const existing = db.prepare(`
     SELECT id FROM channels
-    WHERE type = 'rules' OR lower(name) IN ('server rules', 'server-rules')
-    ORDER BY CASE WHEN type = 'rules' THEN 0 ELSE 1 END, position ASC
+    WHERE type = 'rules'
+    ORDER BY position ASC
     LIMIT 1
   `).get();
   const minUncategorized = db.prepare(`
@@ -76,9 +76,7 @@ function ensureServerRulesChannel() {
   if (existing) {
     db.prepare(`
       UPDATE channels
-      SET name = 'Server Rules',
-          description = 'Read the realm rules',
-          type = 'rules',
+      SET description = 'Read the realm rules',
           category_id = NULL,
           position = CASE WHEN position > ? THEN ? ELSE position END
       WHERE id = ?
@@ -89,7 +87,7 @@ function ensureServerRulesChannel() {
   const id = randomUUID();
   db.prepare(`
     INSERT INTO channels (id, name, description, type, position, category_id)
-    VALUES (?, 'Server Rules', 'Read the realm rules', 'rules', ?, NULL)
+    VALUES (?, 'Realm Rules', 'Read the realm rules', 'rules', ?, NULL)
   `).run(id, position);
   return id;
 }
