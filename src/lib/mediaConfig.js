@@ -57,6 +57,22 @@ function readLiveKitConfig() {
   };
 }
 
+function readLiveKitIngressConfig() {
+  const media = readLiveKitConfig();
+  const enabled = media.enabled && isTruthy(process.env.MEDIA_LIVEKIT_INGRESS_ENABLED, false);
+  const publicWhipUrl = (
+    process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL ||
+    process.env.LIVEKIT_WHIP_PUBLIC_URL ||
+    ''
+  ).trim();
+
+  return {
+    enabled: enabled && !!publicWhipUrl,
+    configured: media.configured && !!publicWhipUrl,
+    publicWhipUrl,
+  };
+}
+
 function getSelfHostServerId() {
   const fromEnv = (process.env.CATREALM_SERVER_ID || process.env.SERVER_ID || '').trim();
   if (fromEnv) return fromEnv.replace(/[^A-Za-z0-9._:-]/g, '_');
@@ -75,6 +91,7 @@ function getSelfHostServerId() {
 
 function getMediaCapability(contexts) {
   const config = readLiveKitConfig();
+  const ingress = readLiveKitIngressConfig();
   const liveKitFallbackContexts = !config.enabled && config.centralLiveKitFallback
     ? ['voice', 'theater']
     : [];
@@ -95,6 +112,10 @@ function getMediaCapability(contexts) {
     },
     participantIdentity: 'catrealm-user-id',
     trackSources: Object.values(TRACK_SOURCES),
+    ingress: {
+      whip: ingress.enabled,
+      publicUrl: ingress.enabled ? ingress.publicWhipUrl : null,
+    },
     privacy: {
       mediaPath: config.enabled ? 'sfu' : (liveKitFallbackContexts.length > 0 ? 'central-sfu' : 'unavailable'),
       e2ee: false,
@@ -106,6 +127,29 @@ function getMediaCapability(contexts) {
           : 'Media unavailable'),
     },
   };
+}
+
+let _liveKitServerSdk = null;
+function getLiveKitServerSdk() {
+  if (_liveKitServerSdk) return _liveKitServerSdk;
+  try {
+    _liveKitServerSdk = require('livekit-server-sdk');
+    return _liveKitServerSdk;
+  } catch {
+    return null;
+  }
+}
+
+let _ingressClient = null;
+function getIngressClient() {
+  if (_ingressClient) return _ingressClient;
+  const config = readLiveKitConfig();
+  const ingress = readLiveKitIngressConfig();
+  if (!config.enabled || !ingress.enabled) return null;
+  const sdk = getLiveKitServerSdk();
+  if (!sdk?.IngressClient) return null;
+  _ingressClient = new sdk.IngressClient(config.serverUrl, config.apiKey, config.apiSecret);
+  return _ingressClient;
 }
 
 function getLiveKitPublishSources(trackSources) {
@@ -178,6 +222,8 @@ module.exports = {
   TRACK_SOURCES,
   createMediaToken,
   getMediaCapability,
+  getIngressClient,
+  readLiveKitIngressConfig,
   getSelfHostServerId,
   readLiveKitConfig,
 };

@@ -7,7 +7,7 @@ const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
 const { startBundledLiveKit } = require('./livekitRuntime');
-const { attachLiveKitUpgradeProxy, createLiveKitHttpProxy } = require('./livekitProxy');
+const { attachLiveKitUpgradeProxy, createLiveKitHttpProxy, createLiveKitIngressHttpProxy } = require('./livekitProxy');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -548,6 +548,7 @@ app.use('/ugc/temp-theater', authenticateToken, (req, res, next) => {
 
 // Proxies LiveKit signaling through CatRealm HTTPS for bundled Pterodactyl mode.
 app.use('/rtc', createLiveKitHttpProxy(pteroLog));
+app.use('/whip', createLiveKitIngressHttpProxy(pteroLog));
 
 // ── Landing page ───────────────────────────────────────────────────────────────
 app.use('/', landingRoutes);

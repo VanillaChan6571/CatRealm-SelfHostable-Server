@@ -10,12 +10,28 @@ function isBundledLiveKitProxyEnabled() {
   return isTruthy(process.env.MEDIA_LIVEKIT_PROXY_ENABLED, false);
 }
 
+function isBundledIngressProxyEnabled() {
+  return isTruthy(process.env.MEDIA_LIVEKIT_INGRESS_PROXY_ENABLED, false);
+}
+
 function getLiveKitHttpTarget() {
   const raw = (process.env.MEDIA_LIVEKIT_URL || process.env.LIVEKIT_URL || '').trim();
   if (!raw) return null;
   try {
     const parsed = new URL(raw);
     parsed.protocol = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getIngressHttpTarget() {
+  const raw = (process.env.MEDIA_LIVEKIT_INGRESS_URL || process.env.LIVEKIT_INGRESS_URL || '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    parsed.protocol = parsed.protocol === 'https:' ? 'https:' : 'http:';
     return parsed;
   } catch {
     return null;
@@ -39,13 +55,13 @@ function stripHopByHopHeaders(headers) {
   return next;
 }
 
-function createLiveKitHttpProxy(logger = console.log) {
-  return function liveKitHttpProxy(req, res, next) {
-    if (!isBundledLiveKitProxyEnabled()) return next();
+function createHttpProxy({ enabled, getTarget, unavailableMessage, logPrefix }, logger = console.log) {
+  return function httpProxy(req, res, next) {
+    if (!enabled()) return next();
 
-    const target = getLiveKitHttpTarget();
+    const target = getTarget();
     if (!target) {
-      res.status(503).send('LiveKit proxy target unavailable');
+      res.status(503).send(unavailableMessage);
       return;
     }
 
@@ -65,13 +81,31 @@ function createLiveKitHttpProxy(logger = console.log) {
     });
 
     proxyReq.on('error', (err) => {
-      logger(`[CatRealm] LiveKit HTTP proxy error: ${err.message}`);
-      if (!res.headersSent) res.status(502).send('LiveKit proxy unavailable');
+      logger(`[CatRealm] ${logPrefix} proxy error: ${err.message}`);
+      if (!res.headersSent) res.status(502).send(unavailableMessage);
       else res.end();
     });
 
     req.pipe(proxyReq);
   };
+}
+
+function createLiveKitHttpProxy(logger = console.log) {
+  return createHttpProxy({
+    enabled: isBundledLiveKitProxyEnabled,
+    getTarget: getLiveKitHttpTarget,
+    unavailableMessage: 'LiveKit proxy unavailable',
+    logPrefix: 'LiveKit HTTP',
+  }, logger);
+}
+
+function createLiveKitIngressHttpProxy(logger = console.log) {
+  return createHttpProxy({
+    enabled: isBundledIngressProxyEnabled,
+    getTarget: getIngressHttpTarget,
+    unavailableMessage: 'LiveKit Ingress proxy unavailable',
+    logPrefix: 'LiveKit Ingress HTTP',
+  }, logger);
 }
 
 function attachLiveKitUpgradeProxy(server, logger = console.log) {
@@ -134,4 +168,5 @@ function attachLiveKitUpgradeProxy(server, logger = console.log) {
 module.exports = {
   attachLiveKitUpgradeProxy,
   createLiveKitHttpProxy,
+  createLiveKitIngressHttpProxy,
 };

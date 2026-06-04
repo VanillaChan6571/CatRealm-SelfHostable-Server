@@ -1,6 +1,6 @@
 {
   "name": "catrealm-server",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Self-Hosted Realm - CatRealm",
   "main": "src/index.js",
   "scripts": {
@@ -16,6 +16,7 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.2",
+    "livekit-server-sdk": "^2.15.3",
     "multer": "^2.0.2",
     "sharp": "^0.34.3",
     "socket.io": "^4.7.5"
