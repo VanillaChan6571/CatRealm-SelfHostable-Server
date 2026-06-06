@@ -100,7 +100,17 @@ async function deleteStaleWhipIngresses(client, roomName, participantIdentity) {
     .map((item) => client.deleteIngress(item.ingressId).catch(() => null)));
 }
 
-async function createSelfHostWhipIngressSession({ context, channelId, user }) {
+function normalizeWhipVideoTarget(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const height = Number(raw.height);
+  const fps = Number(raw.fps);
+  return {
+    height: [720, 1080, 1440].includes(height) ? height : null,
+    fps: [24, 48, 60].includes(fps) ? fps : null,
+  };
+}
+
+async function createSelfHostWhipIngressSession({ context, channelId, user, video }) {
   if (!['voice', 'theater'].includes(context)) {
     return { ok: false, status: 400, error: 'Unsupported media context' };
   }
@@ -133,6 +143,7 @@ async function createSelfHostWhipIngressSession({ context, channelId, user }) {
   const userProfile = getUserProfile(user.id);
   const displayName = userProfile?.effective_display_name || userProfile?.display_name || userProfile?.username || user.username || user.id;
   const participantIdentity = `catrealm-ingress:${sanitizeLiveKitIdentityPart(user.id)}:screen:${sanitizeLiveKitIdentityPart(channelId)}`;
+  const videoTarget = normalizeWhipVideoTarget(video);
   const participantMetadata = JSON.stringify({
     mediaRole: 'screen-share-ingress',
     ownerIdentity: String(user.id),
@@ -146,6 +157,7 @@ async function createSelfHostWhipIngressSession({ context, channelId, user }) {
     channelId,
     transport: 'whip',
     transcoding: false,
+    screenShareVideoTarget: videoTarget.height && videoTarget.fps ? videoTarget : null,
   });
 
   await deleteStaleWhipIngresses(ingressClient, roomName, participantIdentity);
@@ -269,9 +281,9 @@ router.post('/token', authenticateToken, async (req, res) => {
 });
 
 router.post('/ingress/whip', authenticateToken, async (req, res) => {
-  const { context, channelId } = req.body || {};
+  const { context, channelId, video } = req.body || {};
   try {
-    const result = await createSelfHostWhipIngressSession({ context, channelId, user: req.user });
+    const result = await createSelfHostWhipIngressSession({ context, channelId, user: req.user, video });
     if (!result.ok) {
       return res.status(result.status || 400).json({
         ok: false,
