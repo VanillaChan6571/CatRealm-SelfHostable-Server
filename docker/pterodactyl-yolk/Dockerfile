@@ -22,6 +22,7 @@ RUN set -eux; \
       go \
       gst-libav \
       gst-plugins-bad \
+      gst-plugins-bad-dev \
       gst-plugins-base \
       gst-plugins-base-dev \
       gst-plugins-good \
@@ -49,6 +50,7 @@ RUN set -eux; \
       gstreamer1.0-tools \
       git \
       golang-go \
+      libgstreamer-plugins-bad1.0-dev \
       libgstreamer-plugins-base1.0-dev \
       libgstreamer1.0-dev \
       make \
