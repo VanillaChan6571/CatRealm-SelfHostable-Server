@@ -322,6 +322,12 @@ function startBundledLiveKit(options = {}) {
   if (ingressEnabled) {
     process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL = publicWhipUrl;
     process.env.MEDIA_LIVEKIT_REDIS_ADDRESS = redisAddress;
+  } else {
+    process.env.MEDIA_LIVEKIT_INGRESS_ENABLED = 'false';
+    delete process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL;
+    delete process.env.MEDIA_LIVEKIT_REDIS_ADDRESS;
+    delete process.env.MEDIA_LIVEKIT_INGRESS_URL;
+    delete process.env.MEDIA_LIVEKIT_INGRESS_PROXY_ENABLED;
   }
   log(`[CatRealm] Starting bundled LiveKit media server on ${internalUrl}`);
   log(`[CatRealm] LiveKit public URL: ${publicUrl}`);

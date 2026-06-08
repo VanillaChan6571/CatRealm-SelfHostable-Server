@@ -61,6 +61,15 @@ function sanitizeLiveKitIdentityPart(value) {
 }
 
 function serializeIngressInfo(info) {
+  const safeState = info.state
+    ? {
+        status: info.state.status ?? null,
+        startedAt: serializeJsonSafe(info.state.startedAt ?? null),
+        endedAt: serializeJsonSafe(info.state.endedAt ?? null),
+        error: info.state.error || '',
+        resourceId: info.state.resourceId || '',
+      }
+    : null;
   return {
     ingressId: info.ingressId || '',
     name: info.name || '',
@@ -75,17 +84,19 @@ function serializeIngressInfo(info) {
     bypassTranscoding: info.bypassTranscoding ?? null,
     reusable: info.reusable ?? null,
     enabled: info.enabled ?? null,
-    state: info.state
-      ? {
-          status: info.state.status ?? null,
-          startedAt: info.state.startedAt ?? null,
-          endedAt: info.state.endedAt ?? null,
-          error: info.state.error || '',
-          resourceId: info.state.resourceId || '',
-          tracks: info.state.tracks ?? [],
-        }
-      : null,
+    state: safeState,
   };
+}
+
+function serializeJsonSafe(value) {
+  if (value === null || value === undefined) return value ?? null;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.map(serializeJsonSafe);
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, serializeJsonSafe(entry)]));
+  }
+  return String(value);
 }
 
 async function deleteStaleWhipIngresses(client, roomName, participantIdentity) {
