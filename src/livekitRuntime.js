@@ -91,8 +91,16 @@ function getPublicWhipUrl(host) {
   return `https://${host}${suffix}/whip`;
 }
 
+function shouldAdvertiseInternalIp(ingressOptions = null) {
+  return isTruthy(
+    process.env.LIVEKIT_ADVERTISE_INTERNAL_IP || process.env.MEDIA_LIVEKIT_ADVERTISE_INTERNAL_IP,
+    !!ingressOptions,
+  );
+}
+
 function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressOptions = null) {
   const livekitUdpEnd = Math.max(udpStart + 1, udpEnd);
+  const advertiseInternalIp = shouldAdvertiseInternalIp(ingressOptions);
   const lines = [
     `port: ${signalingPort}`,
     'log_level: info',
@@ -101,6 +109,7 @@ function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPor
     `  port_range_start: ${udpStart}`,
     `  port_range_end: ${livekitUdpEnd}`,
     '  use_external_ip: true',
+    ...(advertiseInternalIp ? ['  advertise_internal_ip: true'] : []),
     'keys:',
     `  ${yamlQuote(apiKey)}: ${yamlQuote(apiSecret)}`,
   ];
@@ -307,10 +316,12 @@ function startBundledLiveKit(options = {}) {
     ingressEnabled = false;
   }
 
-  writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressEnabled ? {
+  const liveKitIngressOptions = ingressEnabled ? {
     redisAddress,
     whipBaseUrl: publicWhipUrl,
-  } : null);
+  } : null;
+  const advertiseInternalIp = shouldAdvertiseInternalIp(liveKitIngressOptions);
+  writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, liveKitIngressOptions);
 
   process.env.CATREALM_BUNDLED_LIVEKIT_STARTED = 'true';
   process.env.MEDIA_LIVEKIT_ENABLED = 'true';
@@ -339,6 +350,9 @@ function startBundledLiveKit(options = {}) {
     log('[CatRealm] LiveKit UDP single-port mode: writing exclusive LiveKit range internally to avoid LiveKit single-port startup panic.');
   }
   if (ingressEnabled) {
+    if (advertiseInternalIp) {
+      log('[CatRealm] LiveKit media: advertising internal ICE candidates for bundled ingress');
+    }
     log(`[CatRealm] LiveKit WHIP public URL: ${publicWhipUrl}`);
   }
 
