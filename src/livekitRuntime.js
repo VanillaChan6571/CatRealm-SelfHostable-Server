@@ -91,7 +91,46 @@ function getPublicWhipUrl(host) {
   return `https://${host}${suffix}/whip`;
 }
 
-function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressOptions = null) {
+function parseLiveKitVersion(output) {
+  const match = String(output || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    raw: String(output || '').trim(),
+  };
+}
+
+function getLiveKitServerVersion() {
+  const result = spawnSync('livekit-server', ['--version'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) return null;
+  const raw = `${result.stdout || ''}${result.stderr || ''}`.trim();
+  return parseLiveKitVersion(raw) || { major: 0, minor: 0, patch: 0, raw };
+}
+
+function liveKitSupportsAdvertiseInternalIp(version) {
+  if (!version) return false;
+  if (version.major > 1) return true;
+  if (version.major < 1) return false;
+  if (version.minor > 13) return true;
+  if (version.minor < 13) return false;
+  return version.patch >= 0;
+}
+
+function shouldAdvertiseInternalIp(ingressOptions = null, liveKitVersion = null) {
+  if (!ingressOptions) return false;
+  const requested = isTruthy(
+    process.env.LIVEKIT_ADVERTISE_INTERNAL_IP || process.env.MEDIA_LIVEKIT_ADVERTISE_INTERNAL_IP,
+    true,
+  );
+  return requested && liveKitSupportsAdvertiseInternalIp(liveKitVersion);
+}
+
+function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressOptions = null, advertiseInternalIp = false) {
   const livekitUdpEnd = Math.max(udpStart + 1, udpEnd);
   const lines = [
     `port: ${signalingPort}`,
@@ -101,6 +140,7 @@ function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPor
     `  port_range_start: ${udpStart}`,
     `  port_range_end: ${livekitUdpEnd}`,
     '  use_external_ip: true',
+    ...(advertiseInternalIp ? ['  advertise_internal_ip: true'] : []),
     'keys:',
     `  ${yamlQuote(apiKey)}: ${yamlQuote(apiSecret)}`,
   ];
@@ -125,7 +165,7 @@ function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPor
 }
 
 function liveKitServerAvailable() {
-  return spawnSync('livekit-server', ['--version'], { stdio: 'ignore' }).status === 0;
+  return !!getLiveKitServerVersion();
 }
 
 function commandAvailable(command, args = ['--version']) {
@@ -281,7 +321,8 @@ function startBundledLiveKit(options = {}) {
     return null;
   }
 
-  if (!liveKitServerAvailable()) {
+  const liveKitVersion = getLiveKitServerVersion();
+  if (!liveKitVersion) {
     error('[CatRealm] Cannot start bundled LiveKit: livekit-server was not found in PATH. Select the CatRealm Runtime image that includes LiveKit.');
     return null;
   }
@@ -311,7 +352,8 @@ function startBundledLiveKit(options = {}) {
     redisAddress,
     whipBaseUrl: publicWhipUrl,
   } : null;
-  writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, liveKitIngressOptions);
+  const advertiseInternalIp = shouldAdvertiseInternalIp(liveKitIngressOptions, liveKitVersion);
+  writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, liveKitIngressOptions, advertiseInternalIp);
 
   process.env.CATREALM_BUNDLED_LIVEKIT_STARTED = 'true';
   process.env.MEDIA_LIVEKIT_ENABLED = 'true';
@@ -340,6 +382,11 @@ function startBundledLiveKit(options = {}) {
     log('[CatRealm] LiveKit UDP single-port mode: writing exclusive LiveKit range internally to avoid LiveKit single-port startup panic.');
   }
   if (ingressEnabled) {
+    if (advertiseInternalIp) {
+      log('[CatRealm] LiveKit media: advertising internal ICE candidates for bundled ingress');
+    } else if (isTruthy(process.env.LIVEKIT_ADVERTISE_INTERNAL_IP || process.env.MEDIA_LIVEKIT_ADVERTISE_INTERNAL_IP, true)) {
+      log(`[CatRealm] LiveKit media: internal ICE candidate advertisement unavailable in ${(liveKitVersion.raw || 'this livekit-server build')}`);
+    }
     log(`[CatRealm] LiveKit WHIP public URL: ${publicWhipUrl}`);
   }
 
