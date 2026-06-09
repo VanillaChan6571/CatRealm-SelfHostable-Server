@@ -130,7 +130,20 @@ function shouldAdvertiseInternalIp(ingressOptions = null, liveKitVersion = null)
   return requested && liveKitSupportsAdvertiseInternalIp(liveKitVersion);
 }
 
-function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressOptions = null, advertiseInternalIp = false) {
+function liveKitSupportsSkipExternalIpValidation(version) {
+  return liveKitSupportsAdvertiseInternalIp(version);
+}
+
+function shouldSkipExternalIpValidation(ingressOptions = null, liveKitVersion = null) {
+  if (!ingressOptions) return false;
+  const requested = isTruthy(
+    process.env.LIVEKIT_SKIP_EXTERNAL_IP_VALIDATION || process.env.MEDIA_LIVEKIT_SKIP_EXTERNAL_IP_VALIDATION,
+    true,
+  );
+  return requested && liveKitSupportsSkipExternalIpValidation(liveKitVersion);
+}
+
+function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressOptions = null, advertiseInternalIp = false, skipExternalIpValidation = false) {
   const livekitUdpEnd = Math.max(udpStart + 1, udpEnd);
   const lines = [
     `port: ${signalingPort}`,
@@ -141,6 +154,7 @@ function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPor
     `  port_range_end: ${livekitUdpEnd}`,
     '  use_external_ip: true',
     ...(advertiseInternalIp ? ['  advertise_internal_ip: true'] : []),
+    ...(skipExternalIpValidation ? ['  skip_external_ip_validation: true'] : []),
     'keys:',
     `  ${yamlQuote(apiKey)}: ${yamlQuote(apiSecret)}`,
   ];
@@ -353,7 +367,19 @@ function startBundledLiveKit(options = {}) {
     whipBaseUrl: publicWhipUrl,
   } : null;
   const advertiseInternalIp = shouldAdvertiseInternalIp(liveKitIngressOptions, liveKitVersion);
-  writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, liveKitIngressOptions, advertiseInternalIp);
+  const skipExternalIpValidation = shouldSkipExternalIpValidation(liveKitIngressOptions, liveKitVersion);
+  writeLiveKitConfig(
+    configPath,
+    apiKey,
+    apiSecret,
+    signalingPort,
+    tcpPort,
+    udpStart,
+    udpEnd,
+    liveKitIngressOptions,
+    advertiseInternalIp,
+    skipExternalIpValidation,
+  );
 
   process.env.CATREALM_BUNDLED_LIVEKIT_STARTED = 'true';
   process.env.MEDIA_LIVEKIT_ENABLED = 'true';
@@ -386,6 +412,11 @@ function startBundledLiveKit(options = {}) {
       log('[CatRealm] LiveKit media: advertising internal ICE candidates for bundled ingress');
     } else if (isTruthy(process.env.LIVEKIT_ADVERTISE_INTERNAL_IP || process.env.MEDIA_LIVEKIT_ADVERTISE_INTERNAL_IP, true)) {
       log(`[CatRealm] LiveKit media: internal ICE candidate advertisement unavailable in ${(liveKitVersion.raw || 'this livekit-server build')}`);
+    }
+    if (skipExternalIpValidation) {
+      log('[CatRealm] LiveKit media: skipping external IP validation for bundled ingress');
+    } else if (isTruthy(process.env.LIVEKIT_SKIP_EXTERNAL_IP_VALIDATION || process.env.MEDIA_LIVEKIT_SKIP_EXTERNAL_IP_VALIDATION, true)) {
+      log(`[CatRealm] LiveKit media: external IP validation skip unavailable in ${(liveKitVersion.raw || 'this livekit-server build')}`);
     }
     log(`[CatRealm] LiveKit WHIP public URL: ${publicWhipUrl}`);
   }
