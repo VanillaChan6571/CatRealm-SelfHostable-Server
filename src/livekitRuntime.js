@@ -144,14 +144,18 @@ function shouldSkipExternalIpValidation(ingressOptions = null, liveKitVersion = 
 }
 
 function writeLiveKitConfig(configPath, apiKey, apiSecret, signalingPort, tcpPort, udpStart, udpEnd, ingressOptions = null, advertiseInternalIp = false, skipExternalIpValidation = false) {
-  const livekitUdpEnd = Math.max(udpStart + 1, udpEnd);
+  const singleUdpPort = udpStart === udpEnd;
   const lines = [
     `port: ${signalingPort}`,
     'log_level: info',
     'rtc:',
     `  tcp_port: ${tcpPort}`,
-    `  port_range_start: ${udpStart}`,
-    `  port_range_end: ${livekitUdpEnd}`,
+    ...(singleUdpPort
+      ? [`  udp_port: ${udpStart}`]
+      : [
+        `  port_range_start: ${udpStart}`,
+        `  port_range_end: ${udpEnd}`,
+      ]),
     '  use_external_ip: true',
     ...(advertiseInternalIp ? ['  advertise_internal_ip: true'] : []),
     ...(skipExternalIpValidation ? ['  skip_external_ip_validation: true'] : []),
@@ -405,7 +409,7 @@ function startBundledLiveKit(options = {}) {
   if (udpEnd > udpStart) {
     log(`[CatRealm] LiveKit UDP range requires every UDP port from ${udpStart} through ${udpEnd} to be allocated in Docker/Pterodactyl.`);
   } else {
-    log('[CatRealm] LiveKit UDP single-port mode: writing exclusive LiveKit range internally to avoid LiveKit single-port startup panic.');
+    log('[CatRealm] LiveKit UDP single-port mode: using LiveKit UDP mux on the allocated port.');
   }
   if (ingressEnabled) {
     if (advertiseInternalIp) {
