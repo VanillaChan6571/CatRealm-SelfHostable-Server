@@ -14,6 +14,7 @@ const {
   readLiveKitIngressConfig,
 } = require('../lib/mediaConfig');
 const { requestFederatedMediaToken } = require('../lib/centralMediaFallback');
+const { getHostUdpBufferLimit } = require('../lib/hostNetworkLimits');
 
 const LIVEKIT_INGRESS_INPUT_WHIP = 1; // @livekit/protocol IngressInput.WHIP_INPUT
 
@@ -115,8 +116,16 @@ function normalizeWhipVideoTarget(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const height = Number(raw.height);
   const fps = Number(raw.fps);
+  let normalizedHeight = [720, 1080, 1440].includes(height) ? height : null;
+  // Defense in depth: if the host's UDP buffers are at the stock limit, clamp
+  // the height server-side too (the client should already have clamped via the
+  // capability's ingress.maxHeight, but a stale/old client must not bypass it).
+  const maxHeight = getHostUdpBufferLimit().maxHeight;
+  if (maxHeight && normalizedHeight && normalizedHeight > maxHeight) {
+    normalizedHeight = maxHeight;
+  }
   return {
-    height: [720, 1080, 1440].includes(height) ? height : null,
+    height: normalizedHeight,
     fps: [24, 48, 60].includes(fps) ? fps : null,
   };
 }

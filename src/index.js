@@ -7,6 +7,8 @@ const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
 const { startBundledLiveKit } = require('./livekitRuntime');
+// TEMPORARY: dev WHIP load-test endpoint (gated by CATREALM_DEV_WHIP_INGRESS).
+const { ensureDevWhipIngress } = require('./lib/devWhipIngress');
 const { attachLiveKitUpgradeProxy, createLiveKitHttpProxy, createLiveKitIngressHttpProxy } = require('./livekitProxy');
 
 function isTruthy(value, fallback = false) {
@@ -657,6 +659,8 @@ async function start() {
     pteroLog(`[CatRealm] Server running on port ${PORT}`);
     pteroLog(`[CatRealm] Server name: ${process.env.SERVER_NAME || 'CatRealm Server'}`);
     pteroLog(`[CatRealm] Registration: ${process.env.REGISTRATION_OPEN === 'false' ? 'CLOSED' : 'OPEN'}`);
+    // TEMPORARY: ensure a reusable dev WHIP endpoint when CATREALM_DEV_WHIP_INGRESS=true.
+    void ensureDevWhipIngress({ log: pteroLog });
   });
 
   // ── Graceful shutdown ───────────────────────────────────────────────────────

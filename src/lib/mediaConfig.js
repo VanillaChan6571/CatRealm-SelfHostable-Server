@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { randomUUID } = require('crypto');
 const db = require('../db');
+const { getHostUdpBufferLimit } = require('./hostNetworkLimits');
 
 const DEFAULT_TOKEN_TTL_SECONDS = 10 * 60;
 
@@ -96,6 +97,13 @@ function getMediaCapability(contexts) {
     ? ['voice', 'theater']
     : [];
   const hasLiveKitPath = config.enabled || liveKitFallbackContexts.length > 0;
+  // Only the host that actually runs the bundled ingress is gated by its own
+  // kernel UDP buffers; a remote LiveKit/ingress has its own (unknown) limits.
+  const ingressRunsLocally = process.env.CATREALM_BUNDLED_LIVEKIT_STARTED === 'true'
+    || isTruthy(process.env.HOST_LIVEKIT_MEDIA || process.env.CATREALM_HOST_LIVEKIT_MEDIA, false);
+  const hostLimit = (ingress.enabled && ingressRunsLocally)
+    ? getHostUdpBufferLimit()
+    : { available: false, constrained: false, maxHeight: null };
   return {
     version: 1,
     provider: config.provider,
@@ -115,6 +123,11 @@ function getMediaCapability(contexts) {
     ingress: {
       whip: ingress.enabled,
       publicUrl: ingress.enabled ? ingress.publicWhipUrl : null,
+      // Max native screen-share height the host can carry. null = unlimited.
+      // Set to 720 when the host's net.core.rmem_max is at the stock default,
+      // because a 1080p/1440p keyframe burst overflows the small UDP socket.
+      maxHeight: hostLimit.maxHeight ?? null,
+      hostLimited: !!hostLimit.constrained,
     },
     privacy: {
       mediaPath: config.enabled ? 'sfu' : (liveKitFallbackContexts.length > 0 ? 'central-sfu' : 'unavailable'),

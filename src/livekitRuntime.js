@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
+const { initHostUdpBufferLimit, getHostUdpBufferWarningLines } = require('./lib/hostNetworkLimits');
 
 const repoRoot = path.join(__dirname, '..');
 const dataDir = path.join(repoRoot, 'data');
@@ -423,6 +424,13 @@ function startBundledLiveKit(options = {}) {
       log(`[CatRealm] LiveKit media: external IP validation skip unavailable in ${(liveKitVersion.raw || 'this livekit-server build')}`);
     }
     log(`[CatRealm] LiveKit WHIP public URL: ${publicWhipUrl}`);
+    // Warn (loudly) if the host's kernel UDP buffers are too small for
+    // high-bitrate WHIP ingress — this is the difference between smooth 1440p
+    // and a frozen ~2-5 fps stream. When limited, native share is capped to 720p.
+    // The probe is async (measures a real socket), so log once it settles.
+    initHostUdpBufferLimit()
+      .then(() => { for (const line of getHostUdpBufferWarningLines()) error(line); })
+      .catch(() => {});
   }
 
   livekitChild = spawn('livekit-server', ['--config', configPath], {
