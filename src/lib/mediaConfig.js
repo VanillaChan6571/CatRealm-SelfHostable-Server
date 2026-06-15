@@ -61,6 +61,7 @@ function readLiveKitConfig() {
 function readLiveKitIngressConfig() {
   const media = readLiveKitConfig();
   const enabled = media.enabled && isTruthy(process.env.MEDIA_LIVEKIT_INGRESS_ENABLED, false);
+  const simulcastExperiment = isTruthy(process.env.CATREALM_EXPERIMENTAL_WHIP_SIMULCAST, false);
   const publicWhipUrl = (
     process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL ||
     process.env.LIVEKIT_WHIP_PUBLIC_URL ||
@@ -71,6 +72,7 @@ function readLiveKitIngressConfig() {
     enabled: enabled && !!publicWhipUrl,
     configured: media.configured && !!publicWhipUrl,
     publicWhipUrl,
+    simulcastExperiment,
   };
 }
 
@@ -123,6 +125,7 @@ function getMediaCapability(contexts) {
     ingress: {
       whip: ingress.enabled,
       publicUrl: ingress.enabled ? ingress.publicWhipUrl : null,
+      simulcastExperiment: ingress.enabled && ingress.simulcastExperiment,
       // Max native screen-share height the host can carry. null = unlimited.
       // Set to 720 when the host's net.core.rmem_max is at the stock default,
       // because a 1080p/1440p keyframe burst overflows the small UDP socket.
@@ -236,6 +239,7 @@ module.exports = {
   createMediaToken,
   getMediaCapability,
   getIngressClient,
+  getLiveKitServerSdk,
   readLiveKitIngressConfig,
   getSelfHostServerId,
   readLiveKitConfig,
