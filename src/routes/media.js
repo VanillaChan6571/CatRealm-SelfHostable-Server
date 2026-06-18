@@ -127,6 +127,14 @@ async function deleteStaleWhipIngresses(client, roomName, participantIdentity) {
     .map((item) => client.deleteIngress(item.ingressId).catch(() => null)));
 }
 
+function getWhipIngressRoomName(context, channelId) {
+  return `${context}:${getSelfHostServerId()}:${channelId}`;
+}
+
+function getWhipIngressParticipantIdentity(userId, channelId) {
+  return `catrealm-ingress:${sanitizeLiveKitIdentityPart(userId)}:screen:${sanitizeLiveKitIdentityPart(channelId)}`;
+}
+
 function normalizeWhipVideoTarget(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const height = Number(raw.height);
@@ -276,10 +284,10 @@ async function createSelfHostWhipIngressSession({ context, channelId, user, vide
   }
 
   const serverId = getSelfHostServerId();
-  const roomName = `${context}:${serverId}:${channelId}`;
+  const roomName = getWhipIngressRoomName(context, channelId);
   const userProfile = getUserProfile(user.id);
   const displayName = userProfile?.effective_display_name || userProfile?.display_name || userProfile?.username || user.username || user.id;
-  const participantIdentity = `catrealm-ingress:${sanitizeLiveKitIdentityPart(user.id)}:screen:${sanitizeLiveKitIdentityPart(channelId)}`;
+  const participantIdentity = getWhipIngressParticipantIdentity(user.id, channelId);
   const videoTarget = normalizeWhipVideoTarget(video);
   const transcodingPlan = buildWhipIngressTranscodingPlan({ ingressConfig, videoTarget });
   const buildParticipantMetadata = (plan) => JSON.stringify({
@@ -355,6 +363,61 @@ async function createSelfHostWhipIngressSession({ context, channelId, user, vide
       publicBaseUrl: ingressConfig.publicWhipUrl,
     },
   };
+}
+
+async function releaseSelfHostWhipIngressSession({ context, channelId, ingressId, user }) {
+  if (!['voice', 'theater'].includes(context)) {
+    return { ok: false, status: 400, error: 'Unsupported media context' };
+  }
+  if (!channelId) {
+    return { ok: false, status: 400, error: 'Missing channelId' };
+  }
+  if (!ingressId || typeof ingressId !== 'string') {
+    return { ok: false, status: 400, error: 'Missing ingressId' };
+  }
+
+  const ingressConfig = readLiveKitIngressConfig();
+  const ingressClient = getIngressClient();
+  if (!ingressConfig.enabled || !ingressClient) {
+    return { ok: false, status: 503, error: 'WHIP ingress unavailable', capability: getMediaCapability(getSelfHostMediaContexts()) };
+  }
+
+  const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
+  if (!channel || channel.type !== context) {
+    return { ok: false, status: 404, error: `Not a ${context} channel` };
+  }
+
+  const roomName = getWhipIngressRoomName(context, channelId);
+  const participantIdentity = getWhipIngressParticipantIdentity(user.id, channelId);
+  let existing = [];
+  try {
+    existing = await ingressClient.listIngress({ roomName });
+  } catch (err) {
+    return {
+      ok: false,
+      status: 502,
+      error: `Failed to list WHIP ingress: ${err?.message || String(err)}`,
+    };
+  }
+
+  const match = existing.find((item) => (
+    item?.ingressId === ingressId
+    && item?.participantIdentity === participantIdentity
+  ));
+  if (!match) {
+    return { ok: true, deleted: false, ingressId, roomName };
+  }
+
+  try {
+    await ingressClient.deleteIngress(ingressId);
+    return { ok: true, deleted: true, ingressId, roomName };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 502,
+      error: `Failed to delete WHIP ingress: ${err?.message || String(err)}`,
+    };
+  }
 }
 
 function createSelfHostMediaSession({ context, channelId, user }) {
@@ -471,10 +534,32 @@ router.post('/ingress/whip', authenticateToken, async (req, res) => {
   }
 });
 
+router.post('/ingress/whip/release', authenticateToken, async (req, res) => {
+  const { context, channelId, ingressId } = req.body || {};
+  try {
+    const result = await releaseSelfHostWhipIngressSession({ context, channelId, ingressId, user: req.user });
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        ok: false,
+        error: result.error,
+        capability: getMediaCapability(getSelfHostMediaContexts()),
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({
+      ok: false,
+      error: `Failed to release WHIP ingress: ${err?.message || String(err)}`,
+      capability: getMediaCapability(getSelfHostMediaContexts()),
+    });
+  }
+});
+
 module.exports = {
   router,
   createSelfHostMediaSession,
   createSelfHostWhipIngressSession,
+  releaseSelfHostWhipIngressSession,
   createSelfHostMediaSessionWithFallback,
   getSelfHostMediaContexts,
 };
