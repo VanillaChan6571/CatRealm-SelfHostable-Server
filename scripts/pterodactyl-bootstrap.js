@@ -1,6 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+
+require('dotenv').config();
+
 const { startBundledLiveKit } = require('../src/livekitRuntime');
 
 const repoRoot = path.join(__dirname, '..');

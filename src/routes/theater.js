@@ -21,6 +21,13 @@ const {
   ensureCacheDir,
   THEATER_BASE_DIR,
 } = require('../lib/theaterDownload');
+const {
+  getTheaterUploadHardMaxBytes,
+  getTheaterUploadHardMaxMb,
+  getTheaterUploadMaxBytes,
+  getTheaterUploadMaxMb,
+  getTheaterUploadReserveBytes,
+} = require('../lib/theaterUploadLimits');
 const { broadcastTheaterQueueUpdate } = require('../socket/handler');
 
 // ── YouTube helpers ───────────────────────────────────────────────────────────
@@ -221,28 +228,219 @@ function normalizeTheaterPlaybackState(channelId, state) {
 
 const ALLOWED_VIDEO_MIMES = [
   'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
-  'video/x-matroska', 'video/avi', 'video/x-msvideo',
+  'video/x-matroska', 'video/matroska', 'video/avi', 'video/x-msvideo',
 ];
 
-const videoUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, _file, cb) => {
-      const dir = ensureCacheDir(req.params.channelId);
-      cb(null, dir);
+const ALLOWED_VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.ogg', '.ogv', '.mov', '.m4v', '.mkv', '.avi']);
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${Math.round(value * 10) / 10} ${units[unit]}`;
+}
+
+function parseUploadSize(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) return null;
+  return parsed;
+}
+
+function isRealmOwner(user) {
+  return !!(user?.is_owner || user?.role === 'owner');
+}
+
+function isAllowedVideoUpload(file) {
+  const mimetype = String(file?.mimetype || '').toLowerCase();
+  const originalName = String(file?.originalname || file?.name || '');
+  const ext = path.extname(originalName).toLowerCase();
+
+  if (ALLOWED_VIDEO_MIMES.includes(mimetype)) return true;
+  return (mimetype === 'application/octet-stream' || !mimetype) && ALLOWED_VIDEO_EXTENSIONS.has(ext);
+}
+
+async function getAvailableBytes(dir) {
+  if (typeof fs.promises.statfs !== 'function') return null;
+  try {
+    const stats = await fs.promises.statfs(dir);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch (err) {
+    pteroLog(`[Theater] Failed to inspect upload storage for ${dir}: ${err?.message || err}`);
+    return null;
+  }
+}
+
+async function validateTheaterUploadCapacity(channelId, fileSize, options = {}) {
+  const allowLimitBypass = !!options.allowLimitBypass;
+  const canBypassLimit = !!options.canBypassLimit;
+  const limitBytes = getTheaterUploadMaxBytes();
+  const limitMb = getTheaterUploadMaxMb();
+  const hardLimitBytes = getTheaterUploadHardMaxBytes();
+  const hardLimitMb = getTheaterUploadHardMaxMb();
+  if (fileSize > hardLimitBytes) {
+    return {
+      ok: false,
+      status: 413,
+      body: {
+        error: `Video file is too large. Server hard limit is ${hardLimitMb} MB.`,
+        code: 'THEATER_UPLOAD_HARD_LIMIT',
+        limitBytes,
+        limitMb,
+        hardLimitBytes,
+        hardLimitMb,
+        canBypass: false,
+      },
+    };
+  }
+  if (fileSize > limitBytes && !allowLimitBypass) {
+    return {
+      ok: false,
+      status: 413,
+      body: {
+        error: `Video file is too large. Maximum Theater upload size is ${limitMb} MB.`,
+        code: 'THEATER_UPLOAD_TOO_LARGE',
+        limitBytes,
+        limitMb,
+        hardLimitBytes,
+        hardLimitMb,
+        canBypass: canBypassLimit,
+      },
+    };
+  }
+
+  const dir = ensureCacheDir(channelId);
+  const reserveBytes = getTheaterUploadReserveBytes();
+  const availableBytes = await getAvailableBytes(dir);
+  if (availableBytes !== null && availableBytes < fileSize + reserveBytes) {
+    return {
+      ok: false,
+      status: 507,
+      body: {
+        error: `Not enough server storage for this upload. Available: ${formatBytes(availableBytes)}.`,
+        code: 'THEATER_UPLOAD_STORAGE_LOW',
+        availableBytes,
+        reserveBytes,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    body: {
+      ok: true,
+      limitBytes,
+      limitMb,
+      hardLimitBytes,
+      hardLimitMb,
+      limitBypassed: allowLimitBypass && fileSize > limitBytes,
+      availableBytes,
+      reserveBytes,
     },
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase() || '.mp4';
-      cb(null, `${randomUUID()}${ext}`);
+  };
+}
+
+function requireTheaterQueueUploadAccess(req, res) {
+  const channel = requireTheaterChannel(req, res);
+  if (!channel) return null;
+  if (!requireViewChannels(req, res, channel.id)) return null;
+
+  const settings = getTheaterSettings(channel.id);
+  if (!canControlTheater(req.user, channel.id) && !settings.theater_open_queuing) {
+    res.status(403).json({ error: 'Missing permission: play_in_theater' });
+    return null;
+  }
+
+  return { channel, settings };
+}
+
+function createVideoUpload(options = {}) {
+  const bypassConfiguredLimit = !!options.bypassConfiguredLimit;
+  return multer({
+    storage: multer.diskStorage({
+      destination: (req, _file, cb) => {
+        try {
+          cb(null, ensureCacheDir(req.params.channelId));
+        } catch (err) {
+          cb(err);
+        }
+      },
+      filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase() || '.mp4';
+        cb(null, `${randomUUID()}${ext}`);
+      },
+    }),
+    limits: { fileSize: bypassConfiguredLimit ? getTheaterUploadHardMaxBytes() : getTheaterUploadMaxBytes() },
+    fileFilter: (_req, file, cb) => {
+      if (!isAllowedVideoUpload(file)) {
+        const err = new Error('Invalid file type - only video files allowed');
+        err.code = 'THEATER_UPLOAD_INVALID_TYPE';
+        return cb(err);
+      }
+      cb(null, true);
     },
-  }),
-  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2 GB
-  fileFilter: (_req, file, cb) => {
-    if (!ALLOWED_VIDEO_MIMES.includes(file.mimetype)) {
-      return cb(new Error('Invalid file type — only video files allowed'));
+  });
+}
+
+function sendTheaterUploadError(res, err, options = {}) {
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+    const bypassConfiguredLimit = !!options.bypassConfiguredLimit;
+    const limitBytes = bypassConfiguredLimit ? getTheaterUploadHardMaxBytes() : getTheaterUploadMaxBytes();
+    const limitMb = bypassConfiguredLimit ? getTheaterUploadHardMaxMb() : getTheaterUploadMaxMb();
+    const code = bypassConfiguredLimit ? 'THEATER_UPLOAD_HARD_LIMIT' : 'THEATER_UPLOAD_TOO_LARGE';
+    return res.status(413).json({
+      error: bypassConfiguredLimit
+        ? `Video file is too large. Server hard limit is ${limitMb} MB.`
+        : `Video file is too large. Maximum Theater upload size is ${limitMb} MB.`,
+      code,
+      limitBytes,
+      limitMb,
+      canBypass: false,
+    });
+  }
+  if (err?.code === 'THEATER_UPLOAD_INVALID_TYPE') {
+    return res.status(415).json({
+      error: 'Invalid file type - only video files allowed',
+      code: 'THEATER_UPLOAD_INVALID_TYPE',
+    });
+  }
+  pteroLog(`[Theater] Upload failed before queue insert: ${err?.message || err}`);
+  return res.status(400).json({ error: err?.message || 'Upload failed' });
+}
+
+async function prepareTheaterVideoUpload(req, res, next) {
+  const access = requireTheaterQueueUploadAccess(req, res);
+  if (!access) return;
+  req.theaterUpload = access;
+  const bypassConfiguredLimit = req.get('x-catrealm-bypass-upload-limit') === 'true' && isRealmOwner(req.user);
+  req.theaterUploadBypassLimit = bypassConfiguredLimit;
+
+  const declaredSizeHeader = req.get('x-catrealm-file-size');
+  if (declaredSizeHeader !== undefined) {
+    const declaredSize = parseUploadSize(declaredSizeHeader);
+    if (declaredSize === null) {
+      return res.status(400).json({
+        error: 'Invalid upload size',
+        code: 'THEATER_UPLOAD_INVALID_SIZE',
+      });
     }
-    cb(null, true);
-  },
-});
+    const capacity = await validateTheaterUploadCapacity(access.channel.id, declaredSize, {
+      allowLimitBypass: bypassConfiguredLimit,
+      canBypassLimit: isRealmOwner(req.user),
+    });
+    if (!capacity.ok) return res.status(capacity.status).json(capacity.body);
+  }
+
+  const upload = createVideoUpload({ bypassConfiguredLimit }).single('video');
+  upload(req, res, (err) => {
+    if (err) return sendTheaterUploadError(res, err, { bypassConfiguredLimit });
+    next();
+  });
+}
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -497,18 +695,61 @@ router.post('/:channelId/queue', async (req, res) => {
   res.status(201).json({ id: itemId, status: 'pending' });
 });
 
-// POST /:channelId/queue/upload — upload video file
-router.post('/:channelId/queue/upload', videoUpload.single('video'), async (req, res) => {
-  const channel = requireTheaterChannel(req, res);
-  if (!channel) return;
-  if (!requireViewChannels(req, res, channel.id)) return;
+// POST /:channelId/queue/upload/check - validate upload before sending the file body
+router.post('/:channelId/queue/upload/check', async (req, res) => {
+  const access = requireTheaterQueueUploadAccess(req, res);
+  if (!access) return;
 
-  const settings = getTheaterSettings(channel.id);
-  if (!canControlTheater(req.user, channel.id) && !settings.theater_open_queuing) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(403).json({ error: 'Missing permission: play_in_theater' });
+  const fileSize = parseUploadSize(req.body?.fileSize);
+  if (fileSize === null) {
+    return res.status(400).json({
+      error: 'fileSize required',
+      code: 'THEATER_UPLOAD_INVALID_SIZE',
+    });
   }
+
+  if (!isAllowedVideoUpload({
+    mimetype: req.body?.mime,
+    originalname: req.body?.fileName,
+    name: req.body?.fileName,
+  })) {
+    return res.status(415).json({
+      error: 'Invalid file type - only video files allowed',
+      code: 'THEATER_UPLOAD_INVALID_TYPE',
+    });
+  }
+
+  const ownerCanBypassLimit = isRealmOwner(req.user);
+  const bypassConfiguredLimit = req.body?.bypassLimit === true && ownerCanBypassLimit;
+  const capacity = await validateTheaterUploadCapacity(access.channel.id, fileSize, {
+    allowLimitBypass: bypassConfiguredLimit,
+    canBypassLimit: ownerCanBypassLimit,
+  });
+  if (!capacity.ok) return res.status(capacity.status).json(capacity.body);
+  return res.json(capacity.body);
+});
+
+// POST /:channelId/queue/upload - upload video file
+router.post('/:channelId/queue/upload', (req, res, next) => {
+  prepareTheaterVideoUpload(req, res, next).catch((err) => sendTheaterUploadError(res, err, {
+    bypassConfiguredLimit: req.theaterUploadBypassLimit,
+  }));
+}, async (req, res) => {
+  const access = req.theaterUpload || requireTheaterQueueUploadAccess(req, res);
+  if (!access) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return;
+  }
+  const { channel, settings } = access;
   if (!req.file) return res.status(400).json({ error: 'Video file required' });
+  const capacity = await validateTheaterUploadCapacity(channel.id, req.file.size, {
+    allowLimitBypass: !!req.theaterUploadBypassLimit,
+    canBypassLimit: isRealmOwner(req.user),
+  });
+  if (!capacity.ok) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(capacity.status).json(capacity.body);
+  }
 
   const maxPos = db.prepare('SELECT MAX(position) as m FROM theater_queue WHERE channel_id = ?').get(channel.id)?.m ?? -1;
   const itemId = randomUUID();

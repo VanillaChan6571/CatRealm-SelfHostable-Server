@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { randomUUID } = require('crypto');
 const db = require('../db');
+const { getHostUdpBufferLimit } = require('./hostNetworkLimits');
 
 const DEFAULT_TOKEN_TTL_SECONDS = 10 * 60;
 
@@ -57,6 +58,24 @@ function readLiveKitConfig() {
   };
 }
 
+function readLiveKitIngressConfig() {
+  const media = readLiveKitConfig();
+  const enabled = media.enabled && isTruthy(process.env.MEDIA_LIVEKIT_INGRESS_ENABLED, false);
+  const simulcastExperiment = isTruthy(process.env.CATREALM_EXPERIMENTAL_WHIP_SIMULCAST, false);
+  const publicWhipUrl = (
+    process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL ||
+    process.env.LIVEKIT_WHIP_PUBLIC_URL ||
+    ''
+  ).trim();
+
+  return {
+    enabled: enabled && !!publicWhipUrl,
+    configured: media.configured && !!publicWhipUrl,
+    publicWhipUrl,
+    simulcastExperiment,
+  };
+}
+
 function getSelfHostServerId() {
   const fromEnv = (process.env.CATREALM_SERVER_ID || process.env.SERVER_ID || '').trim();
   if (fromEnv) return fromEnv.replace(/[^A-Za-z0-9._:-]/g, '_');
@@ -75,10 +94,18 @@ function getSelfHostServerId() {
 
 function getMediaCapability(contexts) {
   const config = readLiveKitConfig();
+  const ingress = readLiveKitIngressConfig();
   const liveKitFallbackContexts = !config.enabled && config.centralLiveKitFallback
     ? ['voice', 'theater']
     : [];
   const hasLiveKitPath = config.enabled || liveKitFallbackContexts.length > 0;
+  // Only the host that actually runs the bundled ingress is gated by its own
+  // kernel UDP buffers; a remote LiveKit/ingress has its own (unknown) limits.
+  const ingressRunsLocally = process.env.CATREALM_BUNDLED_LIVEKIT_STARTED === 'true'
+    || isTruthy(process.env.HOST_LIVEKIT_MEDIA || process.env.CATREALM_HOST_LIVEKIT_MEDIA, false);
+  const hostLimit = (ingress.enabled && ingressRunsLocally)
+    ? getHostUdpBufferLimit()
+    : { available: false, constrained: false, maxHeight: null };
   return {
     version: 1,
     provider: config.provider,
@@ -95,6 +122,16 @@ function getMediaCapability(contexts) {
     },
     participantIdentity: 'catrealm-user-id',
     trackSources: Object.values(TRACK_SOURCES),
+    ingress: {
+      whip: ingress.enabled,
+      publicUrl: ingress.enabled ? ingress.publicWhipUrl : null,
+      simulcastExperiment: ingress.enabled && ingress.simulcastExperiment,
+      // Max native screen-share height the host can carry. null = unlimited.
+      // Set to 720 when the host's net.core.rmem_max is at the stock default,
+      // because a 1080p/1440p keyframe burst overflows the small UDP socket.
+      maxHeight: hostLimit.maxHeight ?? null,
+      hostLimited: !!hostLimit.constrained,
+    },
     privacy: {
       mediaPath: config.enabled ? 'sfu' : (liveKitFallbackContexts.length > 0 ? 'central-sfu' : 'unavailable'),
       e2ee: false,
@@ -106,6 +143,29 @@ function getMediaCapability(contexts) {
           : 'Media unavailable'),
     },
   };
+}
+
+let _liveKitServerSdk = null;
+function getLiveKitServerSdk() {
+  if (_liveKitServerSdk) return _liveKitServerSdk;
+  try {
+    _liveKitServerSdk = require('livekit-server-sdk');
+    return _liveKitServerSdk;
+  } catch {
+    return null;
+  }
+}
+
+let _ingressClient = null;
+function getIngressClient() {
+  if (_ingressClient) return _ingressClient;
+  const config = readLiveKitConfig();
+  const ingress = readLiveKitIngressConfig();
+  if (!config.enabled || !ingress.enabled) return null;
+  const sdk = getLiveKitServerSdk();
+  if (!sdk?.IngressClient) return null;
+  _ingressClient = new sdk.IngressClient(config.serverUrl, config.apiKey, config.apiSecret);
+  return _ingressClient;
 }
 
 function getLiveKitPublishSources(trackSources) {
@@ -178,6 +238,9 @@ module.exports = {
   TRACK_SOURCES,
   createMediaToken,
   getMediaCapability,
+  getIngressClient,
+  getLiveKitServerSdk,
+  readLiveKitIngressConfig,
   getSelfHostServerId,
   readLiveKitConfig,
 };

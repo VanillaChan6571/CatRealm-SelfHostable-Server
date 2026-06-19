@@ -20,6 +20,11 @@ const {
   regenerateWebhookSecretById,
   deleteWebhookById,
 } = require('../webhooks');
+const {
+  getTheaterUploadHardMaxMb,
+  getTheaterUploadMaxMb,
+  validateTheaterUploadMaxMb,
+} = require('../lib/theaterUploadLimits');
 
 function requirePermission(permission) {
   return (req, res, next) => {
@@ -66,6 +71,8 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
   const maxStickers = Number(getSetting('max_stickers', '100'));
   const maxAnimatedStickers = Number(getSetting('max_animated_stickers', '50'));
   const mediaRemoveLimits = isMediaHardLimitRemoved();
+  const theaterUploadMaxMb = getTheaterUploadMaxMb();
+  const theaterUploadHardMaxMb = getTheaterUploadHardMaxMb();
 
   res.json({
     name,
@@ -82,6 +89,8 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     maxStickers,
     maxAnimatedStickers,
     mediaRemoveLimits,
+    theaterUploadMaxMb,
+    theaterUploadHardMaxMb,
   });
 });
 
@@ -121,6 +130,13 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     if (typeof req.body?.avatarMaxMb === 'number' && req.body.avatarMaxMb >= 1 && req.body.avatarMaxMb <= 50) {
       setSetting('avatar_max_mb', String(req.body.avatarMaxMb));
     }
+    if (req.body?.theaterUploadMaxMb !== undefined) {
+      const validation = validateTheaterUploadMaxMb(req.body.theaterUploadMaxMb);
+      if (!validation.ok) {
+        return res.status(400).json({ error: validation.error });
+      }
+      setSetting('theater_upload_max_mb', String(validation.value));
+    }
     if (typeof req.body?.maxEmotes === 'number' && req.body.maxEmotes >= 1 && req.body.maxEmotes <= 500) {
       setSetting('max_emotes', String(req.body.maxEmotes));
     }
@@ -150,6 +166,8 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     maxStickers: Number(getSetting('max_stickers', '100')),
     maxAnimatedStickers: Number(getSetting('max_animated_stickers', '50')),
     mediaRemoveLimits: isMediaHardLimitRemoved(),
+    theaterUploadMaxMb: getTheaterUploadMaxMb(),
+    theaterUploadHardMaxMb: getTheaterUploadHardMaxMb(),
   };
 
   // Push live server-info updates to all connected clients.

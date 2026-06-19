@@ -42,6 +42,7 @@ Set these visible egg variables for bundled mode:
 - `LIVEKIT_RTC_TCP_PORT`: default `7881/tcp`.
 - `LIVEKIT_RTC_UDP_PORT_START`: default `50000/udp`.
 - `LIVEKIT_RTC_UDP_PORT_END`: default `50000/udp`. Set this higher only when every UDP port in the range is allocated.
+- `CATREALM_EXPERIMENTAL_WHIP_SIMULCAST=false`: optional experiment that lets CatRealm Encoding use LiveKit Ingress transcoding to publish lower-bitrate simulcast layers for viewers. Leave it off unless the host has CPU headroom.
 
 When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/livekit.yaml`, starts `livekit-server --config data/livekit.yaml`, and sets CatRealm's `MEDIA_LIVEKIT_*` environment variables automatically. The client-facing LiveKit URL uses CatRealm's HTTPS port, and CatRealm proxies `/rtc` traffic internally to the bundled LiveKit process.
 

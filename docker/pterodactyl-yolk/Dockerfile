@@ -1,8 +1,10 @@
 ARG BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
-ARG LIVEKIT_VERSION=1.11.0
+ARG LIVEKIT_VERSION=1.13.1
+ARG LIVEKIT_INGRESS_VERSION=1.5.0
 FROM ${BASE_IMAGE}
 
 ARG LIVEKIT_VERSION
+ARG LIVEKIT_INGRESS_VERSION
 
 USER root
 
@@ -17,8 +19,20 @@ RUN set -eux; \
       ffmpeg \
       g++ \
       git \
+      go \
+      gst-libav \
+      gst-plugins-bad \
+      gst-plugins-bad-dev \
+      gst-plugins-base \
+      gst-plugins-base-dev \
+      gst-plugins-good \
+      gst-plugins-ugly \
+      gstreamer \
+      gstreamer-dev \
       make \
+      pkgconf \
       python3 \
+      redis \
       tini; \
   elif command -v apt-get >/dev/null 2>&1; then \
     apt-get update; \
@@ -28,9 +42,21 @@ RUN set -eux; \
       curl \
       ffmpeg \
       g++ \
+      gstreamer1.0-libav \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-ugly \
+      gstreamer1.0-tools \
       git \
+      golang-go \
+      libgstreamer-plugins-bad1.0-dev \
+      libgstreamer-plugins-base1.0-dev \
+      libgstreamer1.0-dev \
       make \
+      pkg-config \
       python3 \
+      redis-server \
       tini; \
     rm -rf /var/lib/apt/lists/*; \
   else \
@@ -50,8 +76,14 @@ RUN set -eux; \
   tar -xzf /tmp/livekit.tar.gz -C /usr/local/bin livekit-server; \
   rm -f /tmp/livekit.tar.gz; \
   chmod 0755 /usr/local/bin/livekit-server; \
+  git clone --depth 1 --branch "v${LIVEKIT_INGRESS_VERSION}" https://github.com/livekit/ingress.git /tmp/livekit-ingress; \
+  (cd /tmp/livekit-ingress && CGO_ENABLED=1 GO111MODULE=on go build -a -o /usr/local/bin/ingress ./cmd/server); \
+  rm -rf /tmp/livekit-ingress; \
+  chmod 0755 /usr/local/bin/ingress; \
   /usr/local/bin/yt-dlp --version; \
   /usr/local/bin/livekit-server --version; \
+  /usr/local/bin/ingress --help >/dev/null; \
+  redis-server --version; \
   ffmpeg -version | head -n 1
 
 USER container
