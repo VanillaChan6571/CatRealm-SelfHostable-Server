@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows } = require('../messageCrypto');
+const { attachReactionsToMessages } = require('../reactions');
 const { emitToChannel } = require('../socket/handler');
 
 function attachNsfwTags(messages) {
@@ -292,6 +293,8 @@ router.get('/:id/messages', (req, res) => {
     }
     return { ...m, attachments: attachments ?? [] };
   });
+
+  messages = attachReactionsToMessages(messages);
 
   res.json(messages.reverse());
 });

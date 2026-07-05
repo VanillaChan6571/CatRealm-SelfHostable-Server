@@ -503,6 +503,7 @@ const landingRoutes = require('./routes/landing');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
 const { startWebhookWorker, stopWebhookWorker } = require('./webhooks');
+const { startAuditLogPruner } = require('./lib/auditLog');
 
 const app = express();
 setupConsoleCommands(db);
@@ -511,6 +512,9 @@ const PORT = process.env.PORT || 3000;
 const CLIENT_URL = process.env.CLIENT_URL || '*';
 
 // ── Middleware ─────────────────────────────────────────────────────────────────
+// Needed so rate limiting sees real client IPs behind a reverse proxy.
+// Set TRUST_PROXY=0 when clients connect directly (prevents X-Forwarded-For spoofing).
+app.set('trust proxy', Number.parseInt(process.env.TRUST_PROXY ?? '1', 10) || 0);
 app.use(cors({ origin: CLIENT_URL }));
 app.use(express.json({
   verify: (req, _res, buf) => {
@@ -554,7 +558,9 @@ app.use('/whip', createLiveKitIngressHttpProxy(pteroLog));
 app.use('/', landingRoutes);
 
 // ── REST Routes ────────────────────────────────────────────────────────────────
-app.use('/api/auth',     authRoutes);
+const { apiLimiter, authLimiter } = require('./middleware/rateLimits');
+app.use('/api', apiLimiter);
+app.use('/api/auth',     authLimiter, authRoutes);
 app.use('/api/channels', authenticateToken, channelRoutes);
 app.use('/api/messages', authenticateToken, messageRoutes);
 app.use('/api/server',   serverRoutes); // public info endpoint
@@ -639,6 +645,7 @@ async function start() {
 
   setupSocketHandlers(io);
   startWebhookWorker();
+  startAuditLogPruner();
 
   if (!updateRuntime.checkerDisabled && shouldAutoUpdate()) {
     const checkerMs = updateConfig().checkerMs;

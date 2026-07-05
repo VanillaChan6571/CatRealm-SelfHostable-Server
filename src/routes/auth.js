@@ -9,6 +9,7 @@ const { computePermissionsForUser } = require('../permissions');
 const pteroLog = require('../logger');
 const { isBlockedUsername } = require('../usernameBlocklist');
 const { getSetting } = require('../settings');
+const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 const DEFAULT_AVATAR_URL = (
   process.env.DEFAULT_AVATAR_URL ||
   'https://catrealm.app/uploads/avatars/default.jpg'
@@ -80,6 +81,12 @@ router.post('/register', async (req, res) => {
   if (welcomeEnabled) {
     db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(id);
   }
+
+  logAuditAction(AUDIT_ACTIONS.MEMBER_JOIN, id, {
+    targetType: 'user',
+    targetId: id,
+    details: { username, account_type: 'local' },
+  });
 
   const permissions = computePermissionsForUser(id, 'member', 0, db);
   const token = jwt.sign({ id, username, role: 'member', is_owner: 0, permissions }, JWT_SECRET, { expiresIn: '7d' });
@@ -263,6 +270,11 @@ router.post('/central', async (req, res) => {
     }
 
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    logAuditAction(AUDIT_ACTIONS.MEMBER_JOIN, localUser.id, {
+      targetType: 'user',
+      targetId: localUser.id,
+      details: { username: localUser.username, account_type: 'central' },
+    });
   }
 
   if (db.prepare('SELECT 1 FROM bans WHERE user_id = ?').get(localUser.id)) {
@@ -274,11 +286,16 @@ router.post('/central', async (req, res) => {
     if (!inviteResult.ok) {
       return res.status(inviteResult.status).json({ error: inviteResult.error });
     }
-    db.prepare('UPDATE users SET is_member = 1 WHERE id = ?').run(localUser.id);
+    db.prepare('UPDATE users SET is_member = 1, left_server = 0 WHERE id = ?').run(localUser.id);
     if (welcomeEnabled) {
       db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(localUser.id);
     }
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
+    logAuditAction(AUDIT_ACTIONS.MEMBER_JOIN, localUser.id, {
+      targetType: 'user',
+      targetId: localUser.id,
+      details: { username: localUser.username, account_type: 'central', rejoin: true },
+    });
   }
 
   // Sync central avatar into local record when no server-specific avatar is set
@@ -353,6 +370,34 @@ router.post('/central', async (req, res) => {
       onboardingCompleted: localUser.onboarding_completed !== 0,
     },
   });
+});
+
+// POST /api/auth/leave — voluntarily leave the server (central accounts only).
+// The user row is kept (is_member = 0, left_server = 1) so they can rejoin
+// later with a valid invite; local accounts are bound to this server and
+// cannot leave (only kick/ban removes them).
+router.post('/leave', authenticateToken, (req, res) => {
+  if (req.user.accountType !== 'central') {
+    return res.status(403).json({ error: 'Local accounts cannot leave this server' });
+  }
+  if (req.user.is_owner) {
+    return res.status(400).json({ error: 'The server owner cannot leave the server' });
+  }
+
+  db.prepare('UPDATE users SET is_member = 0, left_server = 1 WHERE id = ?').run(req.user.id);
+
+  logAuditAction(AUDIT_ACTIONS.MEMBER_LEAVE, req.user.id, {
+    targetType: 'user',
+    targetId: req.user.id,
+    details: { username: req.user.username, account_type: 'central' },
+  });
+
+  // Lazy require to avoid any module-load ordering issues with the socket handler.
+  const { emitPermissionsChanged, kickUserFromServer } = require('../socket/handler');
+  emitPermissionsChanged();
+  kickUserFromServer(req.user.id, { reason: 'left', message: 'You left this server.' });
+
+  res.json({ success: true });
 });
 
 module.exports = router;

@@ -6,6 +6,7 @@ const db = require('../db');
 const { SERVER_MODE } = require('../middleware/auth');
 const { updateOnlineUserAvatar, updateOnlineUserStatus, updateOnlineUserDisplayName, updateOnlineUserActivity, updateOnlineUserCustomStatus } = require('../socket/handler');
 const { getSetting } = require('../settings');
+const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../data/uploads');
 const AVATAR_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -282,13 +283,24 @@ router.put('/me/display-name', ensureProfileAllowed, (req, res) => {
 
   const trimmed = displayName.trim();
 
+  let previousName;
   if (req.user.accountType === 'central') {
+    previousName = db.prepare('SELECT display_name FROM display_name_overrides WHERE user_id = ?').get(req.user.id)?.display_name ?? null;
     // Server-specific override for central accounts
     db.prepare('INSERT OR REPLACE INTO display_name_overrides (user_id, display_name) VALUES (?, ?)')
       .run(req.user.id, trimmed);
   } else {
+    previousName = db.prepare('SELECT display_name FROM users WHERE id = ?').get(req.user.id)?.display_name ?? null;
     // Direct update for local accounts
     db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(trimmed, req.user.id);
+  }
+
+  if (previousName !== trimmed) {
+    logAuditAction(AUDIT_ACTIONS.MEMBER_NICKNAME_UPDATE, req.user.id, {
+      targetType: 'user',
+      targetId: req.user.id,
+      details: { before: previousName, after: trimmed },
+    });
   }
 
   updateOnlineUserDisplayName(req.user.id, trimmed);
@@ -299,12 +311,23 @@ router.put('/me/display-name', ensureProfileAllowed, (req, res) => {
 
 // DELETE /api/profile/me/display-name
 router.delete('/me/display-name', ensureProfileAllowed, (req, res) => {
+  let previousName;
   if (req.user.accountType === 'central') {
+    previousName = db.prepare('SELECT display_name FROM display_name_overrides WHERE user_id = ?').get(req.user.id)?.display_name ?? null;
     // Remove server-specific override (falls back to global)
     db.prepare('DELETE FROM display_name_overrides WHERE user_id = ?').run(req.user.id);
   } else {
+    previousName = db.prepare('SELECT display_name FROM users WHERE id = ?').get(req.user.id)?.display_name ?? null;
     // Clear display name for local accounts (falls back to username)
     db.prepare('UPDATE users SET display_name = NULL WHERE id = ?').run(req.user.id);
+  }
+
+  if (previousName !== null) {
+    logAuditAction(AUDIT_ACTIONS.MEMBER_NICKNAME_UPDATE, req.user.id, {
+      targetType: 'user',
+      targetId: req.user.id,
+      details: { before: previousName, after: null },
+    });
   }
 
   updateOnlineUserDisplayName(req.user.id, null);

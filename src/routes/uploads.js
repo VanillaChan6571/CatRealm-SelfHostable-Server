@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const multer = require('multer');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
@@ -68,12 +69,11 @@ async function generateChatThumbnail(file) {
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UGC_IMAGES_DIR),
-  filename: (req, file, cb) => {
+  filename: (_req, file, cb) => {
     const ext = MIME_TO_EXT[file.mimetype];
     if (!ext) return cb(new Error('Invalid file type'));
-    const safeId = String(req.user.id).replace(/[^a-zA-Z0-9_-]/g, '');
-    const filename = `${safeId}-${Date.now()}${ext}`;
-    cb(null, filename);
+    // Unguessable name: served files have no auth, so the URL must not be enumerable.
+    cb(null, `${crypto.randomUUID()}${ext}`);
   },
 });
 

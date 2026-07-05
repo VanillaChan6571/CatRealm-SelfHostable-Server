@@ -4,6 +4,7 @@ const db = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 const { hasPermission, PERMISSIONS } = require('../permissions');
 const { getSetting, setSetting } = require('../settings');
+const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
@@ -531,6 +532,12 @@ router.post('/', authenticateToken, async (req, res) => {
   if (!created.ok) {
     return res.status(created.status || 500).json({ error: created.error || 'Failed to create invite' });
   }
+  logAuditAction(AUDIT_ACTIONS.INVITE_CREATE, req.user.id, {
+    targetType: 'invite',
+    targetId: created.code,
+    channelId: channelId || null,
+    details: { code: created.code, max_uses: maxUses || 0, expires_in: expiresIn || 0 },
+  });
   return res.json({
     code: created.code,
     centralUrl: created.centralUrl,
@@ -651,11 +658,19 @@ router.delete('/:code', authenticateToken, async (req, res) => {
   }
 
   const code = String(req.params.code || '').trim();
+  const invite = db.prepare('SELECT * FROM invites WHERE code = ?').get(code);
   const result = db.prepare('DELETE FROM invites WHERE code = ?').run(code);
 
   if (result.changes === 0) {
     return res.status(404).json({ error: 'Invite not found' });
   }
+
+  logAuditAction(AUDIT_ACTIONS.INVITE_DELETE, req.user.id, {
+    targetType: 'invite',
+    targetId: code,
+    channelId: invite?.channel_id || null,
+    details: { code, max_uses: invite?.max_uses ?? null, uses: invite?.current_uses ?? null },
+  });
 
   if (String(getSetting(DISCOVERY_INVITE_SETTING_KEY, '') || '').trim() === code) {
     setSetting(DISCOVERY_INVITE_SETTING_KEY, '');

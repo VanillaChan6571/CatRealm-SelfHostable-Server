@@ -20,6 +20,7 @@ const {
   queueChannelCreatedEvent,
   queueChannelDeletedEvent,
 } = require('../webhooks');
+const { AUDIT_ACTIONS, logAuditAction, diffFields } = require('../lib/auditLog');
 
 function allowsNsfw(userId) {
   const prefs = db.prepare('SELECT preferences FROM user_content_social_prefs WHERE user_id = ?').get(userId);
@@ -105,6 +106,12 @@ router.post('/', (req, res) => {
     .run(id, channelName, description || null, channelType, maxPos + 1, categoryId || null);
 
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(id);
+  logAuditAction(AUDIT_ACTIONS.CHANNEL_CREATE, req.user.id, {
+    targetType: 'channel',
+    targetId: id,
+    channelId: id,
+    details: { name: channel.name, type: channel.type },
+  });
   queueChannelCreatedEvent(channel);
   broadcastChannelUpdate();
   res.status(201).json(channel);
@@ -122,6 +129,12 @@ router.delete('/:id', (req, res) => {
   }
   queueChannelDeletedEvent(channel);
   db.prepare('DELETE FROM channels WHERE id = ?').run(req.params.id);
+  logAuditAction(AUDIT_ACTIONS.CHANNEL_DELETE, req.user.id, {
+    targetType: 'channel',
+    targetId: channel.id,
+    channelId: channel.id,
+    details: { name: channel.name, type: channel.type },
+  });
   broadcastChannelUpdate();
   res.json({ success: true });
 });
@@ -176,6 +189,15 @@ router.patch('/:id', (req, res) => {
     db.prepare('UPDATE channels SET forum_layout = ? WHERE id = ?').run(forumLayout, req.params.id);
   }
   const updated = db.prepare('SELECT * FROM channels WHERE id = ?').get(req.params.id);
+  const changes = diffFields(channel, updated, ['name', 'description', 'type', 'category_id', 'nsfw', 'position', 'forum_layout']);
+  if (changes) {
+    logAuditAction(AUDIT_ACTIONS.CHANNEL_UPDATE, req.user.id, {
+      targetType: 'channel',
+      targetId: channel.id,
+      channelId: channel.id,
+      details: { name: updated.name, changes },
+    });
+  }
   broadcastChannelUpdate();
   res.json(updated);
 });
@@ -196,6 +218,12 @@ router.post('/:id/duplicate', (req, res) => {
   db.prepare('INSERT INTO channels (id, name, description, type, position, category_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, name, channel.description, channel.type, maxPos + 1, channel.category_id);
   const newChannel = db.prepare('SELECT * FROM channels WHERE id = ?').get(id);
+  logAuditAction(AUDIT_ACTIONS.CHANNEL_CREATE, req.user.id, {
+    targetType: 'channel',
+    targetId: id,
+    channelId: id,
+    details: { name: newChannel.name, type: newChannel.type, duplicated_from: channel.id },
+  });
   queueChannelCreatedEvent(newChannel);
   broadcastChannelUpdate();
   res.status(201).json(newChannel);
@@ -583,8 +611,18 @@ router.put('/:id/permissions', (req, res) => {
     }
   });
 
+  const previous = listChannelOverwrites(channel.id);
   replaceTransaction(channel.id, overwrites);
   const persisted = listChannelOverwrites(channel.id);
+  logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_UPDATE, req.user.id, {
+    targetType: 'channel',
+    targetId: channel.id,
+    channelId: channel.id,
+    details: {
+      before: previous.map((o) => ({ target_type: o.target_type, target_id: o.target_id, allow: o.allow, deny: o.deny })),
+      after: persisted.map((o) => ({ target_type: o.target_type, target_id: o.target_id, allow: o.allow, deny: o.deny })),
+    },
+  });
   emitPermissionsChanged();
   res.json({ success: true, overwrites: persisted });
 });
@@ -627,6 +665,15 @@ router.post('/:id/permissions', (req, res) => {
     db.prepare('UPDATE channel_permission_overwrites SET allow = ?, deny = ? WHERE id = ?')
       .run(allowBits, denyBits, existing.id);
     const updated = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(existing.id);
+    logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_UPDATE, req.user.id, {
+      targetType,
+      targetId,
+      channelId: req.params.id,
+      details: {
+        before: { allow: existing.allow, deny: existing.deny },
+        after: { allow: allowBits, deny: denyBits },
+      },
+    });
     emitPermissionsChanged();
     return res.json(updated);
   }
@@ -637,6 +684,12 @@ router.post('/:id/permissions', (req, res) => {
   `).run(id, req.params.id, targetType, targetId, allowBits, denyBits);
 
   const overwrite = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(id);
+  logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_CREATE, req.user.id, {
+    targetType,
+    targetId,
+    channelId: req.params.id,
+    details: { allow: allowBits, deny: denyBits },
+  });
   emitPermissionsChanged();
   res.status(201).json(overwrite);
 });
@@ -659,6 +712,15 @@ router.patch('/:id/permissions/:overwriteId', (req, res) => {
   }
 
   const updated = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(req.params.overwriteId);
+  logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_UPDATE, req.user.id, {
+    targetType: overwrite.target_type,
+    targetId: overwrite.target_id,
+    channelId: req.params.id,
+    details: {
+      before: { allow: overwrite.allow, deny: overwrite.deny },
+      after: { allow: updated.allow, deny: updated.deny },
+    },
+  });
   emitPermissionsChanged();
   res.json(updated);
 });
@@ -669,7 +731,16 @@ router.delete('/:id/permissions/:overwriteId', (req, res) => {
     return res.status(403).json({ error: 'Missing permission: manage_channels' });
   }
 
+  const overwrite = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').get(req.params.overwriteId, req.params.id);
   db.prepare('DELETE FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').run(req.params.overwriteId, req.params.id);
+  if (overwrite) {
+    logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_DELETE, req.user.id, {
+      targetType: overwrite.target_type,
+      targetId: overwrite.target_id,
+      channelId: req.params.id,
+      details: { allow: overwrite.allow, deny: overwrite.deny },
+    });
+  }
   emitPermissionsChanged();
   res.json({ success: true });
 });
@@ -705,6 +776,12 @@ router.post('/:id/webhooks', (req, res) => {
       callbackUrl: req.body?.callbackUrl,
       createdBy: req.user.id,
     });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_CREATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: created.id,
+      channelId: req.params.id,
+      details: { name: created.name },
+    });
     res.status(201).json(created);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to create webhook' });
@@ -719,13 +796,20 @@ router.patch('/:id/webhooks/:webhookId', (req, res) => {
   const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
   try {
-    res.json(updateWebhook({
+    const updated = updateWebhook({
       req,
       scopeType: WEBHOOK_SCOPE_CHANNEL,
       scopeId: req.params.id,
       webhookId: req.params.webhookId,
       body: req.body ?? {},
-    }));
+    });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_UPDATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: req.params.webhookId,
+      channelId: req.params.id,
+      details: { name: updated?.name },
+    });
+    res.json(updated);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to update webhook' });
   }
@@ -739,12 +823,19 @@ router.post('/:id/webhooks/:webhookId/regenerate-secret', (req, res) => {
   const channel = db.prepare('SELECT id FROM channels WHERE id = ?').get(req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
   try {
-    res.json(regenerateWebhookSecret({
+    const result = regenerateWebhookSecret({
       req,
       scopeType: WEBHOOK_SCOPE_CHANNEL,
       scopeId: req.params.id,
       webhookId: req.params.webhookId,
-    }));
+    });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_UPDATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: req.params.webhookId,
+      channelId: req.params.id,
+      details: { secret_regenerated: true },
+    });
+    res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to regenerate webhook secret' });
   }
@@ -759,6 +850,11 @@ router.delete('/:id/webhooks/:webhookId', (req, res) => {
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
   const deleted = deleteWebhook(WEBHOOK_SCOPE_CHANNEL, req.params.id, req.params.webhookId);
   if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
+  logAuditAction(AUDIT_ACTIONS.WEBHOOK_DELETE, req.user.id, {
+    targetType: 'webhook',
+    targetId: req.params.webhookId,
+    channelId: req.params.id,
+  });
   res.json({ success: true });
 });
 

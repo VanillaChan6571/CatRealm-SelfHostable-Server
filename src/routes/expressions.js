@@ -7,6 +7,7 @@ const db = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 const { PERMISSIONS, hasPermission } = require('../permissions');
 const { getSetting } = require('../settings');
+const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 let sharp = null;
 try {
   sharp = require('sharp');
@@ -355,6 +356,12 @@ router.post('/:type', authenticateToken, (req, res) => {
       FROM expressions WHERE id = ?
     `).get(req.expressionMeta.id);
 
+    logAuditAction(AUDIT_ACTIONS.EXPRESSION_CREATE, req.user.id, {
+      targetType: 'expression',
+      targetId: created.id,
+      details: { name: created.name, type: created.type },
+    });
+
     return res.status(201).json(withAbsoluteUrl(req, created));
   });
 });
@@ -389,6 +396,14 @@ router.patch('/:id', authenticateToken, (req, res) => {
     WHERE id = ?
   `).get(req.params.id);
 
+  if (row.name !== updated.name) {
+    logAuditAction(AUDIT_ACTIONS.EXPRESSION_UPDATE, req.user.id, {
+      targetType: 'expression',
+      targetId: updated.id,
+      details: { type: updated.type, before: row.name, after: updated.name },
+    });
+  }
+
   res.json(withAbsoluteUrl(req, updated));
 });
 
@@ -399,7 +414,14 @@ router.delete('/:id', authenticateToken, (req, res) => {
     return res.status(403).json({ error: 'Missing permission to manage this expression type' });
   }
 
+  const nameRow = db.prepare('SELECT name FROM expressions WHERE id = ?').get(req.params.id);
   db.prepare('DELETE FROM expressions WHERE id = ?').run(req.params.id);
+
+  logAuditAction(AUDIT_ACTIONS.EXPRESSION_DELETE, req.user.id, {
+    targetType: 'expression',
+    targetId: row.id,
+    details: { name: nameRow?.name, type: row.type },
+  });
 
   const variants = parseVariantsJson(row.variants_json);
   const urls = new Set([row.file_url, ...Object.values(variants)]);

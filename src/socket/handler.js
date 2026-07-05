@@ -16,7 +16,9 @@ const { applyRoleViewToUser } = require('../viewAsRole');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
+const { normalizeReactionToken, toggleMessageReaction } = require('../reactions');
 const { relayMentionPush, relayMentionNotifications } = require('../lib/pushRelay');
+const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 const {
   createSelfHostMediaSessionWithFallback,
   getSelfHostMediaContexts,
@@ -779,6 +781,15 @@ function setupSocketHandlers(io) {
       entry.user.deafened = !!nextDeafened;
       room.set(userId, entry);
 
+      if (userId !== user.id) {
+        logAuditAction(AUDIT_ACTIONS.MEMBER_VOICE_MUTE, user.id, {
+          targetType: 'user',
+          targetId: userId,
+          channelId,
+          details: { muted: !!nextMuted, deafened: !!nextDeafened },
+        });
+      }
+
       io.to(`voice:${channelId}`).emit('voice:user-state', {
         channelId,
         userId,
@@ -880,6 +891,14 @@ function setupSocketHandlers(io) {
       targetSocket.to(`voice:${toChannelId}`).emit('voice:user-joined', { channelId: toChannelId, user: movedVoiceUser });
       emitVoiceRoomCount(io, toChannelId);
       emitVoiceRoomSync(io, toChannelId);
+      if (userId !== user.id) {
+        logAuditAction(AUDIT_ACTIONS.MEMBER_VOICE_MOVE, user.id, {
+          targetType: 'user',
+          targetId: userId,
+          channelId: toChannelId,
+          details: { from_channel_id: fromChannelId, to_channel_id: toChannelId },
+        });
+      }
       if (typeof ack === 'function') ack({ ok: true });
     });
 
@@ -909,6 +928,13 @@ function setupSocketHandlers(io) {
       }
       leaveVoiceRoom(io, targetSocket, channelId, userId);
       targetSocket.emit('voice:force-disconnect', { channelId, reason: 'mod-disconnect', message: 'You were disconnected from voice by a moderator.' });
+      if (userId !== user.id) {
+        logAuditAction(AUDIT_ACTIONS.MEMBER_VOICE_DISCONNECT, user.id, {
+          targetType: 'user',
+          targetId: userId,
+          channelId,
+        });
+      }
       if (typeof ack === 'function') ack({ ok: true });
     });
 
@@ -1220,7 +1246,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at }) => {
+    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at, client_nonce }) => {
       touchActivity(user.id);
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
@@ -1440,6 +1466,11 @@ function setupSocketHandlers(io) {
         forward_from_at: forwardFrom?.forwarded_at ?? null,
         embeds_enabled: canEmbedLinks ? 1 : 0,
         voice_expires_at: normalizedVoiceExpiresAt,
+        // Echo the sender's idempotency token so their client can reconcile the
+        // optimistic ("ghost") message it rendered locally. Not persisted.
+        client_nonce: (typeof client_nonce === 'string' && client_nonce.length > 0 && client_nonce.length <= 64)
+          ? client_nonce
+          : null,
       };
 
       if (normalizedScheduledAt) {
@@ -1510,6 +1541,26 @@ function setupSocketHandlers(io) {
       }
     });
 
+    // ── Toggle a reaction on a message ─────────────────────────────────────────
+    socket.on('message:react', ({ messageId, emoji }) => {
+      touchActivity(user.id);
+      const token = normalizeReactionToken(emoji);
+      if (!token) return socket.emit('error', 'Invalid reaction');
+      const msg = db.prepare('SELECT id, channel_id, thread_id, message_type FROM messages WHERE id = ?').get(messageId);
+      if (!msg) return socket.emit('error', 'Message not found');
+      if (msg.message_type && msg.message_type !== 'user') return socket.emit('error', 'Cannot react to system messages');
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.ADD_REACTIONS, db)) return socket.emit('error', 'Missing permission: add_reactions');
+
+      const { reactions } = toggleMessageReaction(msg.id, user.id, token);
+      const payload = { messageId: msg.id, channelId: msg.channel_id, threadId: msg.thread_id || null, reactions };
+      if (msg.thread_id) {
+        io.to(`thread:${msg.thread_id}`).emit('message:reaction:update', payload);
+      } else {
+        io.to(msg.channel_id).emit('message:reaction:update', payload);
+      }
+    });
+
     // ── Edit a message ─────────────────────────────────────────────────────────
     socket.on('message:edit', ({ messageId, content }) => {
       if (!content?.trim()) return;
@@ -1543,6 +1594,20 @@ function setupSocketHandlers(io) {
 
       const attachmentUrls = collectMessageAttachmentUrls(msg);
       db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
+      // Only mod deletions (deleter !== author) are audit-logged; content is
+      // never recorded (metadata only) so secure-mode ciphertext stays opaque.
+      if (msg.user_id !== user.id) {
+        logAuditAction(AUDIT_ACTIONS.MESSAGE_DELETE, user.id, {
+          targetType: 'message',
+          targetId: messageId,
+          channelId: msg.channel_id,
+          details: {
+            author_id: msg.user_id,
+            thread_id: msg.thread_id || null,
+            had_attachment: attachmentUrls.length > 0,
+          },
+        });
+      }
       for (const attachmentUrl of attachmentUrls) {
         unlinkUgcImageIfUnreferenced(attachmentUrl);
       }

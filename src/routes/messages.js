@@ -3,6 +3,8 @@ const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows, isSecureModeEnabled, encryptMessageContent } = require('../messageCrypto');
+const { searchLimiter } = require('../middleware/rateLimits');
+const { attachReactionsToMessages } = require('../reactions');
 
 function attachNsfwTags(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
@@ -139,6 +141,8 @@ router.get('/:channelId', (req, res) => {
     }
     return { ...m, attachments: attachments ?? [] };
   });
+
+  messages = attachReactionsToMessages(messages);
 
   res.json(messages.reverse()); // Return oldest-first
 });
@@ -304,7 +308,7 @@ function buildJsFilter(q, query) {
 //   mentions=user1,user2  — @mentioned username(s)
 //   date_after=<unix_seconds>  — messages after this time
 //   date_before=<unix_seconds> — messages before this time (filter, distinct from pagination `before`)
-router.get('/:channelId/search', (req, res) => {
+router.get('/:channelId/search', searchLimiter, (req, res) => {
   const { channelId } = req.params;
   const q = (req.query.q || '').trim();
   const limit = Math.min(parseInt(req.query.limit) || 25, 50);
@@ -344,9 +348,9 @@ router.get('/:channelId/search', (req, res) => {
       contentParams.push(like);
     }
     if (mentionUsers.length > 0) {
-      const parts = mentionUsers.map(() => `m.content LIKE ?`).join(' OR ');
+      const parts = mentionUsers.map(() => `m.content LIKE ? ESCAPE '\\'`).join(' OR ');
       contentSql += ` AND (${parts})`;
-      mentionUsers.forEach((u) => contentParams.push(`%@${u}%`));
+      mentionUsers.forEach((u) => contentParams.push(`%@${u.replace(/([%_\\])/g, '\\$&')}%`));
     }
     // link/embed: handled in jsFilter after token stripping (avoids false positives from emote URLs)
 
@@ -373,13 +377,17 @@ router.get('/:channelId/search', (req, res) => {
     return res.json({ results: decrypted, hasMore });
   }
 
-  // Secure mode: SQL for non-content filters, then decrypt + JS filter
+  // Secure mode: SQL for non-content filters, then decrypt + JS filter.
+  // MAX_SCAN bounds the per-request decrypt work so search can't be used as a
+  // cost-amplification DoS on large channels; clients continue via nextBefore.
   const BATCH = 100;
+  const MAX_SCAN = 2000;
   const found = [];
   let cursor = before;
   let exhausted = false;
+  let scanned = 0;
 
-  while (!exhausted && found.length <= limit) {
+  while (!exhausted && found.length <= limit && scanned < MAX_SCAN) {
     const paginationSql    = cursor ? ` AND m.created_at < ?` : '';
     const paginationParams = cursor ? [cursor] : [];
     const batchSql = `${SEARCH_SELECT} ${WHERE_BASE}${filterSql}${paginationSql} ${ORDER_LIMIT}`;
@@ -388,6 +396,7 @@ router.get('/:channelId/search', (req, res) => {
 
     if (batch.length === 0) { exhausted = true; break; }
     if (batch.length < BATCH) exhausted = true;
+    scanned += batch.length;
 
     for (const row of decryptMessageRows(batch)) {
       if (jsFilter(row)) {
@@ -398,9 +407,12 @@ router.get('/:channelId/search', (req, res) => {
     cursor = batch[batch.length - 1].created_at;
   }
 
-  const hasMore = found.length > limit;
-  if (hasMore) found.pop();
-  return res.json({ results: found, hasMore });
+  const truncatedByScanCap = !exhausted && found.length <= limit;
+  const hasMore = found.length > limit || truncatedByScanCap;
+  if (found.length > limit) found.pop();
+  // nextBefore lets the client resume when the scan cap was hit before the
+  // page filled (found may even be empty, so it can't derive a cursor itself).
+  return res.json({ results: found, hasMore, nextBefore: hasMore ? cursor : null });
 });
 
 module.exports = router;

@@ -38,7 +38,7 @@ function renderLandingPage(info) {
   const escapedServerUrl = serverUrl.replace(/"/g, '&quot;');
 
   const bannerHtml = bannerUrl
-    ? `<div style="width:100%;height:128px;background:url('${bannerUrl.replace(/'/g, "\\'")}') center/cover no-repeat;"></div>`
+    ? `<div style="width:100%;height:128px;background:url('${bannerUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '%27').replace(/</g, '%3C')}') center/cover no-repeat;"></div>`
     : `<div style="width:100%;height:128px;background:linear-gradient(135deg,#2d1f4e 0%,#1a2d4e 50%,#1f3d2d 100%);"></div>`;
 
   const iconHtml = iconUrl

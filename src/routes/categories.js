@@ -11,6 +11,7 @@ const {
   regenerateWebhookSecret,
   deleteWebhook,
 } = require('../webhooks');
+const { AUDIT_ACTIONS, logAuditAction, diffFields } = require('../lib/auditLog');
 
 function normalizeOverwriteBits(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
@@ -62,6 +63,11 @@ router.post('/', (req, res) => {
   db.prepare('INSERT INTO categories (id, name, position) VALUES (?, ?, ?)')
     .run(id, name.trim(), maxPos + 1);
   const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  logAuditAction(AUDIT_ACTIONS.CATEGORY_CREATE, req.user.id, {
+    targetType: 'category',
+    targetId: id,
+    details: { name: category.name },
+  });
   broadcastChannelUpdate();
   res.status(201).json(category);
 });
@@ -81,6 +87,14 @@ router.patch('/:id', (req, res) => {
     db.prepare('UPDATE categories SET position = ? WHERE id = ?').run(position, req.params.id);
   }
   const updated = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
+  const changes = diffFields(category, updated, ['name', 'position']);
+  if (changes) {
+    logAuditAction(AUDIT_ACTIONS.CATEGORY_UPDATE, req.user.id, {
+      targetType: 'category',
+      targetId: category.id,
+      details: { name: updated.name, changes },
+    });
+  }
   broadcastChannelUpdate();
   res.json(updated);
 });
@@ -90,8 +104,16 @@ router.delete('/:id', (req, res) => {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
     return res.status(403).json({ error: 'Missing permission: manage_channels' });
   }
+  const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
   db.prepare('UPDATE channels SET category_id = NULL WHERE category_id = ?').run(req.params.id);
   db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+  if (category) {
+    logAuditAction(AUDIT_ACTIONS.CATEGORY_DELETE, req.user.id, {
+      targetType: 'category',
+      targetId: category.id,
+      details: { name: category.name },
+    });
+  }
   emitPermissionsChanged();
   res.json({ success: true });
 });
@@ -127,6 +149,11 @@ router.post('/:id/webhooks', (req, res) => {
       callbackUrl: req.body?.callbackUrl,
       createdBy: req.user.id,
     });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_CREATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: created.id,
+      details: { name: created.name, category_id: req.params.id },
+    });
     res.status(201).json(created);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to create webhook' });
@@ -141,13 +168,19 @@ router.patch('/:id/webhooks/:webhookId', (req, res) => {
   const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
   if (!category) return res.status(404).json({ error: 'Category not found' });
   try {
-    res.json(updateWebhook({
+    const updated = updateWebhook({
       req,
       scopeType: WEBHOOK_SCOPE_CATEGORY,
       scopeId: req.params.id,
       webhookId: req.params.webhookId,
       body: req.body ?? {},
-    }));
+    });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_UPDATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: req.params.webhookId,
+      details: { name: updated?.name, category_id: req.params.id },
+    });
+    res.json(updated);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to update webhook' });
   }
@@ -161,12 +194,18 @@ router.post('/:id/webhooks/:webhookId/regenerate-secret', (req, res) => {
   const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(req.params.id);
   if (!category) return res.status(404).json({ error: 'Category not found' });
   try {
-    res.json(regenerateWebhookSecret({
+    const result = regenerateWebhookSecret({
       req,
       scopeType: WEBHOOK_SCOPE_CATEGORY,
       scopeId: req.params.id,
       webhookId: req.params.webhookId,
-    }));
+    });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_UPDATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: req.params.webhookId,
+      details: { secret_regenerated: true, category_id: req.params.id },
+    });
+    res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to regenerate webhook secret' });
   }
@@ -181,6 +220,11 @@ router.delete('/:id/webhooks/:webhookId', (req, res) => {
   if (!category) return res.status(404).json({ error: 'Category not found' });
   const deleted = deleteWebhook(WEBHOOK_SCOPE_CATEGORY, req.params.id, req.params.webhookId);
   if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
+  logAuditAction(AUDIT_ACTIONS.WEBHOOK_DELETE, req.user.id, {
+    targetType: 'webhook',
+    targetId: req.params.webhookId,
+    details: { category_id: req.params.id },
+  });
   res.json({ success: true });
 });
 
@@ -232,6 +276,15 @@ router.post('/:id/permissions', (req, res) => {
     db.prepare('UPDATE category_permission_overwrites SET allow = ?, deny = ? WHERE id = ?')
       .run(allowBits, denyBits, existing.id);
     const updated = db.prepare('SELECT * FROM category_permission_overwrites WHERE id = ?').get(existing.id);
+    logAuditAction(AUDIT_ACTIONS.CATEGORY_OVERWRITE_UPDATE, req.user.id, {
+      targetType,
+      targetId,
+      details: {
+        category_id: req.params.id,
+        before: { allow: existing.allow, deny: existing.deny },
+        after: { allow: allowBits, deny: denyBits },
+      },
+    });
     emitPermissionsChanged();
     return res.json(updated);
   }
@@ -242,6 +295,11 @@ router.post('/:id/permissions', (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(id, req.params.id, targetType, targetId, allowBits, denyBits);
   const overwrite = db.prepare('SELECT * FROM category_permission_overwrites WHERE id = ?').get(id);
+  logAuditAction(AUDIT_ACTIONS.CATEGORY_OVERWRITE_CREATE, req.user.id, {
+    targetType,
+    targetId,
+    details: { category_id: req.params.id, allow: allowBits, deny: denyBits },
+  });
   emitPermissionsChanged();
   res.status(201).json(overwrite);
 });
@@ -285,9 +343,19 @@ router.put('/:id/permissions', (req, res) => {
     }
   });
 
+  const previous = listCategoryOverwrites(categoryId);
   transaction(overwrites);
+  const persisted = listCategoryOverwrites(categoryId);
+  logAuditAction(AUDIT_ACTIONS.CATEGORY_OVERWRITE_UPDATE, req.user.id, {
+    targetType: 'category',
+    targetId: categoryId,
+    details: {
+      before: previous.map((o) => ({ target_type: o.target_type, target_id: o.target_id, allow: o.allow, deny: o.deny })),
+      after: persisted.map((o) => ({ target_type: o.target_type, target_id: o.target_id, allow: o.allow, deny: o.deny })),
+    },
+  });
   emitPermissionsChanged();
-  res.json(listCategoryOverwrites(categoryId));
+  res.json(persisted);
 });
 
 // PATCH /api/categories/:id/permissions/:overwriteId - Update category permission overwrite
@@ -313,6 +381,15 @@ router.patch('/:id/permissions/:overwriteId', (req, res) => {
   }
 
   const updated = db.prepare('SELECT * FROM category_permission_overwrites WHERE id = ?').get(req.params.overwriteId);
+  logAuditAction(AUDIT_ACTIONS.CATEGORY_OVERWRITE_UPDATE, req.user.id, {
+    targetType: overwrite.target_type,
+    targetId: overwrite.target_id,
+    details: {
+      category_id: req.params.id,
+      before: { allow: overwrite.allow, deny: overwrite.deny },
+      after: { allow: updated.allow, deny: updated.deny },
+    },
+  });
   emitPermissionsChanged();
   res.json(updated);
 });
@@ -322,10 +399,21 @@ router.delete('/:id/permissions/:overwriteId', (req, res) => {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
     return res.status(403).json({ error: 'Missing permission: manage_channels' });
   }
+  const overwrite = db.prepare(`
+    SELECT * FROM category_permission_overwrites
+    WHERE id = ? AND category_id = ?
+  `).get(req.params.overwriteId, req.params.id);
   db.prepare(`
     DELETE FROM category_permission_overwrites
     WHERE id = ? AND category_id = ?
   `).run(req.params.overwriteId, req.params.id);
+  if (overwrite) {
+    logAuditAction(AUDIT_ACTIONS.CATEGORY_OVERWRITE_DELETE, req.user.id, {
+      targetType: overwrite.target_type,
+      targetId: overwrite.target_id,
+      details: { category_id: req.params.id, allow: overwrite.allow, deny: overwrite.deny },
+    });
+  }
   emitPermissionsChanged();
   res.json({ success: true });
 });

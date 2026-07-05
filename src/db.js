@@ -140,6 +140,16 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
 
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    emoji       TEXT NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (message_id, user_id, emoji)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_message_reactions_message ON message_reactions(message_id, created_at);
+
   CREATE TABLE IF NOT EXISTS admin_tokens (
     token       TEXT PRIMARY KEY,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
@@ -463,8 +473,10 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS audit_log (
     id          TEXT PRIMARY KEY,
     action_type TEXT NOT NULL,
-    moderator_id TEXT NOT NULL REFERENCES users(id),
+    moderator_id TEXT REFERENCES users(id),
     target_id   TEXT,
+    target_type TEXT,
+    channel_id  TEXT,
     details     TEXT,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
   );
@@ -566,6 +578,12 @@ if (!userColumns.includes('banner')) {
 if (!userColumns.includes('pronouns')) {
   db.prepare('ALTER TABLE users ADD COLUMN pronouns TEXT').run();
   pteroLog('[CatRealm] Added users.pronouns column (synced from central)');
+}
+if (!userColumns.includes('left_server')) {
+  // 1 = voluntarily left (self-leave); distinguishes from kick/ban which leave it 0.
+  // Row is kept so the member can rejoin with an invite later.
+  db.prepare('ALTER TABLE users ADD COLUMN left_server INTEGER NOT NULL DEFAULT 0').run();
+  pteroLog('[CatRealm] Added users.left_server column');
 }
 
 const webhookColumns = db.prepare('PRAGMA table_info(webhooks)').all().map((c) => c.name);
@@ -672,6 +690,42 @@ if (!channelColumns.includes('category_id')) {
   db.prepare('ALTER TABLE channels ADD COLUMN category_id TEXT').run();
   pteroLog('[CatRealm] Added channels.category_id column');
 }
+
+// ── Audit Log Migration ──────────────────────────────────────────────────────
+// Rebuild audit_log: relax moderator_id NOT NULL (system/actor-less entries)
+// and add target_type/channel_id. SQLite can't drop NOT NULL via ALTER TABLE,
+// so rebuild the table; the notnull flag doubles as the "already migrated" guard.
+const auditModeratorCol = db
+  .prepare('PRAGMA table_info(audit_log)')
+  .all()
+  .find((c) => c.name === 'moderator_id');
+if (auditModeratorCol && auditModeratorCol.notnull === 1) {
+  db.pragma('foreign_keys = OFF');
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE audit_log_new (
+        id          TEXT PRIMARY KEY,
+        action_type TEXT NOT NULL,
+        moderator_id TEXT REFERENCES users(id),
+        target_id   TEXT,
+        target_type TEXT,
+        channel_id  TEXT,
+        details     TEXT,
+        created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+      INSERT INTO audit_log_new (id, action_type, moderator_id, target_id, details, created_at)
+        SELECT id, action_type, moderator_id, target_id, details, created_at FROM audit_log;
+      DROP TABLE audit_log;
+      ALTER TABLE audit_log_new RENAME TO audit_log;
+    `);
+  })();
+  db.pragma('foreign_keys = ON');
+  pteroLog('[CatRealm] Rebuilt audit_log table (nullable actor, target_type, channel_id)');
+}
+db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC)').run();
+db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action_type, created_at DESC)').run();
+db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(moderator_id, created_at DESC)').run();
+db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_id, created_at DESC)').run();
 
 const { ALL_PERMISSIONS, PERMISSIONS } = require('./permissions');
 const DEFAULT_MEMBER_PERMISSIONS =

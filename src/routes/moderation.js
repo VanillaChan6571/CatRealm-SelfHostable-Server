@@ -2,16 +2,13 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { PERMISSIONS, hasPermission } = require('../permissions');
-const { randomUUID } = require('crypto');
-
-// Helper function to log audit actions
-function logAuditAction(actionType, moderatorId, targetId = null, details = null) {
-  const id = randomUUID();
-  db.prepare(`
-    INSERT INTO audit_log (id, action_type, moderator_id, target_id, details, created_at)
-    VALUES (?, ?, ?, ?, ?, unixepoch())
-  `).run(id, actionType, moderatorId, targetId, details ? JSON.stringify(details) : null);
-}
+const {
+  AUDIT_ACTIONS,
+  VALID_RETENTION_DAYS,
+  logAuditAction,
+  getRetentionDays,
+  setRetentionDays,
+} = require('../lib/auditLog');
 
 // GET /api/moderation/settings - Get moderation settings
 router.get('/settings', (req, res) => {
@@ -57,10 +54,9 @@ router.put('/settings', (req, res) => {
     timeout_defaults ? JSON.stringify(timeout_defaults) : '{}'
   );
 
-  logAuditAction('MODERATION_SETTINGS_UPDATE', req.user.id, null, {
-    banned_words,
-    default_slowmode,
-    timeout_defaults
+  logAuditAction(AUDIT_ACTIONS.MODERATION_SETTINGS_UPDATE, req.user.id, {
+    targetType: 'server',
+    details: { banned_words, default_slowmode, timeout_defaults },
   });
 
   res.json({ success: true });
@@ -93,11 +89,15 @@ router.post('/timeout/:userId', (req, res) => {
     VALUES (?, ?, ?, ?, unixepoch())
   `).run(userId, expiresAt, reason || null, req.user.id);
 
-  logAuditAction('MEMBER_TIMEOUT', req.user.id, userId, {
-    username: targetUser.username,
-    duration,
-    reason,
-    expires_at: expiresAt
+  logAuditAction(AUDIT_ACTIONS.MEMBER_TIMEOUT, req.user.id, {
+    targetType: 'user',
+    targetId: userId,
+    details: {
+      username: targetUser.username,
+      duration,
+      reason,
+      expires_at: expiresAt,
+    },
   });
 
   res.json({
@@ -128,14 +128,16 @@ router.delete('/timeout/:userId', (req, res) => {
 
   db.prepare('DELETE FROM timeouts WHERE user_id = ?').run(userId);
 
-  logAuditAction('MEMBER_TIMEOUT_REMOVE', req.user.id, userId, {
-    previous_timeout: timeout
+  logAuditAction(AUDIT_ACTIONS.MEMBER_TIMEOUT_REMOVE, req.user.id, {
+    targetType: 'user',
+    targetId: userId,
+    details: { previous_timeout: timeout },
   });
 
   res.json({ success: true });
 });
 
-// GET /api/moderation/audit-log - Get audit log
+// GET /api/moderation/audit-log - Get audit log (filterable, keyset-paginated)
 router.get('/audit-log', (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -143,35 +145,142 @@ router.get('/audit-log', (req, res) => {
     return res.status(403).json({ error: 'Missing VIEW_AUDIT_LOG permission' });
   }
 
-  const limit = parseInt(req.query.limit) || 50;
-  const offset = parseInt(req.query.offset) || 0;
+  const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
 
+  const where = [];
+  const params = [];
+
+  if (req.query.action_types) {
+    const types = String(req.query.action_types)
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (types.length > 0) {
+      where.push(`al.action_type IN (${types.map(() => '?').join(',')})`);
+      params.push(...types);
+    }
+  }
+  if (req.query.actor_id) {
+    where.push('al.moderator_id = ?');
+    params.push(String(req.query.actor_id));
+  }
+  if (req.query.target_id) {
+    where.push('al.target_id = ?');
+    params.push(String(req.query.target_id));
+  }
+  const after = parseInt(req.query.after);
+  if (Number.isFinite(after)) {
+    where.push('al.created_at >= ?');
+    params.push(after);
+  }
+  const before = parseInt(req.query.before);
+  if (Number.isFinite(before)) {
+    where.push('al.created_at <= ?');
+    params.push(before);
+  }
+
+  const countWhere = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const total = db
+    .prepare(`SELECT COUNT(*) as count FROM audit_log al ${countWhere}`)
+    .get(...params).count;
+
+  // Keyset cursor: "<created_at>:<id>" of the last entry from the previous page
+  if (req.query.cursor) {
+    const sep = String(req.query.cursor).indexOf(':');
+    const cursorTs = parseInt(String(req.query.cursor).slice(0, sep));
+    const cursorId = String(req.query.cursor).slice(sep + 1);
+    if (Number.isFinite(cursorTs) && cursorId) {
+      where.push('(al.created_at, al.id) < (?, ?)');
+      params.push(cursorTs, cursorId);
+    }
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const logs = db.prepare(`
     SELECT
       al.id,
       al.action_type,
       al.moderator_id,
       al.target_id,
+      al.target_type,
+      al.channel_id,
       al.details,
-      al.created_at,
-      u.username as moderator_username
+      al.created_at
     FROM audit_log al
-    LEFT JOIN users u ON u.id = al.moderator_id
-    ORDER BY al.created_at DESC
-    LIMIT ? OFFSET ?
-  `).all(limit, offset);
+    ${whereSql}
+    ORDER BY al.created_at DESC, al.id DESC
+    LIMIT ?
+  `).all(...params, limit);
 
-  const total = db.prepare('SELECT COUNT(*) as count FROM audit_log').get().count;
+  // Resolve actor + user-targets into a users map for the client
+  const userIds = new Set();
+  for (const log of logs) {
+    if (log.moderator_id) userIds.add(log.moderator_id);
+    if (log.target_type === 'user' && log.target_id) userIds.add(log.target_id);
+  }
+  let users = {};
+  if (userIds.size > 0) {
+    const ids = [...userIds];
+    const rows = db.prepare(`
+      SELECT u.id, u.username, u.avatar,
+        COALESCE(dno.display_name, u.display_name) as display_name
+      FROM users u
+      LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+      WHERE u.id IN (${ids.map(() => '?').join(',')})
+    `).all(...ids);
+    users = Object.fromEntries(
+      rows.map((u) => [u.id, { username: u.username, display_name: u.display_name, avatar: u.avatar }])
+    );
+  }
 
+  const last = logs[logs.length - 1];
   res.json({
-    logs: logs.map(log => ({
+    logs: logs.map((log) => ({
       ...log,
-      details: log.details ? JSON.parse(log.details) : null
+      details: log.details ? JSON.parse(log.details) : null,
     })),
+    users,
     total,
     limit,
-    offset
+    cursor: logs.length === limit && last ? `${last.created_at}:${last.id}` : null,
   });
+});
+
+// GET /api/moderation/audit-log/retention - Get retention setting
+router.get('/audit-log/retention', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+  if (!hasPermission(req.user, PERMISSIONS.VIEW_AUDIT_LOG)) {
+    return res.status(403).json({ error: 'Missing VIEW_AUDIT_LOG permission' });
+  }
+
+  res.json({ retention_days: getRetentionDays() });
+});
+
+// PUT /api/moderation/audit-log/retention - Set retention (owner only)
+router.put('/audit-log/retention', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+  if (!req.user.is_owner) {
+    return res.status(403).json({ error: 'Only the server owner can change audit log retention' });
+  }
+
+  const { retention_days } = req.body;
+  if (retention_days !== null && !VALID_RETENTION_DAYS.includes(retention_days)) {
+    return res.status(400).json({
+      error: `retention_days must be null (forever) or one of: ${VALID_RETENTION_DAYS.join(', ')}`,
+    });
+  }
+
+  const previous = getRetentionDays();
+  setRetentionDays(retention_days);
+
+  logAuditAction(AUDIT_ACTIONS.AUDIT_RETENTION_UPDATE, req.user.id, {
+    targetType: 'server',
+    details: { before: previous, after: retention_days },
+  });
+
+  res.json({ retention_days });
 });
 
 module.exports = router;

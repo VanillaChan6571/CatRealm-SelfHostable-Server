@@ -35,14 +35,7 @@ function requirePermission(permission) {
   };
 }
 
-// Helper function to log audit actions
-function logAuditAction(actionType, moderatorId, targetId = null, details = null) {
-  const id = randomUUID();
-  db.prepare(`
-    INSERT INTO audit_log (id, action_type, moderator_id, target_id, details, created_at)
-    VALUES (?, ?, ?, ?, ?, unixepoch())
-  `).run(id, actionType, moderatorId, targetId, details ? JSON.stringify(details) : null);
-}
+const { AUDIT_ACTIONS, logAuditAction, diffFields } = require('../lib/auditLog');
 
 function isMediaHardLimitRemoved() {
   const value = String(process.env.MEDIA_REMOVE_LIMITS || '').trim().toLowerCase();
@@ -97,6 +90,12 @@ router.get('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
 // PUT /api/admin/settings
 router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   const { name, description, registrationOpen, mentionAlias } = req.body ?? {};
+  const settingsBefore = {
+    name: getSetting('server_name', ''),
+    description: getSetting('server_description', ''),
+    registrationOpen: getSetting('registration_open', 'true') === 'true',
+    mentionAlias: getSetting('mention_alias', '@everyone'),
+  };
   if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 50) {
     return res.status(400).json({ error: 'Server name must be 2-50 characters' });
   }
@@ -170,6 +169,17 @@ router.put('/settings', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res)
     theaterUploadHardMaxMb: getTheaterUploadHardMaxMb(),
   };
 
+  const settingsChanges = diffFields(settingsBefore, {
+    name: response.name,
+    description: response.description,
+    registrationOpen: response.registrationOpen,
+    mentionAlias: response.mentionAlias,
+  }, ['name', 'description', 'registrationOpen', 'mentionAlias']);
+  logAuditAction(AUDIT_ACTIONS.SERVER_UPDATE, req.user.id, {
+    targetType: 'server',
+    details: settingsChanges ? { changes: settingsChanges } : null,
+  });
+
   // Push live server-info updates to all connected clients.
   emitServerInfoUpdate({
     name: response.name,
@@ -201,9 +211,9 @@ router.put('/theater-youtube-cookies', requirePermission(PERMISSIONS.MANAGE_SERV
       source: source || 'manual',
       syncedByUser: req.user || null,
     });
-    logAuditAction('theater_youtube_cookies_updated', req.user?.id ?? null, null, {
-      source: status.source,
-      cookieCount: status.cookieCount,
+    logAuditAction('theater_youtube_cookies_updated', req.user?.id ?? null, {
+      targetType: 'server',
+      details: { source: status.source, cookieCount: status.cookieCount },
     });
     res.json(status);
   } catch (err) {
@@ -214,7 +224,7 @@ router.put('/theater-youtube-cookies', requirePermission(PERMISSIONS.MANAGE_SERV
 // DELETE /api/admin/theater-youtube-cookies
 router.delete('/theater-youtube-cookies', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   const status = clearTheaterYouTubeCookies();
-  logAuditAction('theater_youtube_cookies_cleared', req.user?.id ?? null, null, null);
+  logAuditAction('theater_youtube_cookies_cleared', req.user?.id ?? null, { targetType: 'server' });
   res.json(status);
 });
 
@@ -226,11 +236,17 @@ router.get('/webhooks', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, re
 // PATCH /api/admin/webhooks/:id
 router.patch('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
   try {
-    res.json(updateWebhookById({
+    const updated = updateWebhookById({
       req,
       webhookId: req.params.id,
       body: req.body ?? {},
-    }));
+    });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_UPDATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: req.params.id,
+      details: { name: updated?.name },
+    });
+    res.json(updated);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to update webhook' });
   }
@@ -239,10 +255,16 @@ router.patch('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (r
 // POST /api/admin/webhooks/:id/regenerate-secret
 router.post('/webhooks/:id/regenerate-secret', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
   try {
-    res.json(regenerateWebhookSecretById({
+    const result = regenerateWebhookSecretById({
       req,
       webhookId: req.params.id,
-    }));
+    });
+    logAuditAction(AUDIT_ACTIONS.WEBHOOK_UPDATE, req.user.id, {
+      targetType: 'webhook',
+      targetId: req.params.id,
+      details: { secret_regenerated: true },
+    });
+    res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Failed to regenerate webhook secret' });
   }
@@ -252,6 +274,10 @@ router.post('/webhooks/:id/regenerate-secret', requirePermission(PERMISSIONS.MAN
 router.delete('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (req, res) => {
   const deleted = deleteWebhookById(req.params.id);
   if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
+  logAuditAction(AUDIT_ACTIONS.WEBHOOK_DELETE, req.user.id, {
+    targetType: 'webhook',
+    targetId: req.params.id,
+  });
   res.json({ success: true });
 });
 
@@ -296,6 +322,11 @@ router.put('/users/:id/role', requirePermission(PERMISSIONS.MANAGE_ROLES), (req,
   if (user.is_owner) return res.status(400).json({ error: 'Cannot change role for the server owner' });
 
   db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+  logAuditAction(AUDIT_ACTIONS.MEMBER_BASE_ROLE_UPDATE, req.user.id, {
+    targetType: 'user',
+    targetId: id,
+    details: { before: user.role, after: role },
+  });
   res.json({ id, role });
 });
 
@@ -396,6 +427,11 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
   db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon, category_id, style_type, style_colors) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(id, name.trim(), color, permissions, maxPos + 1, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon, normalizedCategoryId, style_type || 'solid', normalizedStyleColors);
   const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
+  logAuditAction(AUDIT_ACTIONS.ROLE_CREATE, req.user.id, {
+    targetType: 'role',
+    targetId: id,
+    details: { name: role.name, color: role.color, permissions: String(role.permissions) },
+  });
   emitPermissionsChanged();
   res.status(201).json(role);
 });
@@ -450,6 +486,14 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
     }
   }
   const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
+  const roleChanges = diffFields(existing, role, ['name', 'permissions', 'color', 'position', 'mentionable', 'hoist', 'icon', 'category_id', 'style_type', 'style_colors']);
+  if (roleChanges) {
+    logAuditAction(AUDIT_ACTIONS.ROLE_UPDATE, req.user.id, {
+      targetType: 'role',
+      targetId: id,
+      details: { name: role.name, changes: roleChanges },
+    });
+  }
   emitPermissionsChanged();
   res.json(role);
 });
@@ -461,6 +505,11 @@ router.delete('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, r
   if (!existing) return res.status(404).json({ error: 'Role not found' });
   if (existing.is_default) return res.status(400).json({ error: 'Cannot delete default role' });
   db.prepare('DELETE FROM roles WHERE id = ?').run(id);
+  logAuditAction(AUDIT_ACTIONS.ROLE_DELETE, req.user.id, {
+    targetType: 'role',
+    targetId: id,
+    details: { name: existing.name, permissions: String(existing.permissions) },
+  });
   emitPermissionsChanged();
   res.json({ success: true });
 });
@@ -597,6 +646,8 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
     filtered.push(defaultRole.id);
   }
 
+  const previousRoleIds = db.prepare('SELECT role_id FROM user_roles WHERE user_id = ?').all(id).map((r) => r.role_id);
+
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(id);
     const insert = db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)');
@@ -605,6 +656,22 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
     }
   });
   tx();
+
+  const prevSet = new Set(previousRoleIds);
+  const nextSet = new Set(filtered);
+  const addedRoleIds = filtered.filter((rid) => !prevSet.has(rid));
+  const removedRoleIds = previousRoleIds.filter((rid) => !nextSet.has(rid));
+  if (addedRoleIds.length > 0 || removedRoleIds.length > 0) {
+    const roleNameById = new Map(db.prepare('SELECT id, name FROM roles').all().map((r) => [r.id, r.name]));
+    logAuditAction(AUDIT_ACTIONS.MEMBER_ROLES_UPDATE, req.user.id, {
+      targetType: 'user',
+      targetId: id,
+      details: {
+        added: addedRoleIds.map((rid) => ({ id: rid, name: roleNameById.get(rid) ?? rid })),
+        removed: removedRoleIds.map((rid) => ({ id: rid, name: roleNameById.get(rid) ?? rid })),
+      },
+    });
+  }
 
   emitPermissionsChanged();
   res.json({ id, roleIds: filtered });
@@ -624,9 +691,10 @@ router.post('/users/:id/kick', requirePermission(PERMISSIONS.KICK_MEMBER), (req,
 
   db.prepare('UPDATE users SET is_member = 0 WHERE id = ?').run(id);
 
-  logAuditAction('MEMBER_KICK', req.user.id, id, {
-    username: user.username,
-    reason
+  logAuditAction(AUDIT_ACTIONS.MEMBER_KICK, req.user.id, {
+    targetType: 'user',
+    targetId: id,
+    details: { username: user.username, reason },
   });
 
   emitPermissionsChanged();
@@ -658,9 +726,10 @@ router.post('/users/:id/ban', requirePermission(PERMISSIONS.BAN_MEMBER), (req, r
   `).run(id, req.user.id, reason || null);
   db.prepare('UPDATE users SET is_member = 0 WHERE id = ?').run(id);
 
-  logAuditAction('MEMBER_BAN', req.user.id, id, {
-    username: user.username,
-    reason
+  logAuditAction(AUDIT_ACTIONS.MEMBER_BAN, req.user.id, {
+    targetType: 'user',
+    targetId: id,
+    details: { username: user.username, reason },
   });
 
   emitPermissionsChanged();
@@ -685,8 +754,10 @@ router.delete('/users/:id/ban', requirePermission(PERMISSIONS.BAN_MEMBER), (req,
 
   db.prepare('DELETE FROM bans WHERE user_id = ?').run(id);
 
-  logAuditAction('MEMBER_UNBAN', req.user.id, id, {
-    username: user?.username || 'Unknown'
+  logAuditAction(AUDIT_ACTIONS.MEMBER_UNBAN, req.user.id, {
+    targetType: 'user',
+    targetId: id,
+    details: { username: user?.username || 'Unknown' },
   });
 
   res.json({ success: true, unbanned: user?.username || id });
@@ -1011,11 +1082,14 @@ router.post('/import-template', requirePermission(PERMISSIONS.MANAGE_SERVER), as
       setSetting('server_description', description);
     }
 
-    logAuditAction('TEMPLATE_IMPORT', req.user.id, null, {
-      template_name: name || 'Unknown',
-      roles_imported: imported.roles.length,
-      channels_imported: imported.channels.length,
-      categories_imported: imported.categories.length
+    logAuditAction(AUDIT_ACTIONS.TEMPLATE_IMPORT, req.user.id, {
+      targetType: 'server',
+      details: {
+        template_name: name || 'Unknown',
+        roles_imported: imported.roles.length,
+        channels_imported: imported.channels.length,
+        categories_imported: imported.categories.length,
+      },
     });
 
     pteroLog('[Template Import] ✓ Import complete!');
@@ -1098,6 +1172,7 @@ router.post('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBa
 
   const iconUrl = `/ugc/server/${req.file.filename}?v=${Date.now()}`;
   setSetting('server_icon', iconUrl);
+  logAuditAction(AUDIT_ACTIONS.SERVER_ICON_UPDATE, req.user.id, { targetType: 'server' });
 
   // Broadcast update
   emitServerInfoUpdate({
@@ -1112,6 +1187,7 @@ router.post('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), iconBa
 router.delete('/server-icon', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   removeRealmAsset('RealmIcon');
   db.prepare('DELETE FROM server_settings WHERE key = ?').run('server_icon');
+  logAuditAction(AUDIT_ACTIONS.SERVER_ICON_UPDATE, req.user.id, { targetType: 'server', details: { removed: true } });
 
   // Broadcast update
   emitServerInfoUpdate({
@@ -1130,6 +1206,7 @@ router.post('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), icon
 
   const bannerUrl = `/ugc/server/${req.file.filename}?v=${Date.now()}`;
   setSetting('server_banner', bannerUrl);
+  logAuditAction(AUDIT_ACTIONS.SERVER_BANNER_UPDATE, req.user.id, { targetType: 'server' });
 
   // Broadcast update
   emitServerInfoUpdate({
@@ -1144,6 +1221,7 @@ router.post('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), icon
 router.delete('/server-banner', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   removeRealmAsset('RealmBanner');
   db.prepare('DELETE FROM server_settings WHERE key = ?').run('server_banner');
+  logAuditAction(AUDIT_ACTIONS.SERVER_BANNER_UPDATE, req.user.id, { targetType: 'server', details: { removed: true } });
 
   // Broadcast update
   emitServerInfoUpdate({
