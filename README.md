@@ -12,7 +12,7 @@ Run several independent realms from one install — each on its own port with it
 
 ## Bots (optional)
 
-Create bot accounts from Realm Settings → Bots (token shown once, regenerable), or drop plugin bots into `data/bots/<name>/` to run them with the server. Bots register slash commands, and users individually Allow/Deny what each bot may do to them. See [docs/BOTS.md](docs/BOTS.md).
+Create bot accounts from Realm Settings → Bots (token shown once, regenerable), or drop plugin bots into `realm-plugins/<name>/` to run them with the server. Bots register slash commands, and users individually Allow/Deny what each bot may do to them. See [docs/BOTS.md](docs/BOTS.md).
 
 ## Push Notification Relay (optional)
 

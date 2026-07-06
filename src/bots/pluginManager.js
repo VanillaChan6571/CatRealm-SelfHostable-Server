@@ -8,7 +8,10 @@ const { createBotAccount, rotateBotToken, getBotByUserId } = require('./core');
 const { normalizeRequestedScopes } = require('./scopes');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
-const BOTS_DIR = process.env.BOTS_DIR || path.join(DATA_DIR, 'bots');
+// Primary plugin location is ./realm-plugins/<name>/ at the install root so
+// it's easy to find; data/bots/<name>/ still works as a legacy fallback.
+const PLUGINS_DIR = process.env.BOTS_DIR || path.join(__dirname, '../../realm-plugins');
+const LEGACY_PLUGINS_DIR = path.join(DATA_DIR, 'bots');
 
 const BACKOFF_START_MS = 1000;
 const BACKOFF_CAP_MS = 60 * 1000;
@@ -28,8 +31,9 @@ function pluginsEnabled() {
   return isTruthy(process.env.BOTS_PLUGINS_ENABLED, true);
 }
 
-function readManifest(dir) {
-  const manifestPath = path.join(BOTS_DIR, dir, 'bot.json');
+function readManifest(baseDir, dir) {
+  const botDir = path.join(baseDir, dir);
+  const manifestPath = path.join(botDir, 'bot.json');
   if (!fs.existsSync(manifestPath)) return null;
   let manifest;
   try {
@@ -49,8 +53,8 @@ function readManifest(dir) {
     return null;
   }
   const entry = String(manifest.entry || 'index.js');
-  const entryPath = path.resolve(BOTS_DIR, dir, entry);
-  if (!entryPath.startsWith(path.resolve(BOTS_DIR, dir))) {
+  const entryPath = path.resolve(botDir, entry);
+  if (!entryPath.startsWith(path.resolve(botDir))) {
     pteroLog(`[Bots] Ignoring ${dir}/bot.json — entry escapes the bot directory`);
     return null;
   }
@@ -61,7 +65,7 @@ function readManifest(dir) {
   return {
     name,
     username,
-    dir: path.join(BOTS_DIR, dir),
+    dir: botDir,
     entryPath,
     scopes: normalizeRequestedScopes(manifest.scopes),
     commands: Array.isArray(manifest.commands) ? manifest.commands : null,
@@ -206,17 +210,27 @@ function startPluginBots() {
     pteroLog('[Bots] Plugin bots disabled (BOTS_PLUGINS_ENABLED=false)');
     return;
   }
-  if (!fs.existsSync(BOTS_DIR)) return;
-  const dirs = fs.readdirSync(BOTS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => d.name);
+  const baseDirs = [PLUGINS_DIR];
+  if (path.resolve(LEGACY_PLUGINS_DIR) !== path.resolve(PLUGINS_DIR)) {
+    baseDirs.push(LEGACY_PLUGINS_DIR);
+  }
+  const candidates = [];
+  for (const baseDir of baseDirs) {
+    if (!fs.existsSync(baseDir)) continue;
+    for (const d of fs.readdirSync(baseDir, { withFileTypes: true })) {
+      if (d.isDirectory()) candidates.push({ baseDir, dir: d.name });
+    }
+  }
 
-  for (const dir of dirs) {
-    const manifest = readManifest(dir);
+  for (const { baseDir, dir } of candidates) {
+    const manifest = readManifest(baseDir, dir);
     if (!manifest) continue;
     if (plugins.has(manifest.name)) {
-      pteroLog(`[Bots] Duplicate plugin name "${manifest.name}" — skipping ${dir}`);
+      pteroLog(`[Bots] Duplicate plugin name "${manifest.name}" — skipping ${path.join(baseDir, dir)}`);
       continue;
+    }
+    if (baseDir === LEGACY_PLUGINS_DIR) {
+      pteroLog(`[Bots] Plugin "${manifest.name}" loaded from legacy data/bots/ — consider moving it to realm-plugins/`);
     }
     const botRow = provisionPlugin(manifest);
     if (!botRow) continue;
@@ -270,5 +284,5 @@ module.exports = {
   stopPluginBots,
   setPluginEnabled,
   getPluginStatuses,
-  BOTS_DIR,
+  PLUGINS_DIR,
 };

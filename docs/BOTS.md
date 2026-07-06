@@ -7,7 +7,7 @@ the **roles you assign them** — exactly like human members.
 
 | | Token bot | Plugin bot |
 |---|---|---|
-| Created by | Realm Settings → **Bots** tab | Dropping code into `data/bots/<name>/` |
+| Created by | Realm Settings → **Bots** tab | Dropping code into `realm-plugins/<name>/` |
 | Runs | Anywhere you want (your own process/host) | As a child process of the server |
 | Credential | Token shown once at creation (regenerable) | Auto-generated fresh on every server boot |
 | Private storage | Bring your own | `data/bot-<username>.db` path handed to the process |
@@ -55,7 +55,7 @@ The token also works as a Bearer token on the REST API
 
 ## Plugin bots
 
-Create `data/bots/<name>/bot.json`:
+Create `realm-plugins/<name>/bot.json`:
 
 ```json
 {
@@ -83,7 +83,7 @@ consecutive crashes — status shows in the Bots tab). Logs are prefixed
 `BOTS_PLUGINS_ENABLED=false` in `.env` to disable the plugin loader entirely.
 
 A complete example lives in [`examples/bots/ping`](../examples/bots/ping) —
-copy it to `data/bots/ping`, run `npm install` inside it, restart the server,
+copy it to `realm-plugins/ping`, run `npm install` inside it, restart the server,
 and type `/ping` in any channel.
 
 > **Security note:** plugin processes run with the same filesystem rights as
@@ -153,7 +153,7 @@ Socket events:
 
 - Deleting a bot keeps its past messages (the account is soft-removed).
 - Multi-realm: each realm has its own bots; plugin bots live in each realm's
-  own `data/bots/` and connect to that realm's port.
+  own plugins and connect to that realm's port.
 - Real DMs (the Central-hosted, end-to-end-encrypted kind) are not available
   to realm bots — Bot DMs are realm-local.
 - Mobile client support for bot UIs (commands, Bot DMs) is not included yet;

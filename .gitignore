@@ -1,5 +1,6 @@
 .env
 data/
+realm-plugins/
 node_modules/
 package-lock.json
 AGENTS.md
