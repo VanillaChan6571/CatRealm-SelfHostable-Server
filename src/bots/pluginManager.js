@@ -210,6 +210,12 @@ function startPluginBots() {
     pteroLog('[Bots] Plugin bots disabled (BOTS_PLUGINS_ENABLED=false)');
     return;
   }
+  // Create the primary folder so hosts can find where plugins go.
+  try {
+    fs.mkdirSync(PLUGINS_DIR, { recursive: true });
+  } catch (err) {
+    pteroLog(`[Bots] Could not create ${PLUGINS_DIR}: ${err.message}`);
+  }
   const baseDirs = [PLUGINS_DIR];
   if (path.resolve(LEGACY_PLUGINS_DIR) !== path.resolve(PLUGINS_DIR)) {
     baseDirs.push(LEGACY_PLUGINS_DIR);
