@@ -600,6 +600,59 @@ if (!userColumns.includes('left_server')) {
   db.prepare('ALTER TABLE users ADD COLUMN left_server INTEGER NOT NULL DEFAULT 0').run();
   pteroLog('[CatRealm] Added users.left_server column');
 }
+if (!userColumns.includes('is_bot')) {
+  db.prepare('ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0').run();
+  pteroLog('[CatRealm] Added users.is_bot column');
+}
+
+// ── Bots ─────────────────────────────────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS bots (
+    id               TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    kind             TEXT NOT NULL DEFAULT 'token' CHECK(kind IN ('token', 'plugin')),
+    plugin_name      TEXT,
+    token_hash       TEXT,
+    token_preview    TEXT,
+    requested_scopes TEXT NOT NULL DEFAULT '[]',
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_by       TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS bot_commands (
+    id          TEXT PRIMARY KEY,
+    bot_id      TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    options     TEXT NOT NULL DEFAULT '[]',
+    updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (bot_id, name)
+  );
+
+  CREATE TABLE IF NOT EXISTS bot_user_consents (
+    bot_id     TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    decision   TEXT NOT NULL CHECK(decision IN ('allowed', 'denied')),
+    scopes     TEXT NOT NULL DEFAULT '{}',
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (bot_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS bot_dm_messages (
+    id         TEXT PRIMARY KEY,
+    bot_id     TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    sender     TEXT NOT NULL CHECK(sender IN ('bot', 'user')),
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    read       INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bot_dm_conversation ON bot_dm_messages(user_id, bot_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_bot_dm_bot ON bot_dm_messages(bot_id, created_at);
+`);
 
 const webhookColumns = db.prepare('PRAGMA table_info(webhooks)').all().map((c) => c.name);
 if (webhookColumns.length > 0) {
@@ -687,6 +740,12 @@ if (!messageColumns.includes('forward_from_channel')) {
 if (!messageColumns.includes('embeds_enabled')) {
   db.prepare("ALTER TABLE messages ADD COLUMN embeds_enabled INTEGER NOT NULL DEFAULT 1").run();
   pteroLog('[CatRealm] Added messages.embeds_enabled column');
+}
+if (!messageColumns.includes('interaction_meta')) {
+  // JSON {command, invokerId, invokerName} when the message is a bot's reply
+  // to a slash-command interaction.
+  db.prepare('ALTER TABLE messages ADD COLUMN interaction_meta TEXT').run();
+  pteroLog('[CatRealm] Added messages.interaction_meta column');
 }
 
 // Create indexes after columns exist

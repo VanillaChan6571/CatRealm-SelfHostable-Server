@@ -1,0 +1,9 @@
+{
+  "name": "ping",
+  "username": "PingBot",
+  "entry": "index.js",
+  "scopes": ["interactions"],
+  "commands": [
+    { "name": "ping", "description": "Replies with pong and the round-trip time", "options": [] }
+  ]
+}

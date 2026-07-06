@@ -7,6 +7,7 @@ const { SERVER_MODE } = require('../middleware/auth');
 const { updateOnlineUserAvatar, updateOnlineUserStatus, updateOnlineUserDisplayName, updateOnlineUserActivity, updateOnlineUserCustomStatus } = require('../socket/handler');
 const { getSetting } = require('../settings');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
+const { BOT_SCOPES, botHasScope } = require('../bots/scopes');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../data/uploads');
 const AVATAR_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -47,6 +48,8 @@ const upload = multer({
 const USER_PROFILE_SELECT = 'SELECT id, username, role, avatar, banner, bio, is_owner, status, display_name, custom_status_text, activity_type, activity_text, activity_started_at, pronouns, created_at FROM users WHERE id = ?';
 
 function ensureProfileAllowed(req, res, next) {
+  // Bot accounts are realm-local regardless of server mode.
+  if (req.user?.is_bot || req.user?.accountType === 'bot') return next();
   if (SERVER_MODE === 'decentral_only' && req.user?.accountType !== 'local') {
     return res.status(403).json({ error: 'Profiles are only available for local accounts on this server' });
   }
@@ -220,7 +223,7 @@ router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
   const { userId } = req.params;
   if (!isUuid(userId)) return next();
   const user = db.prepare(`
-    SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type, u.central_id, u.pronouns, u.created_at,
+    SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.is_bot, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type, u.central_id, u.pronouns, u.created_at,
       COALESCE(dno.display_name, u.display_name) as effective_display_name
     FROM users u
     LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
@@ -230,15 +233,42 @@ router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
   `).get(userId, userId, userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
-  res.json({
+  const profile = {
     ...user,
     display_name: user.effective_display_name,
     centralId: user.central_id || null,
     pronouns: user.pronouns ?? null,
     serverJoinDate: user.created_at ?? null,
     isOwner: !!user.is_owner,
+    isBot: !!user.is_bot,
     accountType: user.account_type || 'local'
-  });
+  };
+
+  if (user.is_bot) {
+    const botRow = db.prepare('SELECT id, requested_scopes, enabled FROM bots WHERE user_id = ?').get(user.id);
+    if (botRow) {
+      profile.botId = botRow.id;
+      try {
+        profile.botRequestedScopes = JSON.parse(botRow.requested_scopes || '[]');
+      } catch {
+        profile.botRequestedScopes = [];
+      }
+      profile.botEnabled = Number(botRow.enabled) === 1;
+    }
+  }
+
+  // Bot requesters only see personal profile fields the user consented to.
+  if (req.bot && !botHasScope(db, req.bot.id, user.id, BOT_SCOPES.PROFILE)) {
+    profile.bio = null;
+    profile.pronouns = null;
+    profile.status = null;
+    profile.custom_status_text = null;
+    profile.activity_type = null;
+    profile.activity_text = null;
+    profile.activity_started_at = null;
+  }
+
+  res.json(profile);
 });
 
 // GET /api/profile/:userId/roles

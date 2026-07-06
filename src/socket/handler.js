@@ -13,6 +13,8 @@ const {
   computeUserChannelPermissions,
 } = require('../permissions');
 const { applyRoleViewToUser } = require('../viewAsRole');
+const { isBotToken, resolveBotToken } = require('../bots/core');
+const { BOT_SCOPES, botHasScope, getBotConsent } = require('../bots/scopes');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
@@ -71,6 +73,56 @@ const THEATER_AUTO_ADVANCE_DELAY_MS = 20000;
 const pendingTheaterAutoAdvances = new Map();
 // Per-user reaction rate limiting: userId -> { count, resetAt }
 const theaterReactionLimits = new Map();
+
+// ── Bots ─────────────────────────────────────────────────────────────────────
+// HTTP traffic goes through the express rate limiter, but sockets have no
+// generic throttle — cap chatty bots here. userId -> { count, resetAt }
+const botEventLimits = new Map();
+const BOT_EVENT_LIMIT = 30;
+const BOT_EVENT_WINDOW_MS = 10 * 1000;
+
+function botEventAllowed(userId) {
+  const now = Date.now();
+  const entry = botEventLimits.get(userId);
+  if (!entry || now >= entry.resetAt) {
+    botEventLimits.set(userId, { count: 1, resetAt: now + BOT_EVENT_WINDOW_MS });
+    return true;
+  }
+  entry.count += 1;
+  return entry.count <= BOT_EVENT_LIMIT;
+}
+
+// Pending slash-command interactions awaiting a bot response.
+// id -> { botId, botUserId, userId, channelId, threadId, command, createdAt, timer }
+const pendingInteractions = new Map();
+const INTERACTION_TTL_MS = 60 * 1000;
+
+function emitToUserSockets(userId, event, data) {
+  if (!ioInstance) return 0;
+  const entry = onlineUsers.get(userId);
+  if (!entry?.sockets?.size) return 0;
+  let count = 0;
+  for (const socketId of entry.sockets) {
+    const socket = ioInstance.sockets.sockets.get(socketId);
+    if (!socket) continue;
+    socket.emit(event, data);
+    count += 1;
+  }
+  return count;
+}
+
+// Disconnect all live sockets for a user without the "kicked from server"
+// semantics — used when a bot token is regenerated or the bot is disabled.
+function disconnectUserSockets(userId) {
+  if (!ioInstance || !userId) return 0;
+  let count = 0;
+  for (const [, socket] of ioInstance.sockets.sockets) {
+    if (socket.authUser?.id !== userId) continue;
+    socket.disconnect(true);
+    count += 1;
+  }
+  return count;
+}
 
 // Reset activity timestamp; wake a sleeping user back to online
 function touchActivity(userId) {
@@ -372,6 +424,28 @@ function setupSocketHandlers(io) {
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('No token'));
+    if (isBotToken(token)) {
+      try {
+        const { bot } = resolveBotToken(db, token);
+        const dbUser = db.prepare('SELECT id, username, role, is_owner, is_member, is_bot FROM users WHERE id = ?').get(bot.user_id);
+        if (!dbUser) return next(new Error('Invalid token'));
+        if (Number(dbUser.is_member ?? 1) !== 1) return next(new Error('Removed from server'));
+        const authUser = {
+          id: dbUser.id,
+          username: dbUser.username,
+          role: dbUser.role,
+          is_owner: 0,
+          is_bot: 1,
+          permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
+        };
+        socket.authUser = authUser;
+        socket.user = authUser;
+        socket.bot = bot;
+        return next();
+      } catch (err) {
+        return next(new Error(err.message || 'Invalid bot token'));
+      }
+    }
     try {
       const payload = jwt.verify(token, JWT_SECRET);
       const dbUser = db.prepare('SELECT id, username, role, is_owner, is_member FROM users WHERE id = ?').get(payload.id);
@@ -1248,6 +1322,9 @@ function setupSocketHandlers(io) {
     // ── Send a message ─────────────────────────────────────────────────────────
     socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at, client_nonce }) => {
       touchActivity(user.id);
+      if (user.is_bot && !botEventAllowed(user.id)) {
+        return socket.emit('error', 'Bot rate limit exceeded — slow down');
+      }
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
         .filter((a) => a && typeof a.url === 'string');
@@ -1444,6 +1521,7 @@ function setupSocketHandlers(io) {
         avatar: userInfo?.avatar || null,
         display_name: userInfo?.display_name || null,
         verified: authUser.verified || false,
+        is_bot: authUser.is_bot ? 1 : 0,
         attachment_url: attachmentUrl,
         attachment_type: attachmentType,
         attachment_size: attachmentSize,
@@ -1495,6 +1573,8 @@ function setupSocketHandlers(io) {
                   new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed)
                 );
                 if (!isMentioned) return false;
+                // Bot authors need the user's per-user "mentions" consent to ping them.
+                if (authUser.is_bot && socket.bot && !botHasScope(db, socket.bot.id, m.id, BOT_SCOPES.MENTIONS)) return false;
                 // Skip push only if the user has an active foregrounded session
                 if (isUserForegrounded(m.id)) return false;
                 return true;
@@ -1539,6 +1619,261 @@ function setupSocketHandlers(io) {
         // For now, this would emit a reaction event once reactions are implemented
         // io.to(channelId).emit('reaction:add', { messageId: id, emoji: channelSettings.default_reaction, userId: 'system' });
       }
+    });
+
+    // ── Invoke a bot slash command ─────────────────────────────────────────────
+    socket.on('interaction:invoke', ({ botId, command, channelId, threadId, options, nonce }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack({ nonce: nonce || null, ...payload }); };
+      if (user.is_bot) return reply({ status: 'denied', error: 'Bots cannot invoke commands' });
+      touchActivity(user.id);
+      if (typeof botId !== 'string' || typeof command !== 'string' || typeof channelId !== 'string') {
+        return reply({ status: 'invalid', error: 'Missing botId/command/channelId' });
+      }
+      const bot = db.prepare('SELECT * FROM bots WHERE id = ?').get(botId);
+      if (!bot || Number(bot.enabled) !== 1) return reply({ status: 'unknown_bot' });
+      const commandRow = db.prepare('SELECT * FROM bot_commands WHERE bot_id = ? AND name = ?').get(botId, command.toLowerCase());
+      if (!commandRow) return reply({ status: 'unknown_command' });
+      const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
+      if (!channel) return reply({ status: 'invalid', error: 'Channel not found' });
+      if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)
+        || !canSendToChannel(user, channelId, channel.type, threadId)) {
+        return reply({ status: 'denied', error: 'Missing channel permission' });
+      }
+
+      const botUserRow = db.prepare('SELECT id, username, display_name, avatar FROM users WHERE id = ?').get(bot.user_id);
+      const consent = getBotConsent(db, bot.id, user.id);
+      if (!consent) {
+        // First interaction — the client opens the consent modal, then re-invokes.
+        return reply({
+          status: 'consent_required',
+          bot: {
+            id: bot.id,
+            userId: bot.user_id,
+            username: botUserRow?.username || null,
+            displayName: botUserRow?.display_name || null,
+            avatar: botUserRow?.avatar || null,
+          },
+          requestedScopes: JSON.parse(bot.requested_scopes || '[]'),
+        });
+      }
+      if (consent.decision !== 'allowed' || consent.scopes?.interactions !== true) {
+        return reply({ status: 'denied', error: 'You have denied this bot' });
+      }
+
+      const botPresence = onlineUsers.get(bot.user_id);
+      if (!botPresence?.sockets?.size) return reply({ status: 'bot_offline' });
+
+      // Sanitize options: flat map of primitive values only.
+      const safeOptions = {};
+      if (options && typeof options === 'object' && !Array.isArray(options)) {
+        for (const [key, value] of Object.entries(options)) {
+          if (!/^[a-z0-9_-]{1,32}$/i.test(key)) continue;
+          if (['string', 'number', 'boolean'].includes(typeof value)) {
+            safeOptions[key] = typeof value === 'string' ? value.slice(0, 1000) : value;
+          }
+        }
+      }
+
+      const interactionId = randomUUID();
+      const timer = setTimeout(() => {
+        if (!pendingInteractions.delete(interactionId)) return;
+        emitToUserSockets(user.id, 'interaction:failed', { id: interactionId, reason: 'timeout' });
+      }, INTERACTION_TTL_MS);
+      timer.unref?.();
+      pendingInteractions.set(interactionId, {
+        botId: bot.id,
+        botUserId: bot.user_id,
+        userId: user.id,
+        channelId,
+        threadId: threadId || null,
+        command: commandRow.name,
+        createdAt: Date.now(),
+        timer,
+      });
+
+      const invokerPayload = { id: user.id, username: authUser.username };
+      const invokerRow = db.prepare(`
+        SELECT u.bio, u.pronouns, u.status, u.activity_type, u.activity_text,
+          COALESCE(dno.display_name, u.display_name) as display_name
+        FROM users u
+        LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+        WHERE u.id = ?
+      `).get(user.id);
+      invokerPayload.displayName = invokerRow?.display_name || null;
+      if (botHasScope(db, bot.id, user.id, BOT_SCOPES.PROFILE)) {
+        invokerPayload.bio = invokerRow?.bio || null;
+        invokerPayload.pronouns = invokerRow?.pronouns || null;
+        invokerPayload.status = invokerRow?.status || null;
+        invokerPayload.activityType = invokerRow?.activity_type || null;
+        invokerPayload.activityText = invokerRow?.activity_text || null;
+      }
+
+      for (const socketId of botPresence.sockets) {
+        const botSocket = io.sockets.sockets.get(socketId);
+        if (!botSocket) continue;
+        botSocket.emit('interaction:create', {
+          id: interactionId,
+          command: commandRow.name,
+          options: safeOptions,
+          channelId,
+          threadId: threadId || null,
+          user: invokerPayload,
+          respondBy: Date.now() + INTERACTION_TTL_MS,
+        });
+      }
+      reply({ status: 'ok', interactionId });
+    });
+
+    // ── Bot responds to an interaction ─────────────────────────────────────────
+    socket.on('interaction:respond', ({ id, content, ephemeral }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      if (!socket.bot) return reply({ status: 'denied', error: 'Not a bot connection' });
+      if (!botEventAllowed(user.id)) return reply({ status: 'rate_limited' });
+      const interaction = pendingInteractions.get(id);
+      if (!interaction || interaction.botId !== socket.bot.id) return reply({ status: 'unknown_interaction' });
+      const trimmed = typeof content === 'string' ? content.trim() : '';
+      if (!trimmed) return reply({ status: 'invalid', error: 'Content required' });
+      if (trimmed.length > 2000) return reply({ status: 'invalid', error: 'Message too long (max 2000 chars)' });
+      clearTimeout(interaction.timer);
+      pendingInteractions.delete(id);
+
+      const interactionMeta = {
+        command: interaction.command,
+        invokerId: interaction.userId,
+        invokerName: db.prepare(`
+          SELECT COALESCE(dno.display_name, u.display_name, u.username) as name
+          FROM users u LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+          WHERE u.id = ?
+        `).get(interaction.userId)?.name || 'unknown',
+      };
+
+      if (ephemeral === true) {
+        // Visible only to the invoker; never persisted.
+        emitToUserSockets(interaction.userId, 'bot:ephemeral', {
+          interactionId: id,
+          channelId: interaction.channelId,
+          threadId: interaction.threadId,
+          botUserId: user.id,
+          username: authUser.username,
+          displayName: onlineUsers.get(user.id)?.display_name || null,
+          avatar: onlineUsers.get(user.id)?.avatar || null,
+          content: trimmed,
+          interaction: interactionMeta,
+          created_at: Math.floor(Date.now() / 1000),
+        });
+        return reply({ status: 'ok' });
+      }
+
+      const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(interaction.channelId);
+      if (!channel) return reply({ status: 'invalid', error: 'Channel not found' });
+      if (!canSendToChannel(user, interaction.channelId, channel.type, interaction.threadId)) {
+        return reply({ status: 'denied', error: 'Missing permission: send_messages' });
+      }
+
+      const messageId = randomUUID();
+      const now = Math.floor(Date.now() / 1000);
+      const canEmbedLinks = hasChannelPermission(user, interaction.channelId, PERMISSIONS.EMBED_LINKS, db);
+      db.prepare(`
+        INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type, thread_id, embeds_enabled, interaction_meta)
+        VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?)
+      `).run(
+        messageId, interaction.channelId, user.id, encryptMessageContent(trimmed), now,
+        interaction.threadId, canEmbedLinks ? 1 : 0, JSON.stringify(interactionMeta)
+      );
+
+      const botInfo = db.prepare('SELECT avatar, display_name FROM users WHERE id = ?').get(user.id);
+      const message = {
+        id: messageId,
+        channel_id: interaction.channelId,
+        user_id: user.id,
+        username: authUser.username,
+        content: trimmed,
+        edited: 0,
+        is_owner: 0,
+        is_bot: 1,
+        role_color: null,
+        avatar: botInfo?.avatar || null,
+        display_name: botInfo?.display_name || null,
+        verified: false,
+        attachment_url: null,
+        attachment_type: null,
+        attachment_size: null,
+        attachments: [],
+        nsfw_tags: [],
+        message_type: 'user',
+        thread_id: interaction.threadId,
+        created_at: now,
+        embeds_enabled: canEmbedLinks ? 1 : 0,
+        interaction: interactionMeta,
+      };
+      if (interaction.threadId) {
+        io.to(`thread:${interaction.threadId}`).emit('message:new', message);
+      } else {
+        io.to(interaction.channelId).emit('message:new', message);
+      }
+      queueMessageCreatedEvent(message);
+      reply({ status: 'ok', messageId });
+    });
+
+    // ── Bot DMs (persisted, surfaced in the client's "Bot DMs" channel) ────────
+    socket.on('bot:dm:send', ({ userId, content }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      if (!socket.bot) return reply({ status: 'denied', error: 'Not a bot connection' });
+      if (!botEventAllowed(user.id)) return reply({ status: 'rate_limited' });
+      const trimmed = typeof content === 'string' ? content.trim() : '';
+      if (!trimmed || typeof userId !== 'string') return reply({ status: 'invalid', error: 'userId and content required' });
+      if (trimmed.length > 2000) return reply({ status: 'invalid', error: 'Message too long (max 2000 chars)' });
+      const target = db.prepare('SELECT id, is_member, is_bot FROM users WHERE id = ?').get(userId);
+      if (!target || Number(target.is_member ?? 1) !== 1 || Number(target.is_bot) === 1) {
+        return reply({ status: 'invalid', error: 'Target user not found' });
+      }
+      if (!botHasScope(db, socket.bot.id, userId, BOT_SCOPES.PRIVATE_MESSAGES)) {
+        return reply({ status: 'consent_required', error: 'User has not allowed private messages from this bot' });
+      }
+      const id = randomUUID();
+      const now = Math.floor(Date.now() / 1000);
+      db.prepare(`
+        INSERT INTO bot_dm_messages (id, bot_id, user_id, sender, content, created_at, read)
+        VALUES (?, ?, ?, 'bot', ?, ?, 0)
+      `).run(id, socket.bot.id, userId, encryptMessageContent(trimmed), now);
+      emitToUserSockets(userId, 'bot:dm', {
+        id,
+        botId: socket.bot.id,
+        botUserId: user.id,
+        username: authUser.username,
+        displayName: onlineUsers.get(user.id)?.display_name || null,
+        avatar: onlineUsers.get(user.id)?.avatar || null,
+        sender: 'bot',
+        content: trimmed,
+        created_at: now,
+      });
+      reply({ status: 'ok', id });
+    });
+
+    socket.on('bot:dm:reply', ({ botId, content }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      if (user.is_bot) return reply({ status: 'denied' });
+      touchActivity(user.id);
+      const trimmed = typeof content === 'string' ? content.trim() : '';
+      if (!trimmed || typeof botId !== 'string') return reply({ status: 'invalid', error: 'botId and content required' });
+      if (trimmed.length > 2000) return reply({ status: 'invalid', error: 'Message too long (max 2000 chars)' });
+      const bot = db.prepare('SELECT * FROM bots WHERE id = ?').get(botId);
+      if (!bot || Number(bot.enabled) !== 1) return reply({ status: 'unknown_bot' });
+      const id = randomUUID();
+      const now = Math.floor(Date.now() / 1000);
+      db.prepare(`
+        INSERT INTO bot_dm_messages (id, bot_id, user_id, sender, content, created_at, read)
+        VALUES (?, ?, ?, 'user', ?, ?, 1)
+      `).run(id, botId, user.id, encryptMessageContent(trimmed), now);
+      emitToUserSockets(bot.user_id, 'bot:dm:incoming', {
+        id,
+        botId,
+        userId: user.id,
+        username: authUser.username,
+        content: trimmed,
+        created_at: now,
+      });
+      reply({ status: 'ok', id });
     });
 
     // ── Toggle a reaction on a message ─────────────────────────────────────────
@@ -1676,6 +2011,7 @@ function buildOnlineList() {
     activityStartedAt: info.activity_started_at || null,
     accountType: info.account_type || 'local',
     verified: info.verified || false,
+    isBot: info.account_type === 'bot',
     clients: [...new Set((info.clientSockets || new Map()).values())],
   }));
 }
@@ -1771,6 +2107,14 @@ module.exports.emitServerInfoUpdate = emitServerInfoUpdate;
 module.exports.emitServerImportStatus = emitServerImportStatus;
 module.exports.emitPermissionsChanged = emitPermissionsChanged;
 module.exports.kickUserFromServer = kickUserFromServer;
+module.exports.disconnectUserSockets = disconnectUserSockets;
+module.exports.emitToUserSockets = emitToUserSockets;
+module.exports.getOnlineUserIds = () => new Set(onlineUsers.keys());
+// Nudge composers to refetch the slash-command list.
+module.exports.emitBotCommandsUpdated = () => {
+  if (!ioInstance) return;
+  ioInstance.emit('bots:commands_updated');
+};
 module.exports.updateOnlineUserAvatar = (userId, avatar) => {
   const entry = onlineUsers.get(userId);
   if (!entry || !ioInstance) return;

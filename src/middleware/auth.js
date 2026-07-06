@@ -3,6 +3,7 @@ const axios = require('axios');
 const db = require('../db');
 const { computePermissionsForUser } = require('../permissions');
 const { applyRoleViewToUser } = require('../viewAsRole');
+const { isBotToken, resolveBotToken } = require('../bots/core');
 const pteroLog = require('../logger');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
@@ -14,6 +15,30 @@ const AUTH_VERIFY_TIMEOUT = Number(process.env.AUTH_VERIFY_TIMEOUT || 5000);
 async function authenticateToken(req, res, next) {
   const token = req.headers['authorization']?.split(' ')[1] ?? req.query?.token;
   if (!token) return res.status(401).json({ error: 'No token provided' });
+
+  // Bot tokens (crbt_ prefix) are non-expiring but revocable: the stored hash
+  // must match, so a regenerate/disable invalidates them immediately.
+  if (isBotToken(token)) {
+    try {
+      const { bot } = resolveBotToken(db, token);
+      const user = db.prepare('SELECT id, username, role, is_owner, is_member, onboarding_completed, is_bot FROM users WHERE id = ?').get(bot.user_id);
+      if (!user) return res.status(401).json({ error: 'User not found' });
+      if (Number(user.is_member ?? 1) !== 1) return res.status(403).json({ error: 'Removed from server' });
+      const permissions = computePermissionsForUser(user.id, user.role, user.is_owner, db);
+      req.authUser = {
+        ...user,
+        is_owner: 0,
+        is_bot: 1,
+        permissions,
+        accountType: 'bot',
+      };
+      req.user = req.authUser;
+      req.bot = bot;
+      return next();
+    } catch (err) {
+      return res.status(err.status || 401).json({ error: err.message || 'Invalid bot token' });
+    }
+  }
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);

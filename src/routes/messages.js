@@ -44,7 +44,7 @@ router.get('/:channelId', (req, res) => {
   let messages;
   if (before) {
     messages = db.prepare(`
-      SELECT m.*, u.username, u.avatar, u.is_owner,
+      SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
         COALESCE(dno.display_name, u.display_name) as display_name,
         (SELECT r.color FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id
@@ -80,7 +80,7 @@ router.get('/:channelId', (req, res) => {
     `).all(channelId, before, req.user.id, limit);
   } else {
     messages = db.prepare(`
-      SELECT m.*, u.username, u.avatar, u.is_owner,
+      SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
         COALESCE(dno.display_name, u.display_name) as display_name,
         (SELECT r.color FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id
@@ -139,7 +139,11 @@ router.get('/:channelId', (req, res) => {
     if (!attachments && m.attachment_url) {
       attachments = [{ url: m.attachment_url, mime: m.attachment_type, size: m.attachment_size }];
     }
-    return { ...m, attachments: attachments ?? [] };
+    let interaction = null;
+    if (m.interaction_meta) {
+      try { interaction = JSON.parse(m.interaction_meta); } catch { interaction = null; }
+    }
+    return { ...m, attachments: attachments ?? [], interaction };
   });
 
   messages = attachReactionsToMessages(messages);

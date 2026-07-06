@@ -226,7 +226,7 @@ router.get('/:id/messages', (req, res) => {
   let messages;
   if (before) {
     messages = db.prepare(`
-      SELECT m.*, u.username, u.avatar, u.is_owner,
+      SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
         COALESCE(dno.display_name, u.display_name) as display_name,
         (SELECT r.color FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id
@@ -247,7 +247,7 @@ router.get('/:id/messages', (req, res) => {
     `).all(id, before, limit);
   } else {
     messages = db.prepare(`
-      SELECT m.*, u.username, u.avatar, u.is_owner,
+      SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
         COALESCE(dno.display_name, u.display_name) as display_name,
         (SELECT r.color FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id

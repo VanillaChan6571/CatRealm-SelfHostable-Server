@@ -284,7 +284,7 @@ router.delete('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (
 // GET /api/admin/users
 router.get('/users', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) => {
   const users = db.prepare(`
-    SELECT u.id, u.username, u.role, u.avatar, u.bio, u.is_owner
+    SELECT u.id, u.username, u.role, u.avatar, u.bio, u.is_owner, u.is_bot
     FROM users u
     WHERE COALESCE(u.is_member, 1) = 1
       AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.user_id = u.id)
@@ -300,8 +300,9 @@ router.get('/users', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) =>
   res.json(users.map((u) => ({
     ...u,
     isOwner: !!u.is_owner,
+    isBot: !!u.is_bot,
     roleIds: rolesByUser.get(u.id) ?? [],
-    accountType: 'local',
+    accountType: u.is_bot ? 'bot' : 'local',
   })));
 });
 

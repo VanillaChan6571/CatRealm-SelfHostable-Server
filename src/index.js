@@ -518,6 +518,8 @@ const expressionsRoutes = require('./routes/expressions');
 const embedsRoutes = require('./routes/embeds');
 const embedMediaRoutes = require('./routes/embedMedia');
 const webhooksRoutes = require('./routes/webhooks');
+const botsRoutes = require('./routes/bots');
+const { startPluginBots, stopPluginBots } = require('./bots/pluginManager');
 const welcomeRoutes = require('./routes/welcome');
 const theaterRoutes = require('./routes/theater');
 const mediaRoutes = require('./routes/media').router;
@@ -601,6 +603,7 @@ app.use('/api/embeds', authenticateToken, embedsRoutes);
 app.use('/api/theater',  authenticateToken, theaterRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/webhooks', webhooksRoutes);
+app.use('/api/bots', authenticateToken, botsRoutes);
 app.use('/api', welcomeRoutes);
 
 // ── Create server & start ─────────────────────────────────────────────────────
@@ -692,6 +695,7 @@ async function start() {
     pteroLog(`[CatRealm] Server running on port ${PORT}`);
     pteroLog(`[CatRealm] Server name: ${process.env.SERVER_NAME || 'CatRealm Server'}`);
     pteroLog(`[CatRealm] Registration: ${process.env.REGISTRATION_OPEN === 'false' ? 'CLOSED' : 'OPEN'}`);
+    startPluginBots();
   });
 
   // ── Graceful shutdown ───────────────────────────────────────────────────────
@@ -702,6 +706,8 @@ async function start() {
     shuttingDown = true;
 
     pteroLog(`[CatRealm] Received ${signal}, shutting down...`);
+
+    stopPluginBots();
 
     // Force close all Socket.io connections immediately
     pteroLog('[CatRealm] Closing Socket.io connections...');
