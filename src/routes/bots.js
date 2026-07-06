@@ -28,7 +28,7 @@ const {
   updateOnlineUserAvatar,
   updateOnlineUserDisplayName,
 } = require('../socket/handler');
-const { getPluginStatuses } = require('../bots/pluginManager');
+const { getPluginStatuses, approvePluginInstall } = require('../bots/pluginManager');
 
 function requirePermission(permission) {
   return (req, res, next) => {
@@ -288,6 +288,23 @@ router.post('/', requirePermission(PERMISSIONS.MANAGE_BOTS), (req, res) => {
 
   const bot = getBotById(db, botId);
   res.status(201).json({ bot: serializeBot(db, bot), token });
+});
+
+// POST /api/bots/:id/install — owner approves a plugin's npm install
+router.post('/:id/install', requirePermission(PERMISSIONS.MANAGE_BOTS), (req, res) => {
+  const bot = getBotById(db, req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found' });
+  if (bot.kind !== 'plugin' || !bot.plugin_name) {
+    return res.status(400).json({ error: 'Not a plugin bot' });
+  }
+  const result = approvePluginInstall(bot.plugin_name);
+  if (!result.ok) return res.status(400).json({ error: result.message });
+  logAuditAction(AUDIT_ACTIONS.BOT_UPDATE, req.user.id, {
+    targetType: 'bot',
+    targetId: bot.id,
+    details: { installApproved: bot.plugin_name },
+  });
+  res.json({ ok: true, message: result.message });
 });
 
 // POST /api/bots/:id/regenerate-token — old token dies immediately

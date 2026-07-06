@@ -82,10 +82,16 @@ consecutive crashes — status shows in the Bots tab). Logs are prefixed
 `[bot:<name>]`. Toggle a plugin off/on from the Bots tab; set
 `BOTS_PLUGINS_ENABLED=false` in `.env` to disable the plugin loader entirely.
 
+If a plugin ships a `package.json` with uninstalled dependencies, it waits in
+**awaiting install approval** — npm install runs arbitrary package scripts, so
+it never happens without the owner's say-so. Approve it with the console
+command `botinstall <name>` (list plugins with `bots`) or the **Approve
+Install** button on the plugin's card in Realm Settings → Bots; the install
+runs and the bot starts automatically.
+
 A complete example lives in [`examples/bots/ping`](../examples/bots/ping) —
-copy it to `realm-plugins/ping` and restart the server — dependencies are
-installed automatically on first start —
-and type `/ping` in any channel.
+copy it to `realm-plugins/ping`, restart the server, approve the install, and
+type `/ping` in any channel.
 
 > **Security note:** plugin processes run with the same filesystem rights as
 > the server user. Process isolation protects the server from crashes, not

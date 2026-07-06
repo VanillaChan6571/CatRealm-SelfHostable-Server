@@ -1,6 +1,6 @@
 const path = require('path');
 const fs = require('fs');
-const { fork, spawnSync } = require('child_process');
+const { fork, spawn } = require('child_process');
 const { randomUUID } = require('crypto');
 const db = require('../db');
 const pteroLog = require('../logger');
@@ -120,24 +120,73 @@ function provisionPlugin(manifest) {
   return db.prepare('SELECT * FROM bots WHERE id = ?').get(botRow.id);
 }
 
-// Plugins ship a package.json but hosts (especially on Pterodactyl, where
-// there is no shell) can't always run npm install themselves — do it for them
-// the first time the plugin starts without a node_modules folder.
-function ensureDependencies(manifest) {
-  if (!fs.existsSync(path.join(manifest.dir, 'package.json'))) return true;
-  if (fs.existsSync(path.join(manifest.dir, 'node_modules'))) return true;
+// npm install runs arbitrary package scripts, so it never happens silently:
+// plugins with missing dependencies wait in 'pending_install' until the
+// owner approves — console `botinstall <name>` or Realm Settings → Bots.
+const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+function dependenciesMissing(manifest) {
+  return fs.existsSync(path.join(manifest.dir, 'package.json'))
+    && !fs.existsSync(path.join(manifest.dir, 'node_modules'));
+}
+
+function installDependencies(state) {
+  const { manifest } = state;
+  state.status = 'installing';
   pteroLog(`[Bots] Installing dependencies for plugin "${manifest.name}" (npm install)...`);
-  const result = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+  const npm = spawn('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
     cwd: manifest.dir,
-    encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (result.status !== 0) {
-    pteroLog(`[Bots] npm install failed for "${manifest.name}": ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`);
-    return false;
+  let stderr = '';
+  npm.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+  const timeout = setTimeout(() => {
+    pteroLog(`[Bots] npm install for "${manifest.name}" timed out — killing it`);
+    npm.kill('SIGKILL');
+  }, INSTALL_TIMEOUT_MS);
+  timeout.unref?.();
+  npm.on('exit', (code) => {
+    clearTimeout(timeout);
+    if (shuttingDown) return;
+    if (code !== 0) {
+      state.status = 'install_failed';
+      pteroLog(`[Bots] npm install failed for "${manifest.name}" (code=${code}): ${stderr.trim().slice(0, 500)}`);
+      return;
+    }
+    pteroLog(`[Bots] Dependencies installed for "${manifest.name}"`);
+    state.botRow = db.prepare('SELECT * FROM bots WHERE id = ?').get(state.botRow.id) || state.botRow;
+    if (Number(state.botRow.enabled) === 1) {
+      state.crashes = 0;
+      state.backoffMs = BACKOFF_START_MS;
+      launchChild(state);
+    } else {
+      state.status = 'stopped';
+    }
+  });
+  npm.on('error', (err) => {
+    clearTimeout(timeout);
+    state.status = 'install_failed';
+    pteroLog(`[Bots] npm install failed for "${manifest.name}": ${err.message}`);
+  });
+}
+
+// Owner approval entry point (console command + Bots-tab button).
+function approvePluginInstall(name) {
+  const state = plugins.get(String(name || '').toLowerCase().trim());
+  if (!state) return { ok: false, message: `No plugin named "${name}"` };
+  if (state.status === 'installing') return { ok: true, message: `Plugin "${state.manifest.name}" is already installing` };
+  if (state.child) return { ok: true, message: `Plugin "${state.manifest.name}" is already running` };
+  if (!dependenciesMissing(state.manifest)) {
+    if (Number(state.botRow.enabled) === 1) {
+      state.crashes = 0;
+      state.backoffMs = BACKOFF_START_MS;
+      launchChild(state);
+      return { ok: true, message: `Dependencies already present — started plugin "${state.manifest.name}"` };
+    }
+    return { ok: true, message: `Dependencies already present; plugin "${state.manifest.name}" is disabled` };
   }
-  pteroLog(`[Bots] Dependencies installed for "${manifest.name}"`);
-  return true;
+  installDependencies(state);
+  return { ok: true, message: `Installing dependencies for "${state.manifest.name}" — watch the console for progress` };
 }
 
 function launchChild(state) {
@@ -271,12 +320,11 @@ function startPluginBots() {
       restartTimer: null,
     };
     plugins.set(manifest.name, state);
-    if (Number(botRow.enabled) === 1) {
-      if (ensureDependencies(manifest)) {
-        launchChild(state);
-      } else {
-        state.status = 'crashed';
-      }
+    if (dependenciesMissing(manifest)) {
+      state.status = 'pending_install';
+      pteroLog(`[Bots] Plugin "${manifest.name}" has uninstalled dependencies. Approve with console command "botinstall ${manifest.name}" or from Realm Settings → Bots.`);
+    } else if (Number(botRow.enabled) === 1) {
+      launchChild(state);
     } else {
       pteroLog(`[Bots] Plugin "${manifest.name}" is disabled — not starting`);
     }
@@ -293,13 +341,15 @@ function setPluginEnabled(name, enabled) {
   if (!state) return false;
   if (enabled) {
     if (state.child) return true;
-    state.crashes = 0;
-    state.backoffMs = BACKOFF_START_MS;
     state.botRow = db.prepare('SELECT * FROM bots WHERE id = ?').get(state.botRow.id) || state.botRow;
-    if (!ensureDependencies(state.manifest)) {
-      state.status = 'crashed';
+    if (dependenciesMissing(state.manifest)) {
+      state.status = 'pending_install';
+      pteroLog(`[Bots] Plugin "${state.manifest.name}" has uninstalled dependencies. Approve with console command "botinstall ${state.manifest.name}" or from Realm Settings → Bots.`);
       return true;
     }
+    if (state.status === 'installing') return true;
+    state.crashes = 0;
+    state.backoffMs = BACKOFF_START_MS;
     launchChild(state);
   } else {
     stopChild(state);
@@ -317,6 +367,7 @@ module.exports = {
   startPluginBots,
   stopPluginBots,
   setPluginEnabled,
+  approvePluginInstall,
   getPluginStatuses,
   PLUGINS_DIR,
 };

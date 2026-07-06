@@ -3,7 +3,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { decryptMessageContent, encryptMessageContent } = require('./messageCrypto');
 
-const HELP_TEXT = 'Commands: help, secure-status, media-status, ffmpeg-status, yt-dlp-status, db-status, db-latest [n], db-checkpoint, db-encrypt-legacy';
+const HELP_TEXT = 'Commands: help, secure-status, media-status, ffmpeg-status, yt-dlp-status, db-status, db-latest [n], db-checkpoint, db-encrypt-legacy, bots, botinstall <plugin>';
 
 function firstNonEmptyLine(...values) {
   for (const value of values) {
@@ -72,6 +72,21 @@ function runDiagnosticCommand(db, raw) {
 
   if (cmd === 'help' || cmd === 'catrealm-help') {
     return { ok: true, lines: [HELP_TEXT] };
+  }
+
+  if (cmd === 'bots') {
+    const { getPluginStatuses } = require('./bots/pluginManager');
+    const statuses = [...getPluginStatuses()];
+    if (statuses.length === 0) return { ok: true, lines: ['No plugin bots loaded.'] };
+    return { ok: true, lines: statuses.map(([name, status]) => `${name}: ${status}`) };
+  }
+
+  if (cmd === 'botinstall') {
+    const name = (args[0] || '').trim();
+    if (!name) return { ok: false, lines: ['Usage: botinstall <plugin-name> (see "bots" for names)'] };
+    const { approvePluginInstall } = require('./bots/pluginManager');
+    const result = approvePluginInstall(name);
+    return { ok: result.ok, lines: [result.message] };
   }
 
   if (cmd === 'secure-status' || cmd === 'catrealm-secure') {
