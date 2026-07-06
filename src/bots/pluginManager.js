@@ -1,6 +1,6 @@
 const path = require('path');
 const fs = require('fs');
-const { fork } = require('child_process');
+const { fork, spawnSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const db = require('../db');
 const pteroLog = require('../logger');
@@ -118,6 +118,26 @@ function provisionPlugin(manifest) {
   }
 
   return db.prepare('SELECT * FROM bots WHERE id = ?').get(botRow.id);
+}
+
+// Plugins ship a package.json but hosts (especially on Pterodactyl, where
+// there is no shell) can't always run npm install themselves — do it for them
+// the first time the plugin starts without a node_modules folder.
+function ensureDependencies(manifest) {
+  if (!fs.existsSync(path.join(manifest.dir, 'package.json'))) return true;
+  if (fs.existsSync(path.join(manifest.dir, 'node_modules'))) return true;
+  pteroLog(`[Bots] Installing dependencies for plugin "${manifest.name}" (npm install)...`);
+  const result = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+    cwd: manifest.dir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) {
+    pteroLog(`[Bots] npm install failed for "${manifest.name}": ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`);
+    return false;
+  }
+  pteroLog(`[Bots] Dependencies installed for "${manifest.name}"`);
+  return true;
 }
 
 function launchChild(state) {
@@ -252,7 +272,11 @@ function startPluginBots() {
     };
     plugins.set(manifest.name, state);
     if (Number(botRow.enabled) === 1) {
-      launchChild(state);
+      if (ensureDependencies(manifest)) {
+        launchChild(state);
+      } else {
+        state.status = 'crashed';
+      }
     } else {
       pteroLog(`[Bots] Plugin "${manifest.name}" is disabled — not starting`);
     }
@@ -272,6 +296,10 @@ function setPluginEnabled(name, enabled) {
     state.crashes = 0;
     state.backoffMs = BACKOFF_START_MS;
     state.botRow = db.prepare('SELECT * FROM bots WHERE id = ?').get(state.botRow.id) || state.botRow;
+    if (!ensureDependencies(state.manifest)) {
+      state.status = 'crashed';
+      return true;
+    }
     launchChild(state);
   } else {
     stopChild(state);

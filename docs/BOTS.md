@@ -83,7 +83,8 @@ consecutive crashes — status shows in the Bots tab). Logs are prefixed
 `BOTS_PLUGINS_ENABLED=false` in `.env` to disable the plugin loader entirely.
 
 A complete example lives in [`examples/bots/ping`](../examples/bots/ping) —
-copy it to `realm-plugins/ping`, run `npm install` inside it, restart the server,
+copy it to `realm-plugins/ping` and restart the server — dependencies are
+installed automatically on first start —
 and type `/ping` in any channel.
 
 > **Security note:** plugin processes run with the same filesystem rights as
