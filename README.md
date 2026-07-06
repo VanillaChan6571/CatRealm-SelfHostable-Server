@@ -6,6 +6,10 @@ We have moved the Server Guide to https://catrealm.app/docs/#home
 
 Any Server/Client Bugs can be issued at https://github.com/VanillaChan6571/CatRealm/issues/new/choose
 
+## Multi-Realm Hosting (optional)
+
+Run several independent realms from one install — each on its own port with its own database, sharing LiveKit and the uploads/UGC folders. Set `MULTI_REALM=true` in `.env` and see [docs/MULTI_REALM.md](docs/MULTI_REALM.md).
+
 ## Push Notification Relay (optional)
 
 When a CatRealm mobile user is @mentioned in a channel, your server can relay a push notification to their device via the central CatRealm server.

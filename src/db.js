@@ -35,17 +35,32 @@ function isTruthy(value, fallback = false) {
   return /^(1|true|yes|on)$/i.test(String(value).trim());
 }
 
+// Multi-realm children persist generated secrets to their own env file
+// (data/realms/<port>.env) instead of the shared .env, which belongs to the
+// supervisor.
+function activeEnvFilePath() {
+  const realmEnvFile = (process.env.CATREALM_REALM_ENV_FILE || '').trim();
+  if (realmEnvFile) return realmEnvFile;
+  return path.join(__dirname, '../.env');
+}
+
 function ensureEnvFile() {
-  const envPath = path.join(__dirname, '../.env');
+  const envPath = activeEnvFilePath();
+  if (fs.existsSync(envPath)) return envPath;
+  if ((process.env.CATREALM_REALM_ENV_FILE || '').trim()) {
+    fs.mkdirSync(path.dirname(envPath), { recursive: true });
+    fs.writeFileSync(envPath, '', { mode: 0o600 });
+    return envPath;
+  }
   const envExamplePath = path.join(__dirname, '../.env.example');
-  if (!fs.existsSync(envPath) && fs.existsSync(envExamplePath)) {
+  if (fs.existsSync(envExamplePath)) {
     fs.copyFileSync(envExamplePath, envPath);
   }
   return envPath;
 }
 
 function readEnvFileValue(rawKey) {
-  const envPath = path.join(__dirname, '../.env');
+  const envPath = activeEnvFilePath();
   if (!fs.existsSync(envPath)) return undefined;
   const envContents = fs.readFileSync(envPath, 'utf8');
   const escapedKey = rawKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

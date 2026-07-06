@@ -468,7 +468,23 @@ function startBundledLiveKit(options = {}) {
   return livekitChild;
 }
 
+// Multi-realm children share the supervisor's LiveKit but must advertise
+// public URLs carrying their own HTTP port (their /rtc and /whip proxies).
+// Explicit MEDIA_LIVEKIT_PUBLIC_* values from a per-realm env still win.
+function applySharedLiveKitClientEnv() {
+  if (!isTruthy(process.env.MEDIA_LIVEKIT_ENABLED, false)) return;
+  const host = getPublicLiveKitHost();
+  const signalingPort = numberEnv('LIVEKIT_SIGNALING_PORT', 7880);
+  if (!(process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL || '').trim()) {
+    process.env.MEDIA_LIVEKIT_PUBLIC_WS_URL = getPublicLiveKitUrl(host, signalingPort);
+  }
+  if (isTruthy(process.env.MEDIA_LIVEKIT_INGRESS_ENABLED, false) && !(process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL || '').trim()) {
+    process.env.MEDIA_LIVEKIT_WHIP_PUBLIC_URL = getPublicWhipUrl(host);
+  }
+}
+
 module.exports = {
   startBundledLiveKit,
   stopBundledLiveKit,
+  applySharedLiveKitClientEnv,
 };

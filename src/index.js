@@ -6,12 +6,24 @@ const readline = require('readline');
 const { spawnSync } = require('child_process');
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
-const { startBundledLiveKit } = require('./livekitRuntime');
+const { startBundledLiveKit, applySharedLiveKitClientEnv } = require('./livekitRuntime');
 const { attachLiveKitUpgradeProxy, createLiveKitHttpProxy, createLiveKitIngressHttpProxy } = require('./livekitProxy');
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
+// Multi-realm mode: hand everything off to the supervisor before any .env
+// mutation or database open. Realm children are marked CATREALM_REALM_CHILD
+// and continue through the normal single-realm startup below.
+const IS_REALM_CHILD = process.env.CATREALM_REALM_CHILD === '1';
+if (isTruthy(process.env.MULTI_REALM, false) && !IS_REALM_CHILD) {
+  require('./multiRealm/supervisor').run().catch((err) => {
+    pteroLog(`[MultiRealm] Fatal: ${err.message}`);
+    process.exit(1);
+  });
+  return;
 }
 
 function safeBranch(value) {
@@ -355,6 +367,8 @@ function ensureServerUrl(scheme, domain) {
 
   process.env.SERVER_URL = newUrl;
 
+  if (IS_REALM_CHILD) return; // in-memory only; the shared .env belongs to the supervisor
+
   if (/^SERVER_URL=.*$/m.test(envContents)) {
     const current = ((envContents.match(/^SERVER_URL=(.*)$/m) || [])[1] || '').trim();
     if (current === newUrl) return;
@@ -469,8 +483,16 @@ function setupConsoleCommands(db) {
   }, 15_000).unref?.();
 }
 
-ensureJwtSecret();
-ensurePortSync();
+if (IS_REALM_CHILD) {
+  // The supervisor supplies per-realm secrets and the port; never touch the shared .env.
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'change-this-secret-in-production' || process.env.JWT_SECRET === 'change-this-to-a-long-random-string') {
+    pteroLog('[CatRealm] Realm child started without a JWT_SECRET. Check data/realms/<port>.env.');
+    process.exit(1);
+  }
+} else {
+  ensureJwtSecret();
+  ensurePortSync();
+}
 
 const express = require('express');
 const http = require('http');
@@ -506,7 +528,7 @@ const { startWebhookWorker, stopWebhookWorker } = require('./webhooks');
 const { startAuditLogPruner } = require('./lib/auditLog');
 
 const app = express();
-setupConsoleCommands(db);
+if (!IS_REALM_CHILD) setupConsoleCommands(db); // children have no stdin; the supervisor owns the console
 
 const PORT = process.env.PORT || 3000;
 const CLIENT_URL = process.env.CLIENT_URL || '*';
@@ -583,12 +605,18 @@ app.use('/api', welcomeRoutes);
 
 // ── Create server & start ─────────────────────────────────────────────────────
 async function start() {
-  runUpdateCheck({
-    source: 'startup',
-    getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
-    getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
-  });
-  startBundledLiveKit({ logger: pteroLog });
+  if (!IS_REALM_CHILD) {
+    runUpdateCheck({
+      source: 'startup',
+      getActiveVoiceUserCount: setupSocketHandlers.getActiveVoiceUserCount,
+      getActiveTheaterUserCount: setupSocketHandlers.getActiveTheaterUserCount,
+    });
+    startBundledLiveKit({ logger: pteroLog });
+  } else {
+    // The supervisor hosts the one shared LiveKit; derive this realm's public
+    // media URLs from its own port.
+    applySharedLiveKitClientEnv();
+  }
   logMediaDependencyStatus();
   logLiveKitRuntimeStatus();
 
@@ -647,7 +675,7 @@ async function start() {
   startWebhookWorker();
   startAuditLogPruner();
 
-  if (!updateRuntime.checkerDisabled && shouldAutoUpdate()) {
+  if (!IS_REALM_CHILD && !updateRuntime.checkerDisabled && shouldAutoUpdate()) {
     const checkerMs = updateConfig().checkerMs;
     setInterval(() => {
       runUpdateCheck({

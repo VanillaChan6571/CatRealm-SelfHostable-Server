@@ -67,6 +67,9 @@ async function generateChatThumbnail(file) {
   }
 }
 
+// Multi-realm mode shares this directory across all realms: filenames are
+// UUIDs so realms never collide, but any future orphan-sweep/GC must check
+// every realm's database before deleting a file, not just this process's DB.
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UGC_IMAGES_DIR),
   filename: (_req, file, cb) => {
