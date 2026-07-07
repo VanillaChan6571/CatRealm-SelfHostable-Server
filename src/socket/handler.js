@@ -124,6 +124,10 @@ function disconnectUserSockets(userId) {
   return count;
 }
 
+function isBotPresenceEntry(entry) {
+  return entry?.account_type === 'bot' || entry?.is_bot === 1 || entry?.is_bot === true;
+}
+
 // Reset activity timestamp; wake a sleeping user back to online
 function touchActivity(userId) {
   const entry = onlineUsers.get(userId);
@@ -142,6 +146,7 @@ setInterval(() => {
   const now = Date.now();
   let changed = false;
   for (const [userId, entry] of onlineUsers.entries()) {
+    if (isBotPresenceEntry(entry)) continue;
     if (entry.status === 'online' && now - (entry.lastActivityAt || now) >= SLEEP_TIMEOUT_MS) {
       entry.status = 'sleeping';
       db.prepare('UPDATE users SET status = ? WHERE id = ?').run('sleeping', userId);
@@ -436,6 +441,7 @@ function setupSocketHandlers(io) {
           role: dbUser.role,
           is_owner: 0,
           is_bot: 1,
+          account_type: 'bot',
           permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
         };
         socket.authUser = authUser;
@@ -514,10 +520,18 @@ function setupSocketHandlers(io) {
         LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
         WHERE u.id = ?
       `).get(authUser.id);
+      const accountType = userRow?.account_type || (authUser.is_bot ? 'bot' : 'local');
+      const storedStatus = userRow?.status || 'online';
+      const presenceStatus = accountType === 'bot' && storedStatus === 'sleeping' ? 'online' : storedStatus;
+      if (accountType === 'bot' && storedStatus === 'sleeping') {
+        db.prepare('UPDATE users SET status = ? WHERE id = ?').run('online', authUser.id);
+      }
+
       onlineUsers.set(authUser.id, {
         username: authUser.username,
         role: authUser.role,
         is_owner: authUser.is_owner ? 1 : 0,
+        is_bot: authUser.is_bot ? 1 : 0,
         role_color: topRole?.color || null,
         role_hoist: topRole?.hoist || 0,
         role_icon: topRole?.icon || null,
@@ -526,13 +540,13 @@ function setupSocketHandlers(io) {
         role_style_type: topRole?.style_type || 'solid',
         role_style_colors: topRole?.style_colors || null,
         avatar: userRow?.avatar || null,
-        status: userRow?.status || 'online',
+        status: presenceStatus,
         display_name: userRow?.effective_display_name || null,
         custom_status_text: userRow?.custom_status_text || null,
         activity_type: userRow?.activity_type || null,
         activity_text: userRow?.activity_text || null,
         activity_started_at: userRow?.activity_started_at || null,
-        account_type: userRow?.account_type || 'local',
+        account_type: accountType,
         verified: authUser.verified || false,
         lastActivityAt: Date.now(),
         sockets: new Set([socket.id]),
@@ -2061,13 +2075,14 @@ function refreshAllOnlineRoleMetadata() {
     entry.role_style_type = topRole?.style_type || 'solid';
     entry.role_style_colors = topRole?.style_colors || null;
     entry.avatar = userRow.avatar || null;
-    entry.status = userRow.status || 'online';
+    entry.account_type = userRow.account_type || entry.account_type || 'local';
+    const storedStatus = userRow.status || 'online';
+    entry.status = isBotPresenceEntry(entry) && storedStatus === 'sleeping' ? 'online' : storedStatus;
     entry.display_name = userRow.effective_display_name || null;
     entry.custom_status_text = userRow.custom_status_text || null;
     entry.activity_type = userRow.activity_type || null;
     entry.activity_text = userRow.activity_text || null;
     entry.activity_started_at = userRow.activity_started_at || null;
-    entry.account_type = userRow.account_type || entry.account_type || 'local';
     onlineUsers.set(userId, entry);
   }
 
@@ -2126,7 +2141,7 @@ module.exports.updateOnlineUserAvatar = (userId, avatar) => {
 module.exports.updateOnlineUserStatus = (userId, status) => {
   const entry = onlineUsers.get(userId);
   if (!entry || !ioInstance) return;
-  entry.status = status || 'online';
+  entry.status = isBotPresenceEntry(entry) && status === 'sleeping' ? 'online' : (status || 'online');
   onlineUsers.set(userId, entry);
   ioInstance.emit('presence:update', buildOnlineList());
 };

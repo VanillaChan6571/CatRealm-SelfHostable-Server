@@ -289,10 +289,13 @@ router.get('/:userId/roles', ensureProfileAllowed, (req, res, next) => {
 
 // PUT /api/profile/me/status
 router.put('/me/status', ensureProfileAllowed, (req, res) => {
-  const { status } = req.body ?? {};
+  let { status } = req.body ?? {};
   const allowed = ['online', 'away', 'sleeping', 'invisible'];
   if (typeof status !== 'string' || !allowed.includes(status)) {
     return res.status(400).json({ error: 'Invalid status' });
+  }
+  if ((req.user?.is_bot || req.user?.accountType === 'bot') && status === 'sleeping') {
+    status = 'online';
   }
   db.prepare('UPDATE users SET status = ? WHERE id = ?').run(status, req.user.id);
   updateOnlineUserStatus(req.user.id, status);
