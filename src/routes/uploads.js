@@ -57,7 +57,7 @@ async function generateChatThumbnail(file) {
   try {
     await sharp(file.path, { animated: false })
       .rotate()
-      .resize({ width: 480, height: 360, fit: 'inside', withoutEnlargement: true })
+      .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
       .webp({ quality: 72 })
       .toFile(thumbPath);
     return `/ugc/images/thumbs/${thumbFilename}`;
