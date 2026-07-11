@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || true)"
+# When run via `bash <(curl ...)` or `curl | bash` (the documented install
+# command), the script "lives" in /dev/fd (or /proc/*/fd), which is not a real
+# directory — git clone into it fails. Install into the caller's cwd instead.
+case "$SCRIPT_DIR" in
+  ''|/dev|/dev/fd*|/proc/*/fd*) SCRIPT_DIR="$PWD" ;;
+esac
 PRIMARY_SERVER_DIR="$SCRIPT_DIR/CatRealm-SelfHostable-Server"
 FALLBACK_SERVER_DIR="$SCRIPT_DIR/CatRealm-SelfHostableServer"
 REPO_URL="https://github.com/VanillaChan6571/CatRealm-SelfHostable-Server.git"
@@ -233,25 +239,6 @@ ensure_native_build_tools() {
   printf "%bNative build tools are required for some npm packages. Installing build prerequisites...%b\n\n" "$YELLOW" "$NC"
   sudo apt update
   sudo apt install -y build-essential python3
-}
-
-ensure_theater_media_tools() {
-  local missing=0
-
-  for cmd in ffmpeg yt-dlp; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-      missing=1
-      break
-    fi
-  done
-
-  if (( missing == 0 )); then
-    return 0
-  fi
-
-  printf "%bInstalling Theater media tools (ffmpeg, yt-dlp)...%b\n\n" "$YELLOW" "$NC"
-  sudo apt update
-  sudo apt install -y ffmpeg yt-dlp
 }
 
 compiler_supports_cpp20() {
@@ -941,7 +928,6 @@ install_dependencies() {
   ensure_env_file
   ensure_node_runtime
   ensure_native_build_tools
-  ensure_theater_media_tools
   ensure_modern_cpp_compiler
 
   (
