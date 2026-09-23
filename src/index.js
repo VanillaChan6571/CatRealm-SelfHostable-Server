@@ -636,7 +636,19 @@ async function start() {
       const dnsApiToken = process.env.SSL_DNS_API_TOKEN;
       const dnsProvider = process.env.SSL_DNS_PROVIDER || (dnsApiToken ? 'cloudflare' : '');
       const dnsOpts = dnsProvider && dnsApiToken ? { provider: dnsProvider, apiToken: dnsApiToken } : null;
-      const { cert, key } = await initAutoSSL(sslDomain, sslEmail, dnsOpts);
+      const { cert, key } = await initAutoSSL(sslDomain, sslEmail, dnsOpts, {
+        onRenewed: async (renewed) => {
+          try {
+            httpServer.setSecureContext({ cert: renewed.cert, key: renewed.key });
+            pteroLog('[CatRealm] Live TLS certificate reload succeeded');
+          } catch (err) {
+            pteroLog(`[CatRealm] Live TLS certificate reload failed: ${err.message}`);
+            pteroLog('[CatRealm] Requesting supervised restart to activate the renewed certificate...');
+            setImmediate(() => shutdown('TLS certificate reload failure', 1));
+            throw err;
+          }
+        },
+      });
       httpServer = https.createServer({ cert, key }, app);
       pteroLog('[CatRealm] Auto-SSL enabled — serving over HTTPS');
       ensureServerUrl('https', sslDomain);
@@ -701,7 +713,7 @@ async function start() {
   // ── Graceful shutdown ───────────────────────────────────────────────────────
   let shuttingDown = false;
 
-  function shutdown(signal) {
+  function shutdown(signal, exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
 
@@ -728,13 +740,13 @@ async function start() {
         pteroLog(`[CatRealm] Error closing database: ${err.message}`);
       }
       pteroLog('[CatRealm] Shutdown complete');
-      process.exit(0);
+      process.exit(exitCode);
     });
 
     // Force exit after 3 seconds if graceful shutdown fails
     setTimeout(() => {
       pteroLog('[CatRealm] Shutdown timeout reached, forcing exit...');
-      process.exit(0);
+      process.exit(exitCode);
     }, 3000);
   }
 

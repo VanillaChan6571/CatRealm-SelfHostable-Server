@@ -251,8 +251,9 @@ async function provisionCert(opts) {
  * @param {string} domain
  * @param {string} email
  * @param {object} [dnsOpts] - { provider, apiToken } for DNS-01 challenge
+ * @param {object} [lifecycleOpts] - { onRenewed } callback used to activate a renewed cert
  */
-async function initAutoSSL(domain, email, dnsOpts) {
+async function initAutoSSL(domain, email, dnsOpts, lifecycleOpts = {}) {
   fs.mkdirSync(SSL_DIR, { recursive: true });
 
   const useDns = dnsOpts && dnsOpts.provider && dnsOpts.apiToken;
@@ -289,8 +290,22 @@ async function initAutoSSL(domain, email, dnsOpts) {
     if (!existingCertValid()) {
       pteroLog('[AutoSSL] Certificate expiring soon, renewing...');
       try {
-        await provisionCert(provisionOpts);
-        pteroLog('[AutoSSL] Renewal complete. Restart server to use new cert.');
+        const renewed = await provisionCert(provisionOpts);
+        pteroLog('[AutoSSL] Renewal complete.');
+
+        if (typeof lifecycleOpts.onRenewed === 'function') {
+          try {
+            await lifecycleOpts.onRenewed(renewed);
+            pteroLog('[AutoSSL] Renewed certificate activated.');
+          } catch (err) {
+            // The callback owns recovery (normally a supervised process restart).
+            // Keep this separate from issuance failures so a successful renewal is
+            // not misreported as an ACME failure.
+            pteroLog(`[AutoSSL] Renewed certificate activation failed: ${err.message}`);
+          }
+        } else {
+          pteroLog('[AutoSSL] Restart server to use new cert.');
+        }
       } catch (err) {
         pteroLog(`[AutoSSL] Renewal failed: ${err.message}`);
       }
