@@ -518,23 +518,86 @@ router.put('/nsfw-preferences', (req, res) => {
 });
 
 // GET /api/profile/content-social-preferences
+const DEFAULT_CONTENT_SOCIAL_PREFERENCES = {
+  allowNsfw: false,
+  nsfwLewds: false,
+  nsfwBlood: false,
+  nsfwGore: false,
+  dmFilter: 'non-friends',
+  allowDms: false,
+  frEveryone: true,
+  frFriendOfFriends: true,
+  frServerMembers: true,
+  customAllowedDomains: []
+};
+const LOCKED_ALLOWED_DOMAINS = new Set([
+  'catrealm.app',
+  'nekohosting.gg',
+  'youtube.com',
+  'youtu.be',
+  'x.com',
+  'twitter.com',
+  'vxtwitter.com',
+  'fxtwitter.com',
+  'fixupx.com',
+  'fixvx.com',
+  'twitch.tv',
+  'kick.com',
+  'iwara.tv',
+  'fxiwara.seria.moe',
+  'github.com',
+  'reddit.com',
+  'discord.com',
+  'discord.gg',
+  'discordapp.com',
+  'instagram.com',
+  'tiktok.com',
+  'threads.net',
+  'facebook.com',
+  'fb.com',
+  'bsky.app',
+  'blueskyweb.xyz',
+  'linkedin.com',
+  'snapchat.com',
+  'pinterest.com',
+  'tumblr.com'
+]);
+const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+
+function normalizeAllowedDomain(input) {
+  if (typeof input !== 'string') return null;
+  let value = input.trim().toLowerCase();
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      value = new URL(value).hostname;
+    } catch {
+      return null;
+    }
+  } else {
+    value = value.replace(/^[*.]+/, '').split(/[/?#]/, 1)[0].split(':', 1)[0];
+  }
+  value = value.replace(/\.$/, '');
+  if (!DOMAIN_RE.test(value) || LOCKED_ALLOWED_DOMAINS.has(value)) return null;
+  return value;
+}
+
+function normalizeAllowedDomains(input) {
+  if (!Array.isArray(input)) return [];
+  return Array.from(new Set(input.map(normalizeAllowedDomain).filter(Boolean))).sort();
+}
+
 router.get('/content-social-preferences', (req, res) => {
   const prefs = db.prepare('SELECT * FROM user_content_social_prefs WHERE user_id = ?').get(req.user.id);
   if (!prefs) {
-    return res.json({
-      allowNsfw: false,
-      nsfwLewds: false,
-      nsfwBlood: false,
-      nsfwGore: false,
-      dmFilter: 'non-friends',
-      allowDms: false,
-      frEveryone: true,
-      frFriendOfFriends: true,
-      frServerMembers: true
-    });
+    return res.json(DEFAULT_CONTENT_SOCIAL_PREFERENCES);
   }
-  const parsed = JSON.parse(prefs.preferences);
-  res.json(parsed);
+  try {
+    const parsed = JSON.parse(prefs.preferences);
+    res.json({ ...DEFAULT_CONTENT_SOCIAL_PREFERENCES, ...parsed });
+  } catch {
+    res.json(DEFAULT_CONTENT_SOCIAL_PREFERENCES);
+  }
 });
 
 // PUT /api/profile/content-social-preferences
@@ -548,7 +611,8 @@ router.put('/content-social-preferences', (req, res) => {
     allowDms,
     frEveryone,
     frFriendOfFriends,
-    frServerMembers
+    frServerMembers,
+    customAllowedDomains
   } = req.body ?? {};
 
   const preferences = {
@@ -556,11 +620,12 @@ router.put('/content-social-preferences', (req, res) => {
     nsfwLewds: !!nsfwLewds,
     nsfwBlood: !!nsfwBlood,
     nsfwGore: !!nsfwGore,
-    dmFilter: dmFilter || 'non-friends',
+    dmFilter: dmFilter === 'all' || dmFilter === 'non-friends' || dmFilter === 'none' ? dmFilter : 'non-friends',
     allowDms: !!allowDms,
     frEveryone: frEveryone !== undefined ? !!frEveryone : true,
     frFriendOfFriends: frFriendOfFriends !== undefined ? !!frFriendOfFriends : true,
-    frServerMembers: frServerMembers !== undefined ? !!frServerMembers : true
+    frServerMembers: frServerMembers !== undefined ? !!frServerMembers : true,
+    customAllowedDomains: normalizeAllowedDomains(customAllowedDomains)
   };
 
   db.prepare(`

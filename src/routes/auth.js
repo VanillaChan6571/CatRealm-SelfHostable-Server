@@ -377,25 +377,26 @@ router.post('/central', async (req, res) => {
 // later with a valid invite; local accounts are bound to this server and
 // cannot leave (only kick/ban removes them).
 router.post('/leave', authenticateToken, (req, res) => {
-  if (req.user.accountType !== 'central') {
+  const authenticatedUser = req.authUser || req.user;
+  if (authenticatedUser.accountType !== 'central') {
     return res.status(403).json({ error: 'Local accounts cannot leave this server' });
   }
-  if (req.user.is_owner) {
+  if (authenticatedUser.is_owner || authenticatedUser.role === 'owner') {
     return res.status(400).json({ error: 'The server owner cannot leave the server' });
   }
 
-  db.prepare('UPDATE users SET is_member = 0, left_server = 1 WHERE id = ?').run(req.user.id);
+  db.prepare('UPDATE users SET is_member = 0, left_server = 1 WHERE id = ?').run(authenticatedUser.id);
 
-  logAuditAction(AUDIT_ACTIONS.MEMBER_LEAVE, req.user.id, {
+  logAuditAction(AUDIT_ACTIONS.MEMBER_LEAVE, authenticatedUser.id, {
     targetType: 'user',
-    targetId: req.user.id,
-    details: { username: req.user.username, account_type: 'central' },
+    targetId: authenticatedUser.id,
+    details: { username: authenticatedUser.username, account_type: 'central' },
   });
 
   // Lazy require to avoid any module-load ordering issues with the socket handler.
   const { emitPermissionsChanged, kickUserFromServer } = require('../socket/handler');
   emitPermissionsChanged();
-  kickUserFromServer(req.user.id, { reason: 'left', message: 'You left this server.' });
+  kickUserFromServer(authenticatedUser.id, { reason: 'left', message: 'You left this server.' });
 
   res.json({ success: true });
 });

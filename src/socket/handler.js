@@ -21,6 +21,7 @@ const { queueMessageCreatedEvent } = require('../webhooks');
 const { normalizeReactionToken, toggleMessageReaction } = require('../reactions');
 const { relayMentionPush, relayMentionNotifications } = require('../lib/pushRelay');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
+const { localUploadSuffix, resolveUploadForDeletion } = require('../lib/uploadPaths');
 const {
   createSelfHostMediaSessionWithFallback,
   getSelfHostMediaContexts,
@@ -193,19 +194,15 @@ setInterval(() => {
   try {
     const now = Date.now();
     const expiredMessages = db.prepare(
-      'SELECT id, attachment_url FROM messages WHERE voice_expires_at IS NOT NULL AND voice_expires_at < ?'
+      'SELECT id, attachment_url, attachments FROM messages WHERE voice_expires_at IS NOT NULL AND voice_expires_at < ?'
     ).all(now);
     if (expiredMessages.length === 0) return;
-    const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
-    for (const msg of expiredMessages) {
-      if (msg.attachment_url && msg.attachment_url.startsWith('/ugc/images/')) {
-        const filePath = path.join(UGC_IMAGES_DIR, msg.attachment_url.replace('/ugc/images/', ''));
-        fs.unlink(filePath, () => {});
-      }
-    }
+    const attachments = new Set(expiredMessages.flatMap(collectMessageAttachmentUrls));
     const ids = expiredMessages.map((m) => m.id);
     const placeholders = ids.map(() => '?').join(', ');
     db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids);
+    // Check surviving references after removing the expired batch, just as manual deletion does.
+    for (const url of attachments) unlinkUgcImageIfUnreferenced(url);
     pteroLog(`[CatRealm] Cleaned up ${ids.length} expired voice message(s)`);
   } catch (err) {
     pteroLog(`[CatRealm] Voice message cleanup error: ${err}`);
@@ -299,9 +296,9 @@ function unlinkUgcImageIfUnreferenced(attachmentUrl) {
   ).get(`%${attachmentUrl}%`).c;
   if (refByAttachment > 0 || refByAttachments > 0) return;
 
-  const urlSuffix = attachmentUrl.replace('/ugc/images/', '');
   const baseDir = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images');
-  const filePath = path.join(baseDir, urlSuffix);
+  const filePath = resolveUploadForDeletion(baseDir, attachmentUrl);
+  if (!filePath) return;
   try {
     fs.rmSync(filePath, { force: true });
   } catch {}
@@ -479,8 +476,15 @@ function setupSocketHandlers(io) {
   });
 
   io.on('connection', (socket) => {
-    const user = socket.user;
-    const authUser = socket.authUser || socket.user;
+    let user = socket.user;
+    let authUser = socket.authUser || socket.user;
+    // Permission changes replace socket.user; handlers must read that fresh
+    // identity, including when an administrator enters/exits role preview.
+    socket.use((_packet, next) => {
+      user = socket.user;
+      authUser = socket.authUser || socket.user;
+      next();
+    });
     pteroLog(`[CatRealm] ${authUser.username} connected`);
 
     // Register as online
@@ -559,7 +563,7 @@ function setupSocketHandlers(io) {
     const allChannels = db.prepare('SELECT * FROM channels ORDER BY position').all();
     const userChannels = filterChannelsForUser(user, allChannels);
     for (const ch of userChannels) {
-      socket.join(ch.id);
+      if (canReadChannelHistory(user, ch.id)) socket.join(ch.id);
     }
 
     // Send initial data to the newly connected client
@@ -1027,7 +1031,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Theater ────────────────────────────────────────────────────────────────
-    socket.on('theater:join', ({ channelId }, ack) => {
+    socket.on('theater:join', ({ channelId, voiceConnected } = {}, ack) => {
       if (!channelId) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Missing channelId' });
         return;
@@ -1049,6 +1053,10 @@ function setupSocketHandlers(io) {
         username: online?.display_name || authUser.display_name || authUser.username,
         avatar: online?.avatar || null,
         accountType: authUser.account_type || 'local',
+        clientType: socket.clientType,
+        // Optional, cosmetic presence. Old clients do not report call state;
+        // unknown must not be presented as a confirmed video-only viewer.
+        ...(typeof voiceConnected === 'boolean' ? { voiceConnected } : {}),
         roleColor: online?.role_color || null,
         cameraEnabled: false,
         micEnabled: false,
@@ -1169,11 +1177,33 @@ function setupSocketHandlers(io) {
       pteroLog(`[Theater] ${authUser.username || user.id} kicked ${userId} from channel ${channelId}`);
     });
 
+    socket.on('theater:voice-state', (payload) => {
+      const { channelId, voiceConnected } = payload ?? {};
+      if (typeof channelId !== 'string' || typeof voiceConnected !== 'boolean') return;
+      const entry = theaterRooms.get(channelId)?.get(user.id);
+      // An old/replaced socket for the same account cannot alter this session.
+      if (!entry || entry.socketId !== socket.id || socket.currentTheaterChannel !== channelId) return;
+      if (entry.user.voiceConnected === voiceConnected) return;
+      entry.user.voiceConnected = voiceConnected;
+      if (!voiceConnected) {
+        entry.user.micEnabled = false;
+        entry.user.cameraEnabled = false;
+        entry.user.deafened = false;
+        entry.user.muted = true;
+      }
+      io.to(`theater:${channelId}`).emit('theater:user-state', {
+        channelId, userId: user.id, voiceConnected,
+        micEnabled: entry.user.micEnabled, cameraEnabled: entry.user.cameraEnabled,
+        deafened: entry.user.deafened, muted: entry.user.muted,
+      });
+      emitTheaterRoomPresence(io, channelId);
+    });
+
     socket.on('theater:camera-state', ({ channelId, cameraEnabled }) => {
       const room = theaterRooms.get(channelId);
       if (!room) return;
       const entry = room.get(user.id);
-      if (!entry) return;
+      if (!entry || entry.socketId !== socket.id || entry.user.voiceConnected === false) return;
       entry.user.cameraEnabled = !!cameraEnabled;
       io.to(`theater:${channelId}`).emit('theater:user-state', { channelId, userId: user.id, cameraEnabled: !!cameraEnabled });
       emitTheaterRoomPresence(io, channelId);
@@ -1183,7 +1213,7 @@ function setupSocketHandlers(io) {
       const room = theaterRooms.get(channelId);
       if (!room) return;
       const entry = room.get(user.id);
-      if (!entry) return;
+      if (!entry || entry.socketId !== socket.id || entry.user.voiceConnected === false) return;
       entry.user.micEnabled = !!micEnabled;
       entry.user.muted = !entry.user.micEnabled || !!entry.user.deafened;
       io.to(`theater:${channelId}`).emit('theater:user-state', {
@@ -1199,7 +1229,7 @@ function setupSocketHandlers(io) {
       const room = theaterRooms.get(channelId);
       if (!room) return;
       const entry = room.get(user.id);
-      if (!entry) return;
+      if (!entry || entry.socketId !== socket.id || entry.user.voiceConnected === false) return;
       entry.user.deafened = !!deafened;
       entry.user.muted = !!deafened || !entry.user.micEnabled;
       io.to(`theater:${channelId}`).emit('theater:user-state', {
@@ -1330,6 +1360,9 @@ function setupSocketHandlers(io) {
       if (!hasChannelPermission(user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) {
         return socket.emit('error', 'Missing permission: view_channels');
       }
+      if (!canReadChannelHistory(user, thread.channel_id)) {
+        return socket.emit('error', 'Missing permission: read_chat_history');
+      }
       socket.join(`thread:${threadId}`);
     });
 
@@ -1345,6 +1378,9 @@ function setupSocketHandlers(io) {
       if (attachmentsArray.length === 0 && attachment && typeof attachment.url === 'string') {
         attachmentsArray.push(attachment);
       }
+      if (attachmentsArray.some((att) => [att.url, att.thumbnailUrl, att.thumbnail_url].some(
+        (url) => typeof url === 'string' && url.startsWith('/ugc/images/') && !localUploadSuffix(url)
+      ))) return socket.emit('error', 'Invalid attachment URL');
       const hasText = typeof content === 'string' && content.trim().length > 0;
       const hasAttachment = attachmentsArray.length > 0;
       if (!channelId || (!hasText && !hasAttachment)) return;
@@ -1413,12 +1449,15 @@ function setupSocketHandlers(io) {
       let replyTo = null;
       if (replyToId) {
         replyTo = db.prepare(`
-          SELECT m.id, m.user_id, m.content, m.channel_id, u.username
+          SELECT m.id, m.user_id, m.content, m.channel_id, m.scheduled_at, u.username
           FROM messages m
           JOIN users u ON u.id = m.user_id
           WHERE m.id = ?
         `).get(replyToId);
         if (!replyTo) return socket.emit('error', 'Reply target not found');
+        if (replyTo.channel_id !== channelId || replyTo.scheduled_at != null) {
+          return socket.emit('error', 'Reply target not available in this channel');
+        }
         replyTo.content = decryptMessageContent(replyTo.content);
       }
 
@@ -1426,13 +1465,18 @@ function setupSocketHandlers(io) {
       let forwardFrom = null;
       if (forwardFromId) {
         forwardFrom = db.prepare(`
-          SELECT m.id, m.user_id, m.content, m.channel_id, u.username, c.name as channel_name
+          SELECT m.id, m.user_id, m.content, m.channel_id, m.scheduled_at, u.username, c.name as channel_name
           FROM messages m
           JOIN users u ON u.id = m.user_id
           JOIN channels c ON c.id = m.channel_id
           WHERE m.id = ?
         `).get(forwardFromId);
         if (!forwardFrom) return socket.emit('error', 'Forward source not found');
+        if (forwardFrom.scheduled_at != null
+          || !hasChannelPermission(user, forwardFrom.channel_id, PERMISSIONS.VIEW_CHANNELS, db)
+          || !canReadChannelHistory(user, forwardFrom.channel_id)) {
+          return socket.emit('error', 'Forward source not available');
+        }
         forwardFrom.content = decryptMessageContent(forwardFrom.content);
       } else if (forwardMeta && typeof forwardMeta.serverName === 'string') {
         // Media-only forward: no message ID lookup required
@@ -2102,9 +2146,20 @@ function broadcastChannelUpdate() {
     socket.emit('channel:list', userChannels);
     socket.emit('category:list', categories);
 
-    // Also join socket to any new channel rooms they're allowed to see
-    for (const ch of userChannels) {
-      socket.join(ch.id);
+    const readableChannels = new Set(userChannels
+      .filter((ch) => canReadChannelHistory(socket.user, ch.id))
+      .map((ch) => ch.id));
+    for (const room of socket.rooms) {
+      if (room === socket.id || room.startsWith('voice:') || room.startsWith('theater:')) continue;
+      if (room.startsWith('thread:')) {
+        const thread = db.prepare('SELECT channel_id FROM threads WHERE id = ?').get(room.slice('thread:'.length));
+        if (!thread || !readableChannels.has(thread.channel_id)) socket.leave(room);
+      } else if (!readableChannels.has(room)) {
+        socket.leave(room);
+      }
+    }
+    for (const channelId of readableChannels) {
+      socket.join(channelId);
     }
   }
 }

@@ -23,12 +23,16 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
+const tls = require('tls');
 const pteroLog = require('./logger');
 
 const SSL_DIR = path.resolve(process.env.SSL_DATA_DIR || './data/ssl');
 const CERT_PATH = path.join(SSL_DIR, 'cert.pem');
 const KEY_PATH = path.join(SSL_DIR, 'key.pem');
 const ACCOUNT_KEY_PATH = path.join(SSL_DIR, 'account-key.pem');
+const RENEWAL_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const INITIAL_RETRY_MS = 60 * 1000;
+const MAX_RETRY_MS = 15 * 60 * 1000;
 
 // In-memory store for pending ACME challenges
 const pendingChallenges = new Map();
@@ -166,20 +170,28 @@ async function getAccountKey() {
 }
 
 /**
- * Check if an existing cert is valid and not expiring within 30 days.
+ * Validate the pair before serving it; an unexpired certificate can keep HTTPS
+ * available while an early renewal attempt fails.
  */
-function existingCertValid() {
-  if (!fs.existsSync(CERT_PATH) || !fs.existsSync(KEY_PATH)) return false;
-
+function certificateUsable(cert, key, domain, minimumRemainingMs = 0) {
   try {
-    const certPem = fs.readFileSync(CERT_PATH, 'utf8');
-    const x509 = new crypto.X509Certificate(certPem);
-    const expiresAt = new Date(x509.validTo);
-    const daysLeft = (expiresAt - Date.now()) / (1000 * 60 * 60 * 24);
-    pteroLog(`[AutoSSL] Existing cert expires ${x509.validTo} (${Math.floor(daysLeft)} days left)`);
-    return daysLeft > 30;
+    const x509 = new crypto.X509Certificate(cert);
+    if (Date.parse(x509.validFrom) > Date.now() || Date.parse(x509.validTo) <= Date.now() + minimumRemainingMs) return false;
+    if (!x509.checkHost(domain) || !x509.checkPrivateKey(crypto.createPrivateKey(key))) return false;
+    tls.createSecureContext({ cert, key });
+    return true;
   } catch {
     return false;
+  }
+}
+
+function readExistingCertificate(domain, minimumRemainingMs = 0) {
+  try {
+    const cert = fs.readFileSync(CERT_PATH);
+    const key = fs.readFileSync(KEY_PATH);
+    return certificateUsable(cert, key, domain, minimumRemainingMs) ? { cert, key } : null;
+  } catch {
+    return null;
   }
 }
 
@@ -235,10 +247,15 @@ async function provisionCert(opts) {
     challengeRemoveFn,
   });
 
+  if (!certificateUsable(cert, csrKey, domain)) throw new Error('ACME returned an unusable certificate/key pair');
+
   fs.mkdirSync(SSL_DIR, { recursive: true });
-  fs.writeFileSync(CERT_PATH, cert);
-  fs.writeFileSync(KEY_PATH, csrKey);
-  fs.chmodSync(KEY_PATH, 0o600);
+  // Publish the cert last: the multi-realm watcher treats its mtime as the
+  // signal that both files are ready. Readers never see partially written PEMs.
+  fs.writeFileSync(`${KEY_PATH}.next`, csrKey, { mode: 0o600 });
+  fs.writeFileSync(`${CERT_PATH}.next`, cert);
+  fs.renameSync(`${KEY_PATH}.next`, KEY_PATH);
+  fs.renameSync(`${CERT_PATH}.next`, CERT_PATH);
 
   pteroLog(`[AutoSSL] Certificate saved to ${SSL_DIR}`);
   return { cert: Buffer.from(cert), key: csrKey };
@@ -273,46 +290,72 @@ async function initAutoSSL(domain, email, dnsOpts, lifecycleOpts = {}) {
     dnsApiToken: useDns ? dnsOpts.apiToken : null,
   };
 
-  let cert, key;
-
-  if (existingCertValid()) {
-    pteroLog('[AutoSSL] Using existing certificate');
-    cert = fs.readFileSync(CERT_PATH);
-    key = fs.readFileSync(KEY_PATH);
-  } else {
-    const result = await provisionCert(provisionOpts);
-    cert = result.cert;
-    key = result.key;
+  const renewBeforeMs = 30 * 24 * 60 * 60 * 1000;
+  let retryMs = INITIAL_RETRY_MS;
+  let nextCheckMs = RENEWAL_INTERVAL_MS;
+  let active = readExistingCertificate(domain, renewBeforeMs);
+  while (!active) {
+    try {
+      active = await provisionCert(provisionOpts);
+    } catch (err) {
+      pteroLog(`[AutoSSL] Startup provisioning failed: ${err.message}. Retrying in ${retryMs / 1000}s.`);
+      active = readExistingCertificate(domain);
+      if (active) {
+        pteroLog('[AutoSSL] Keeping the unexpired certificate while renewal is retried.');
+        nextCheckMs = retryMs;
+        break;
+      }
+      // Keep startup pending until HTTPS is possible. This also works without
+      // a process supervisor and avoids rapid restart loops during ACME outages.
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
+    }
   }
 
-  // Schedule renewal check every 12 hours
-  setInterval(async () => {
-    if (!existingCertValid()) {
-      pteroLog('[AutoSSL] Certificate expiring soon, renewing...');
-      try {
-        const renewed = await provisionCert(provisionOpts);
+  let stopped = false;
+  let timer;
+  let pendingActivation = null;
+  function schedule(delay) {
+    if (stopped) return;
+    timer = setTimeout(checkRenewal, delay);
+    timer.unref?.();
+  }
+  async function checkRenewal() {
+    let delay = RENEWAL_INTERVAL_MS;
+    try {
+      if (!pendingActivation && !certificateUsable(active.cert, active.key, domain, renewBeforeMs)) {
+        pendingActivation = await provisionCert(provisionOpts);
         pteroLog('[AutoSSL] Renewal complete.');
-
-        if (typeof lifecycleOpts.onRenewed === 'function') {
-          try {
-            await lifecycleOpts.onRenewed(renewed);
-            pteroLog('[AutoSSL] Renewed certificate activated.');
-          } catch (err) {
-            // The callback owns recovery (normally a supervised process restart).
-            // Keep this separate from issuance failures so a successful renewal is
-            // not misreported as an ACME failure.
-            pteroLog(`[AutoSSL] Renewed certificate activation failed: ${err.message}`);
-          }
-        } else {
-          pteroLog('[AutoSSL] Restart server to use new cert.');
-        }
-      } catch (err) {
-        pteroLog(`[AutoSSL] Renewal failed: ${err.message}`);
       }
+      if (pendingActivation && !stopped) {
+        if (typeof lifecycleOpts.onRenewed === 'function') {
+          await lifecycleOpts.onRenewed(pendingActivation);
+          pteroLog('[AutoSSL] Renewed certificate activated.');
+        } else {
+          pteroLog('[AutoSSL] Renewed certificate saved; waiting for the supervisor to restart realms.');
+        }
+        active = pendingActivation;
+        pendingActivation = null;
+      }
+      retryMs = INITIAL_RETRY_MS;
+    } catch (err) {
+      delay = retryMs;
+      retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
+      pteroLog(`[AutoSSL] Certificate recovery failed: ${err.message}. Retrying in ${delay / 1000}s.`);
     }
-  }, 12 * 60 * 60 * 1000);
+    schedule(delay);
+  }
+  schedule(nextCheckMs);
 
-  return { cert, key, challengeServer };
+  return {
+    ...active,
+    challengeServer,
+    stop: () => {
+      stopped = true;
+      clearTimeout(timer);
+      challengeServer?.close();
+    },
+  };
 }
 
 module.exports = { initAutoSSL };

@@ -273,7 +273,8 @@ async function run() {
       shared.sslKey = sslKeyPath;
       log('Auto-SSL ready — realms will serve HTTPS with the shared certificate');
     } catch (err) {
-      log(`Auto-SSL failed: ${err.message} — realms will fall back to their own SSL settings or HTTP`);
+      log(`Auto-SSL startup failed: ${err.message}`);
+      throw err;
     }
   } else if (process.env.SSL_CERT_PATH && process.env.SSL_KEY_PATH) {
     shared.scheme = 'https';

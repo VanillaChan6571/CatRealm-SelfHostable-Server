@@ -624,6 +624,7 @@ async function start() {
   logLiveKitRuntimeStatus();
 
   let httpServer;
+  let stopAutoSSL = () => {};
   const sslCert = process.env.SSL_CERT_PATH;
   const sslKey = process.env.SSL_KEY_PATH;
   const sslDomain = process.env.SSL_DOMAIN;
@@ -636,7 +637,7 @@ async function start() {
       const dnsApiToken = process.env.SSL_DNS_API_TOKEN;
       const dnsProvider = process.env.SSL_DNS_PROVIDER || (dnsApiToken ? 'cloudflare' : '');
       const dnsOpts = dnsProvider && dnsApiToken ? { provider: dnsProvider, apiToken: dnsApiToken } : null;
-      const { cert, key } = await initAutoSSL(sslDomain, sslEmail, dnsOpts, {
+      const { cert, key, stop } = await initAutoSSL(sslDomain, sslEmail, dnsOpts, {
         onRenewed: async (renewed) => {
           try {
             httpServer.setSecureContext({ cert: renewed.cert, key: renewed.key });
@@ -649,13 +650,13 @@ async function start() {
           }
         },
       });
+      stopAutoSSL = stop;
       httpServer = https.createServer({ cert, key }, app);
       pteroLog('[CatRealm] Auto-SSL enabled — serving over HTTPS');
       ensureServerUrl('https', sslDomain);
     } catch (err) {
       pteroLog(`[CatRealm] Auto-SSL failed: ${err.message}`);
-      pteroLog('[CatRealm] Falling back to HTTP');
-      httpServer = http.createServer(app);
+      throw err;
     }
   }
   // Priority 2: Manual cert files
@@ -718,6 +719,7 @@ async function start() {
     shuttingDown = true;
 
     pteroLog(`[CatRealm] Received ${signal}, shutting down...`);
+    stopAutoSSL();
 
     stopPluginBots();
 

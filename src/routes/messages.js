@@ -73,7 +73,7 @@ router.get('/:channelId', (req, res) => {
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-      LEFT JOIN messages rm ON rm.id = m.reply_to_id
+      LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
       LEFT JOIN users ru ON ru.id = rm.user_id
       WHERE m.channel_id = ? AND m.thread_id IS NULL AND m.created_at < ? AND (m.scheduled_at IS NULL OR m.user_id = ?)
       ORDER BY m.created_at DESC LIMIT ?
@@ -109,7 +109,7 @@ router.get('/:channelId', (req, res) => {
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-      LEFT JOIN messages rm ON rm.id = m.reply_to_id
+      LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
       LEFT JOIN users ru ON ru.id = rm.user_id
       WHERE m.channel_id = ? AND m.thread_id IS NULL AND (m.scheduled_at IS NULL OR m.user_id = ?)
       ORDER BY m.created_at DESC LIMIT ?

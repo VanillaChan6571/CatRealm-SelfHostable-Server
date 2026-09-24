@@ -6,6 +6,13 @@ const { decryptMessageRows } = require('../messageCrypto');
 const { attachReactionsToMessages } = require('../reactions');
 const { emitToChannel } = require('../socket/handler');
 
+function canManageThread(user, thread) {
+  return hasChannelPermission(user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)
+    && hasChannelPermission(user, thread.channel_id, PERMISSIONS.READ_CHAT_HISTORY, db)
+    && (thread.created_by === user.id
+      || hasChannelPermission(user, thread.channel_id, PERMISSIONS.MANAGE_POSTS, db));
+}
+
 function attachNsfwTags(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
   const ids = messages.map((m) => m.id).filter(Boolean);
@@ -183,15 +190,13 @@ router.post('/', (req, res) => {
 
 // PATCH /api/threads/:id
 router.patch('/:id', (req, res) => {
-  if (!hasPermission(req.user, PERMISSIONS.CREATE_THREADS)) {
-    return res.status(403).json({ error: 'Missing permission: create_threads' });
-  }
   const { name } = req.body ?? {};
   if (typeof name !== 'string' || name.trim().length < 2) {
     return res.status(400).json({ error: 'Thread name required' });
   }
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(req.params.id);
   if (!thread) return res.status(404).json({ error: 'Thread not found' });
+  if (!canManageThread(req.user, thread)) return res.status(403).json({ error: 'Not allowed to manage this thread' });
   db.prepare('UPDATE threads SET name = ? WHERE id = ?').run(name.trim(), req.params.id);
   const updated = db.prepare('SELECT * FROM threads WHERE id = ?').get(req.params.id);
   res.json(updated);
@@ -199,11 +204,9 @@ router.patch('/:id', (req, res) => {
 
 // DELETE /api/threads/:id
 router.delete('/:id', (req, res) => {
-  if (!hasPermission(req.user, PERMISSIONS.CREATE_THREADS)) {
-    return res.status(403).json({ error: 'Missing permission: create_threads' });
-  }
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(req.params.id);
   if (!thread) return res.status(404).json({ error: 'Thread not found' });
+  if (!canManageThread(req.user, thread)) return res.status(403).json({ error: 'Not allowed to manage this thread' });
   db.prepare('DELETE FROM threads WHERE id = ?').run(req.params.id);
   res.json({ success: true });
   emitToChannel(thread.channel_id, 'forum:deleted', { id: req.params.id, channel_id: thread.channel_id });
@@ -240,7 +243,7 @@ router.get('/:id/messages', (req, res) => {
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-      LEFT JOIN messages rm ON rm.id = m.reply_to_id
+      LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
       LEFT JOIN users ru ON ru.id = rm.user_id
       WHERE m.thread_id = ? AND m.created_at < ?
       ORDER BY m.created_at DESC LIMIT ?
@@ -261,7 +264,7 @@ router.get('/:id/messages', (req, res) => {
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-      LEFT JOIN messages rm ON rm.id = m.reply_to_id
+      LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
       LEFT JOIN users ru ON ru.id = rm.user_id
       WHERE m.thread_id = ?
       ORDER BY m.created_at DESC LIMIT ?
