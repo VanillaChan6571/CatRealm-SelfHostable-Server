@@ -48,7 +48,7 @@ When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/liveki
 
 The external LiveKit URL, API key, API secret, and token TTL variables remain in the egg for advanced deployments, but they are hidden from regular server users. In bundled mode CatRealm generates and persists the LiveKit API secret automatically.
 
-If a server should use CatRealm central LiveKit instead of hosting local media, set `CENTRAL_LIVEKIT_FALLBACK=true` and configure a `PUSH_RELAY_SECRET` so the server can authenticate fallback token requests. That fallback covers both voice and theater rooms.
+If a server should use CatRealm central LiveKit instead of hosting local media, set `CENTRAL_LIVEKIT_FALLBACK=true`, configure the operator-enrolled `CENTRAL_MEDIA_RELAY_SECRET`, and set `PUBLIC_URL` to the realm's external HTTPS origin. That fallback covers both voice and theater rooms.
 
 Pterodactyl port requirements for bundled mode:
 

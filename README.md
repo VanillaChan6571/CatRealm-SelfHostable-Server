@@ -6,6 +6,15 @@ We have moved the Server Guide to https://catrealm.app/docs/#home
 
 Any Server/Client Bugs can be issued at https://github.com/VanillaChan6571/CatRealm/issues/new/choose
 
+## Central account sign-in
+
+For central accounts to join a realm, run server version 1.8.8 or newer and set
+`PUBLIC_URL` to the realm's exact external HTTPS origin (for example,
+`https://realm.example.com`). Existing `PUBLIC_SERVER_URL` settings are also
+accepted. When `SERVER_URL` is already that public origin, no override is needed.
+The client obtains a realm-bound sign-in assertion from central; the server
+verifies it with central before issuing a realm-local session.
+
 ## Multi-Realm Hosting (optional)
 
 Run several independent realms from one install — each on its own port with its own database, sharing LiveKit and the uploads/UGC folders. Set `MULTI_REALM=true` in `.env` and see [docs/MULTI_REALM.md](docs/MULTI_REALM.md).
@@ -20,14 +29,7 @@ When a CatRealm mobile user is @mentioned in a channel, your server can relay a 
 
 **Requirements:** The mentioned user must have a CatRealm central account (not a local-only account). Local account users do not have push tokens and will not receive push notifications.
 
-**Setup:**
-1. Generate your own relay secret — no coordination with CatRealm required:
-   ```
-   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-   ```
-2. Add to your `.env`:
-   ```
-   PUSH_RELAY_SECRET=<your generated secret>
-   ```
-
-Your server self-registers with the central CatRealm server automatically on startup using your `SERVER_URL`. No further setup is needed. Leave `PUSH_RELAY_SECRET` unset to disable push relay entirely.
+Users authorize notification grants when linking their central account. The
+server signs each notification request with its realm identity, and central
+checks the recipient's grant. The old `PUSH_RELAY_SECRET` self-registration
+flow is retired; do not configure it for new installations.

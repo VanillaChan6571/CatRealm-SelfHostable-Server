@@ -232,16 +232,26 @@ router.post('/central', async (req, res) => {
   }
 
   const { token, inviteCode } = req.body;
-  if (!token) return res.status(400).json({ error: 'Central token required' });
+  if (!token) return res.status(400).json({ error: 'Realm assertion required' });
+  let realmOrigin;
+  try {
+    const url = new URL(process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '');
+    if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Invalid realm origin');
+    realmOrigin = url.origin;
+    const assertion = jwt.decode(token);
+    if (assertion?.type !== 'realm_assertion' || assertion.aud !== realmOrigin) {
+      return res.status(401).json({ error: 'An assertion issued for this realm is required. Update your client.' });
+    }
+  } catch { return res.status(503).json({ error: 'Configure this realm PUBLIC_URL, PUBLIC_SERVER_URL or SERVER_URL with its public HTTPS origin.' }); }
 
   // Verify the central token with the auth server
   let centralUser;
   try {
     const resp = await axios.get(`${AUTH_SERVER_URL}/api/verify`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, 'X-CatRealm-Realm-Origin': realmOrigin },
       timeout: AUTH_VERIFY_TIMEOUT,
     });
-    if (!resp.data.valid) return res.status(401).json({ error: 'Central account verification failed' });
+    if (!resp.data.valid || resp.data.audience !== realmOrigin) return res.status(401).json({ error: 'Central account verification failed' });
     centralUser = resp.data.user;
   } catch (err) {
     if (axios.isAxiosError(err)) {

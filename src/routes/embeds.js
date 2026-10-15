@@ -1,52 +1,10 @@
 const router = require('express').Router();
-const axios = require('axios');
-const dns = require('dns').promises;
-const net = require('net');
+const { publicGet, resolvePublicHost } = require('../lib/publicHttp');
 const { createEmbedProxyToken } = require('../embedProxyToken');
-
 const MAX_REDIRECTS = 5;
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
-
-function isPrivateOrLocalIp(address) {
-  const family = net.isIP(address);
-  if (family === 4) {
-    const [a, b] = address.split('.').map((x) => Number(x));
-    if (a === 10) return true;
-    if (a === 127) return true;
-    if (a === 0) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a >= 224) return true;
-    return false;
-  }
-  if (family === 6) {
-    const n = address.toLowerCase();
-    if (n === '::1') return true;
-    if (n.startsWith('fc') || n.startsWith('fd')) return true;
-    if (n.startsWith('fe8') || n.startsWith('fe9') || n.startsWith('fea') || n.startsWith('feb')) return true;
-    return false;
-  }
-  return true;
-}
-
 async function isSafePublicHost(hostname) {
-  if (!hostname) return false;
-  const raw = String(hostname).trim().toLowerCase();
-  if (!raw) return false;
-  if (raw === 'localhost') return false;
-
-  if (net.isIP(raw)) {
-    return !isPrivateOrLocalIp(raw);
-  }
-
-  try {
-    const records = await dns.lookup(raw, { all: true, verbatim: true });
-    if (!records || records.length === 0) return false;
-    return records.every((r) => !isPrivateOrLocalIp(r.address));
-  } catch {
-    return false;
-  }
+  try { await resolvePublicHost(hostname); return true; } catch { return false; }
 }
 
 function extractMetaTag(html, key, attr = 'property') {
@@ -201,7 +159,7 @@ async function fetchKickPreview(kickRef, fallbackUrl) {
 
   let channelData = null;
   try {
-    const channelResp = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(channelSlug)}`, {
+    const channelResp = await publicGet(`https://kick.com/api/v2/channels/${encodeURIComponent(channelSlug)}`, {
       timeout: 7000,
       responseType: 'json',
       validateStatus: (status) => status >= 200 && status < 300,
@@ -228,7 +186,7 @@ async function fetchKickPreview(kickRef, fallbackUrl) {
     let vodTitle = null;
     let vodChannelSlug = null;
     try {
-      const vodResp = await axios.get(`https://kick.com/api/v1/video/${encodeURIComponent(vodUuid)}`, {
+      const vodResp = await publicGet(`https://kick.com/api/v1/video/${encodeURIComponent(vodUuid)}`, {
         timeout: 7000,
         responseType: 'json',
         validateStatus: (status) => status >= 200 && status < 300,
@@ -251,7 +209,7 @@ async function fetchKickPreview(kickRef, fallbackUrl) {
 
     if (!vodTitle) {
       try {
-        const videosResp = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(channelSlug)}/videos`, {
+        const videosResp = await publicGet(`https://kick.com/api/v2/channels/${encodeURIComponent(channelSlug)}/videos`, {
           timeout: 7000,
           responseType: 'json',
           validateStatus: (status) => status >= 200 && status < 300,
@@ -301,7 +259,7 @@ async function fetchInstagramPreview(instaRef, fallbackUrl) {
   const endpoint = `https://www.instagram.com/api/v1/oembed/?url=${encodeURIComponent(canonicalUrl)}`;
 
   try {
-    const response = await axios.get(endpoint, {
+    const response = await publicGet(endpoint, {
       timeout: 7000,
       responseType: 'json',
       validateStatus: (status) => status >= 200 && status < 300,
@@ -342,7 +300,7 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
 
   for (const endpoint of candidates) {
     try {
-      const response = await axios.get(endpoint, {
+      const response = await publicGet(endpoint, {
         timeout: 6000,
         responseType: 'json',
         validateStatus: (status) => status >= 200 && status < 300,
@@ -436,7 +394,7 @@ async function fetchTwitterLikePreview(tweetRef, fallbackUrl) {
 }
 
 async function fetchWithSafeRedirects(url, depth = 0) {
-  const response = await axios.get(url, {
+  const response = await publicGet(url, {
     timeout: 6000,
     maxRedirects: 0,
     responseType: 'text',
@@ -518,7 +476,7 @@ router.get('/', async (req, res) => {
 
   try {
     const response = await fetchWithSafeRedirects(parsed.toString());
-    const finalUrl = response.request?.res?.responseUrl || parsed.toString();
+    const finalUrl = response.url || parsed.toString();
     const contentTypeRaw = String(response.headers['content-type'] || '').toLowerCase();
     const contentType = contentTypeRaw.split(';')[0].trim();
 

@@ -88,7 +88,8 @@ function inferServerOrigin(req) {
 }
 
 function getPublicServerUrl(req) {
-  return normalizeOrigin(process.env.PUBLIC_SERVER_URL)
+  return normalizeOrigin(process.env.PUBLIC_URL)
+    || normalizeOrigin(process.env.PUBLIC_SERVER_URL)
     || normalizeOrigin(process.env.SERVER_URL)
     || inferServerOrigin(req)
     || 'http://localhost:3001';

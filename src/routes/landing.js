@@ -26,7 +26,7 @@ function getServerInfo(req) {
     memberCount,
     iconUrl: serverIcon ? `${origin}${serverIcon}` : null,
     bannerUrl: serverBanner ? `${origin}${serverBanner}` : null,
-    serverUrl: process.env.SERVER_URL || origin,
+    serverUrl: process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || origin,
   };
 }
 

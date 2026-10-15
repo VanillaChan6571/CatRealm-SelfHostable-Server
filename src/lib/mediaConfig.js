@@ -37,8 +37,8 @@ function readLiveKitConfig() {
     ''
   ).trim();
   const centralLiveKitFallback = isTruthy(process.env.CENTRAL_LIVEKIT_FALLBACK, false)
-    && (process.env.PUSH_RELAY_SECRET || '').trim().length >= 32
-    && !!(process.env.SERVER_URL || process.env.PUBLIC_URL || '').trim();
+    && (process.env.CENTRAL_MEDIA_RELAY_SECRET || '').trim().length >= 32
+    && !!(process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '').trim();
   const ttlSeconds = Math.max(
     60,
     Math.min(60 * 60, Number(process.env.MEDIA_TOKEN_TTL_SECONDS || DEFAULT_TOKEN_TTL_SECONDS) || DEFAULT_TOKEN_TTL_SECONDS),

@@ -10,3 +10,7 @@ The security recheck adds shared-attachment, scheduled-source, and unreadable-so
 coverage. Expiry cleanup preserves attachments and thumbnails referenced by
 surviving messages while removing unreferenced batch uploads. Tests delete only
 synthetic files in newly created temporary directories; production uploads are untouched.
+
+`centralAuth.test.js` covers realm-bound central sign-in using synthetic tokens
+and a mocked central verifier. `mediaFallback.test.js` checks the enrolled media
+secret and public-origin configuration. Neither contacts the live auth service.
