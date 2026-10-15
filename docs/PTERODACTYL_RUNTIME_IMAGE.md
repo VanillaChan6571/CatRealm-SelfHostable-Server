@@ -30,6 +30,11 @@ Using a custom runtime image fixes that permanently.
 
 Import the CatRealm egg and pick one of the `CatRealm Runtime` image options from the egg image list.
 
+For central-account sign-in, set the egg's **Public Realm URL** to the exact
+external HTTPS origin users join. The installer writes this as `PUBLIC_URL`;
+the internal `SERVER_URL` generated from the allocated port is not a valid
+central sign-in audience. Reimport the current egg if that field is missing.
+
 ## Bundled LiveKit
 
 The CatRealm runtime image includes `livekit-server`, so one Pterodactyl server can run CatRealm plus LiveKit media together. LiveKit still runs as a sidecar process; it is not embedded into the CatRealm Node process.
@@ -48,7 +53,7 @@ When bundled mode starts, `scripts/pterodactyl-bootstrap.js` writes `data/liveki
 
 The external LiveKit URL, API key, API secret, and token TTL variables remain in the egg for advanced deployments, but they are hidden from regular server users. In bundled mode CatRealm generates and persists the LiveKit API secret automatically.
 
-If a server should use CatRealm central LiveKit instead of hosting local media, set `CENTRAL_LIVEKIT_FALLBACK=true`, configure the operator-enrolled `CENTRAL_MEDIA_RELAY_SECRET`, and set `PUBLIC_URL` to the realm's external HTTPS origin. That fallback covers both voice and theater rooms.
+If a server should use CatRealm central LiveKit instead of hosting local media, set `CENTRAL_LIVEKIT_FALLBACK=true`, have the panel operator configure the enrolled `CENTRAL_MEDIA_RELAY_SECRET`, and set `PUBLIC_URL` to the realm's external HTTPS origin. That fallback covers both voice and theater rooms.
 
 Pterodactyl port requirements for bundled mode:
 

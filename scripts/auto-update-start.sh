@@ -59,10 +59,7 @@ else
   echo "[CatRealm] Auto-update disabled."
 fi
 
-if [ ! -d "node_modules" ]; then
-  echo "[CatRealm] Installing dependencies..."
-  npm install --omit=dev
-fi
+node src/lib/dependencyInstall.js
 
 echo "[CatRealm] Starting server..."
 exec node src/index.js

@@ -1,9 +1,12 @@
-require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
+const { ensureDependenciesInstalled } = require('./lib/dependencyInstall');
+
+ensureDependenciesInstalled(path.join(__dirname, '..'));
+require('dotenv').config();
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
 const { startBundledLiveKit, applySharedLiveKitClientEnv } = require('./livekitRuntime');
@@ -41,12 +44,13 @@ function runGit(repoRoot, args) {
 }
 
 function runNpmInstall(repoRoot) {
-  const npm = spawnSync('npm', ['install', '--omit=dev'], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    stdio: 'inherit',
-  });
-  return npm.status === 0;
+  try {
+    ensureDependenciesInstalled(repoRoot, { force: true });
+    return true;
+  } catch (err) {
+    pteroLog(`[CatRealm] ${err.message}`);
+    return false;
+  }
 }
 
 const updateRuntime = {

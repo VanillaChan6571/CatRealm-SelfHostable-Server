@@ -14,3 +14,5 @@ synthetic files in newly created temporary directories; production uploads are u
 `centralAuth.test.js` covers realm-bound central sign-in using synthetic tokens
 and a mocked central verifier. `mediaFallback.test.js` checks the enrolled media
 secret and public-origin configuration. Neither contacts the live auth service.
+`dependencyInstall.test.js` checks that a package change refreshes dependencies
+before the server starts, using a synthetic package and a fake npm executable.

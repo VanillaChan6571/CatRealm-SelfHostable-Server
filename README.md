@@ -14,6 +14,8 @@ For central accounts to join a realm, run server version 1.8.8 or newer and set
 accepted. When `SERVER_URL` is already that public origin, no override is needed.
 The client obtains a realm-bound sign-in assertion from central; the server
 verifies it with central before issuing a realm-local session.
+In Pterodactyl, set the egg's **Public Realm URL** field when the panel uses an
+internal `SERVER_URL` or a reverse proxy.
 
 ## Multi-Realm Hosting (optional)
 
