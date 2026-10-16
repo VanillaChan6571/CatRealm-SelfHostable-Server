@@ -48,6 +48,8 @@ function readManifest(baseDir, dir) {
     return null;
   }
   const username = String(manifest.username || '').trim();
+  // Accept legacy short plugin names here so existing bots can still load.
+  // Provisioning below blocks short names from creating new bot accounts.
   if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
     pteroLog(`[Bots] Ignoring ${dir}/bot.json — invalid username "${username}"`);
     return null;
@@ -76,6 +78,11 @@ function readManifest(baseDir, dir) {
 // (if any) are pre-registered so they work before the bot's first API call.
 function provisionPlugin(manifest) {
   let botRow = db.prepare('SELECT * FROM bots WHERE kind = ? AND plugin_name = ?').get('plugin', manifest.name);
+  if (manifest.username.length < 4 && (!botRow ||
+      db.prepare('SELECT username FROM users WHERE id = ?').get(botRow.user_id)?.username !== manifest.username)) {
+    pteroLog(`[Bots] Cannot provision plugin "${manifest.name}" — new usernames must be 4-32 characters`);
+    return null;
+  }
   if (!botRow) {
     const existingUser = db.prepare('SELECT id FROM users WHERE username = ?').get(manifest.username);
     if (existingUser) {

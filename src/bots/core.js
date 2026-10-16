@@ -66,7 +66,7 @@ function resolveBotToken(db, rawToken) {
 
 function validateBotUsername(db, username) {
   if (!username || typeof username !== 'string') return 'Username required';
-  if (username.length < 3 || username.length > 32) return 'Username must be 3-32 characters';
+  if (username.length < 4 || username.length > 32) return 'Username must be 4-32 characters';
   if (!/^[a-zA-Z0-9_]+$/.test(username)) return 'Username can only contain letters, numbers, and underscores';
   if (db.prepare('SELECT id FROM users WHERE username = ?').get(username)) return 'Username already taken';
   return null;

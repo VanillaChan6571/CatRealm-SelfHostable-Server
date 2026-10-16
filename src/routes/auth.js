@@ -49,8 +49,8 @@ router.post('/register', async (req, res) => {
   }
 
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-  if (username.length < 3 || username.length > 32) return res.status(400).json({ error: 'Username must be 3-32 characters' });
+  if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (username.length < 4 || username.length > 32) return res.status(400).json({ error: 'Username must be 4-32 characters' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   if (!/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Username can only contain letters, numbers, and underscores' });
   if (SERVER_MODE === 'decentral_only' && isBlockedUsername(username)) {
