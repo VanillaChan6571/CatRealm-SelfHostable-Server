@@ -37,6 +37,20 @@ function requirePermission(permission) {
 
 const { AUDIT_ACTIONS, logAuditAction, diffFields } = require('../lib/auditLog');
 
+function getHighestRolePosition(userId) {
+  const row = db.prepare(`
+    SELECT MAX(r.position) as max_position
+    FROM user_roles ur
+    JOIN roles r ON r.id = ur.role_id
+    WHERE ur.user_id = ?
+  `).get(userId);
+  return Number(row?.max_position ?? -1);
+}
+
+function isValidIdList(ids) {
+  return Array.isArray(ids) && ids.every((id) => typeof id === 'string') && new Set(ids).size === ids.length;
+}
+
 function isMediaHardLimitRemoved() {
   const value = String(process.env.MEDIA_REMOVE_LIMITS || '').trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'yes' || value === 'on';
@@ -360,6 +374,19 @@ router.post('/role-categories', requirePermission(PERMISSIONS.MANAGE_ROLES), (re
   res.status(201).json(category);
 });
 
+// PUT /api/admin/role-categories/reorder - body { categoryIds } in display order (top first)
+router.put('/role-categories/reorder', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
+  const { categoryIds } = req.body ?? {};
+  if (!isValidIdList(categoryIds)) return res.status(400).json({ error: 'categoryIds must be an array of unique ids' });
+  const existingIds = db.prepare('SELECT id FROM role_categories').all().map((c) => c.id);
+  if (categoryIds.length !== existingIds.length || !existingIds.every((id) => categoryIds.includes(id))) {
+    return res.status(400).json({ error: 'categoryIds must list every role category exactly once' });
+  }
+  const update = db.prepare('UPDATE role_categories SET position = ? WHERE id = ?');
+  db.transaction(() => { categoryIds.forEach((id, idx) => update.run(idx, id)); })();
+  res.json(db.prepare('SELECT * FROM role_categories ORDER BY position ASC, name COLLATE NOCASE').all());
+});
+
 // PUT /api/admin/role-categories/:id
 router.put('/role-categories/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
   const { id } = req.params;
@@ -437,6 +464,45 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
   res.status(201).json(role);
 });
 
+// PUT /api/admin/roles/reorder - body { roleIds } = every non-default role, highest first.
+// Non-owners may only rearrange roles below their own highest role.
+router.put('/roles/reorder', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
+  const { roleIds } = req.body ?? {};
+  if (!isValidIdList(roleIds)) return res.status(400).json({ error: 'roleIds must be an array of unique ids' });
+  const current = db
+    .prepare('SELECT id, name, position FROM roles WHERE is_default = 0 ORDER BY position DESC, name COLLATE NOCASE')
+    .all();
+  if (roleIds.length !== current.length || !current.every((r) => roleIds.includes(r.id))) {
+    return res.status(400).json({ error: 'roleIds must list every non-default role exactly once' });
+  }
+
+  if (!req.user?.is_owner) {
+    const actorTop = getHighestRolePosition(req.user.id);
+    const locked = current.filter((r) => Number(r.position) >= actorTop).map((r) => r.id);
+    if (locked.some((id, idx) => roleIds[idx] !== id)) {
+      return res.status(403).json({ error: 'You can only reorder roles below your highest role' });
+    }
+  }
+
+  const update = db.prepare('UPDATE roles SET position = ? WHERE id = ?');
+  db.transaction(() => {
+    roleIds.forEach((id, idx) => update.run(roleIds.length - idx, id));
+    db.prepare('UPDATE roles SET position = 0 WHERE is_default = 1').run();
+  })();
+
+  const before = current.map((r) => r.name);
+  const byId = new Map(current.map((r) => [r.id, r.name]));
+  const after = roleIds.map((id) => byId.get(id));
+  if (before.some((name, idx) => name !== after[idx])) {
+    logAuditAction(AUDIT_ACTIONS.ROLE_UPDATE, req.user.id, {
+      targetType: 'role',
+      details: { reorder: true, changes: { order: { from: before, to: after } } },
+    });
+  }
+  emitPermissionsChanged();
+  res.json(db.prepare('SELECT * FROM roles ORDER BY position DESC, name COLLATE NOCASE').all());
+});
+
 // PUT /api/admin/roles/:id
 router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
   const { id } = req.params;
@@ -454,6 +520,12 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   }
   if (typeof color === 'string' || color === null) {
     db.prepare('UPDATE roles SET color = ? WHERE id = ?').run(color, id);
+  }
+  if (typeof position === 'number' && !req.user?.is_owner) {
+    const actorTop = getHighestRolePosition(req.user.id);
+    if (Number(existing.position) >= actorTop || position >= actorTop) {
+      return res.status(403).json({ error: 'You can only move roles below your highest role' });
+    }
   }
   if (typeof position === 'number') {
     db.prepare('UPDATE roles SET position = ? WHERE id = ?').run(position, id);
@@ -615,16 +687,6 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
   const filtered = roleIds.filter((rid) => roleSet.has(rid));
 
   if (!req.user?.is_owner) {
-    const getHighestRolePosition = (userId) => {
-      const row = db.prepare(`
-        SELECT MAX(r.position) as max_position
-        FROM user_roles ur
-        JOIN roles r ON r.id = ur.role_id
-        WHERE ur.user_id = ?
-      `).get(userId);
-      return Number(row?.max_position ?? -1);
-    };
-
     const actorHighestRolePosition = getHighestRolePosition(req.user.id);
     const targetHighestRolePosition = getHighestRolePosition(id);
 

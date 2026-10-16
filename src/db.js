@@ -878,6 +878,22 @@ if (adminRole && (adminRole.permissions & ALL_PERMISSIONS) !== ALL_PERMISSIONS) 
   pteroLog('[CatRealm] Updated Admin role permissions');
 }
 
+// Every member holds the default role, so it must rank lowest or it would win
+// name color and role hierarchy for everyone. Renumber if it sits at/above any role.
+{
+  const roleRows = db.prepare('SELECT id, is_default, position FROM roles ORDER BY position DESC, name COLLATE NOCASE').all();
+  const defaultRow = roleRows.find((r) => r.is_default);
+  const others = roleRows.filter((r) => !r.is_default);
+  if (defaultRow && others.some((r) => Number(r.position) <= Number(defaultRow.position))) {
+    const setPos = db.prepare('UPDATE roles SET position = ? WHERE id = ?');
+    db.transaction(() => {
+      setPos.run(0, defaultRow.id);
+      others.forEach((r, idx) => setPos.run(others.length - idx, r.id));
+    })();
+    pteroLog('[CatRealm] Normalized role positions (default role moved to bottom)');
+  }
+}
+
 // Ensure all users have the default role
 const defaultRole = db.prepare('SELECT id FROM roles WHERE is_default = 1').get();
 if (defaultRole) {
