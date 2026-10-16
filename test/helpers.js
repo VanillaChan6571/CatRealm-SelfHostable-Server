@@ -61,7 +61,7 @@ function getUser(db, id = 'alice') {
   return { ...user, permissions: permissions.computePermissionsForUser(id, user.role, user.is_owner, db) };
 }
 
-function makeSocketHarness(db, { directory, fakeFs, clientType = 'desktop' } = {}) {
+function makeSocketHarness(db, { directory, fakeFs, clientType = 'desktop', overrides = {}, extraUsers = [] } = {}) {
   const intervalCallbacks = [];
   const handlers = {};
   const middleware = [];
@@ -91,11 +91,27 @@ function makeSocketHarness(db, { directory, fakeFs, clientType = 'desktop' } = {
     '../routes/media': {}, '../lib/mediaConfig': {},
     '../settings': { getSetting: (_key, fallback) => fallback },
     ...(fakeFs ? { fs: fakeFs } : {}),
+    ...overrides,
   }, {
     process: { env: directory ? { UGC_IMAGES_DIR: directory } : {} },
     setInterval: (callback, delay) => { intervalCallbacks.push({ callback, delay }); return 0; },
   });
   api(io);
+  // Extra users (e.g. a bot) connect first so `dispatch` keeps alice's handlers.
+  const extraSockets = {};
+  for (const id of extraUsers) {
+    const extra = {
+      id: `socket-${id}`, user: getUser(db, id), authUser: getUser(db, id), handshake: { auth: {} },
+      rooms: new Set(), handlers: {}, middleware: [], to: io.to,
+      on(event, callback) { this.handlers[event] = callback; },
+      use(callback) { this.middleware.push(callback); },
+      emit: (event, data) => events.push({ socket: `socket-${id}`, event, data }),
+      join(room) { this.rooms.add(room); }, leave(room) { this.rooms.delete(room); },
+    };
+    io.sockets.sockets.set(extra.id, extra);
+    connect(extra);
+    extraSockets[id] = extra;
+  }
   connect(socket);
   return {
     api, socket, events, intervalCallbacks,
@@ -103,6 +119,13 @@ function makeSocketHarness(db, { directory, fakeFs, clientType = 'desktop' } = {
       for (const callback of middleware) callback([event, payload], () => {});
       handlers[event](payload, ack);
     },
+    // Dispatch as one of `extraUsers` (e.g. a bot socket).
+    dispatchAs(id, event, payload, ack) {
+      const extra = extraSockets[id];
+      for (const callback of extra.middleware) callback([event, payload], () => {});
+      extra.handlers[event](payload, ack);
+    },
+    extraSockets,
   };
 }
 

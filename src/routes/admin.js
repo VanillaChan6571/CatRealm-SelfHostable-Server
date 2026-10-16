@@ -295,15 +295,26 @@ router.delete('/webhooks/:id', requirePermission(PERMISSIONS.MANAGE_WEBHOOKS), (
   res.json({ success: true });
 });
 
+const ADMIN_MEMBER_SELECT = `
+  SELECT u.id, u.username, u.role, u.avatar, u.bio, u.is_owner, u.is_bot
+  FROM users u
+  WHERE COALESCE(u.is_member, 1) = 1
+    AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.user_id = u.id)
+`;
+
+function serializeAdminMember(u, roleIds) {
+  return {
+    ...u,
+    isOwner: !!u.is_owner,
+    isBot: !!u.is_bot,
+    roleIds,
+    accountType: u.is_bot ? 'bot' : 'local',
+  };
+}
+
 // GET /api/admin/users
 router.get('/users', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) => {
-  const users = db.prepare(`
-    SELECT u.id, u.username, u.role, u.avatar, u.bio, u.is_owner, u.is_bot
-    FROM users u
-    WHERE COALESCE(u.is_member, 1) = 1
-      AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.user_id = u.id)
-    ORDER BY u.username COLLATE NOCASE
-  `).all();
+  const users = db.prepare(`${ADMIN_MEMBER_SELECT} ORDER BY u.username COLLATE NOCASE`).all();
   const roleRows = db.prepare('SELECT user_id, role_id FROM user_roles').all();
   const rolesByUser = new Map();
   for (const row of roleRows) {
@@ -311,13 +322,14 @@ router.get('/users', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) =>
     list.push(row.role_id);
     rolesByUser.set(row.user_id, list);
   }
-  res.json(users.map((u) => ({
-    ...u,
-    isOwner: !!u.is_owner,
-    isBot: !!u.is_bot,
-    roleIds: rolesByUser.get(u.id) ?? [],
-    accountType: u.is_bot ? 'bot' : 'local',
-  })));
+  res.json(users.map((u) => serializeAdminMember(u, rolesByUser.get(u.id) ?? [])));
+});
+
+// GET /api/admin/users/:id - One member (same shape as the list entries)
+router.get('/users/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) => {
+  const user = db.prepare(`${ADMIN_MEMBER_SELECT} AND u.id = ?`).get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json(serializeAdminMember(user, getMemberRoleIds(user.id)));
 });
 
 // PUT /api/admin/users/:id/role
@@ -670,17 +682,9 @@ router.delete('/roles/:id/icon', requirePermission(PERMISSIONS.MANAGE_ROLES), (r
 });
 
 // PUT /api/admin/users/:id/roles
-router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req, res) => {
-  const { id } = req.params;
-  const user = db.prepare('SELECT id, is_owner FROM users WHERE id = ?').get(id);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  // Server owner can manage their own role list; non-owners cannot modify the owner.
-  if (user.is_owner && !req.user?.is_owner) {
-    return res.status(403).json({ error: 'Cannot modify roles for the server owner' });
-  }
-
-  const { roleIds } = req.body ?? {};
-  if (!Array.isArray(roleIds)) return res.status(400).json({ error: 'roleIds must be an array' });
+// Shared by the full-replace and single-role endpoints so hierarchy checks,
+// default-role enforcement and audit logging stay identical.
+function setMemberRoles(req, res, id, roleIds) {
   const existingRoles = db.prepare('SELECT id, is_default, position FROM roles').all();
   const roleSet = new Set(existingRoles.map((r) => r.id));
   const rolePositionById = new Map(existingRoles.map((r) => [r.id, Number(r.position || 0)]));
@@ -710,7 +714,7 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
     filtered.push(defaultRole.id);
   }
 
-  const previousRoleIds = db.prepare('SELECT role_id FROM user_roles WHERE user_id = ?').all(id).map((r) => r.role_id);
+  const previousRoleIds = getMemberRoleIds(id);
 
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(id);
@@ -739,6 +743,53 @@ router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req
 
   emitPermissionsChanged();
   res.json({ id, roleIds: filtered });
+}
+
+// Returns the target member or sends the error response.
+function loadRoleTarget(req, res) {
+  const user = db.prepare('SELECT id, is_owner FROM users WHERE id = ?').get(req.params.id);
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return null;
+  }
+  // Server owner can manage their own role list; non-owners cannot modify the owner.
+  if (user.is_owner && !req.user?.is_owner) {
+    res.status(403).json({ error: 'Cannot modify roles for the server owner' });
+    return null;
+  }
+  return user;
+}
+
+function getMemberRoleIds(userId) {
+  return db.prepare('SELECT role_id FROM user_roles WHERE user_id = ?').all(userId).map((r) => r.role_id);
+}
+
+router.put('/users/:id/roles', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req, res) => {
+  if (!loadRoleTarget(req, res)) return;
+  const { roleIds } = req.body ?? {};
+  if (!Array.isArray(roleIds)) return res.status(400).json({ error: 'roleIds must be an array' });
+  setMemberRoles(req, res, req.params.id, roleIds);
+});
+
+// PUT /api/admin/users/:id/roles/:roleId - Add one role (no read-modify-write race)
+router.put('/users/:id/roles/:roleId', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req, res) => {
+  if (!loadRoleTarget(req, res)) return;
+  const { id, roleId } = req.params;
+  if (!db.prepare('SELECT 1 FROM roles WHERE id = ?').get(roleId)) {
+    return res.status(404).json({ error: 'Role not found' });
+  }
+  const current = getMemberRoleIds(id);
+  setMemberRoles(req, res, id, current.includes(roleId) ? current : [...current, roleId]);
+});
+
+// DELETE /api/admin/users/:id/roles/:roleId - Remove one role
+router.delete('/users/:id/roles/:roleId', requirePermission(PERMISSIONS.ASSIGN_ROLES), (req, res) => {
+  if (!loadRoleTarget(req, res)) return;
+  const { id, roleId } = req.params;
+  const role = db.prepare('SELECT is_default FROM roles WHERE id = ?').get(roleId);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  if (role.is_default) return res.status(400).json({ error: 'Cannot remove the default role' });
+  setMemberRoles(req, res, id, getMemberRoleIds(id).filter((rid) => rid !== roleId));
 });
 
 // POST /api/admin/users/:id/kick - Kick a member

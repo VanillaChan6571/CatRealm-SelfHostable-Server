@@ -13,7 +13,7 @@ const {
   computeUserChannelPermissions,
 } = require('../permissions');
 const { applyRoleViewToUser } = require('../viewAsRole');
-const { isBotToken, resolveBotToken } = require('../bots/core');
+const { isBotToken, resolveBotToken, canUseBotCommand, resolveOptionValue } = require('../bots/core');
 const { BOT_SCOPES, botHasScope, getBotConsent } = require('../bots/scopes');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
@@ -107,6 +107,17 @@ function botEventAllowed(userId) {
 // id -> { botId, botUserId, userId, channelId, threadId, command, createdAt, timer }
 const pendingInteractions = new Map();
 const INTERACTION_TTL_MS = 60 * 1000;
+// Answered interactions accept follow-ups for a while: id -> { ...interaction, expiresAt }
+const respondedInteractions = new Map();
+const FOLLOWUP_TTL_MS = 15 * 60 * 1000;
+
+function rememberRespondedInteraction(id, interaction) {
+  const now = Date.now();
+  for (const [key, entry] of respondedInteractions) {
+    if (entry.expiresAt <= now) respondedInteractions.delete(key);
+  }
+  respondedInteractions.set(id, { ...interaction, timer: null, expiresAt: now + FOLLOWUP_TTL_MS });
+}
 
 function emitToUserSockets(userId, event, data) {
   if (!ioInstance) return 0;
@@ -322,6 +333,15 @@ function emitMessage(channelId, message) {
 function emitServerInfoUpdate(info) {
   if (!ioInstance) return;
   ioInstance.emit('server:info', info);
+}
+
+// Ack status for socket actions, derived from the legacy `error` strings so
+// both channels stay in sync.
+function socketErrorStatus(error) {
+  if (/rate limit|slowmode/i.test(error)) return 'rate_limited';
+  if (/not found/i.test(error)) return 'not_found';
+  if (/^(missing permission|not allowed|cannot )/i.test(error)) return 'denied';
+  return 'invalid';
 }
 
 function emitPermissionsChanged() {
@@ -1379,10 +1399,12 @@ function setupSocketHandlers(io) {
     });
 
     // ── Send a message ─────────────────────────────────────────────────────────
-    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at, client_nonce }) => {
+    socket.on('message:send', ({ channelId, content, attachment, attachments: attachmentsRaw, threadId, replyToId, forwardFromId, forwardMeta, nsfwTags, voice_expires_at, scheduled_at, client_nonce }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      const fail = (error) => { socket.emit('error', error); reply({ status: socketErrorStatus(error), error }); };
       touchActivity(user.id);
       if (user.is_bot && !botEventAllowed(user.id)) {
-        return socket.emit('error', 'Bot rate limit exceeded — slow down');
+        return fail('Bot rate limit exceeded — slow down');
       }
       // Normalize to array — accept both legacy single `attachment` and new `attachments[]`
       const attachmentsArray = (Array.isArray(attachmentsRaw) ? attachmentsRaw : [])
@@ -1392,32 +1414,32 @@ function setupSocketHandlers(io) {
       }
       if (attachmentsArray.some((att) => [att.url, att.thumbnailUrl, att.thumbnail_url].some(
         (url) => typeof url === 'string' && url.startsWith('/ugc/images/') && !localUploadSuffix(url)
-      ))) return socket.emit('error', 'Invalid attachment URL');
+      ))) return fail('Invalid attachment URL');
       const hasText = typeof content === 'string' && content.trim().length > 0;
       const hasAttachment = attachmentsArray.length > 0;
-      if (!channelId || (!hasText && !hasAttachment)) return;
-      if (content && content.length > 2000) return socket.emit('error', 'Message too long (max 2000 chars)');
+      if (!channelId || (!hasText && !hasAttachment)) return reply({ status: 'invalid', error: 'Content required' });
+      if (content && content.length > 2000) return fail('Message too long (max 2000 chars)');
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
-        return socket.emit('error', 'Missing permission: view_channels');
+        return fail('Missing permission: view_channels');
       }
       if (!canReadChannelHistory(user, channelId)) {
-        return socket.emit('error', 'Missing permission: read_chat_history');
+        return fail('Missing permission: read_chat_history');
       }
       const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
-      if (!channel) return socket.emit('error', 'Channel not found');
+      if (!channel) return fail('Channel not found');
       if (!canSendToChannel(user, channelId, channel.type, threadId)) {
-        return socket.emit('error', 'Missing permission: send_messages');
+        return fail('Missing permission: send_messages');
       }
       if (hasAttachment && !hasChannelPermission(user, channelId, PERMISSIONS.ATTACH_FILES, db)) {
-        return socket.emit('error', 'Missing permission: send_media');
+        return fail('Missing permission: send_media');
       }
       const canEmbedLinks = hasChannelPermission(user, channelId, PERMISSIONS.EMBED_LINKS, db);
       if (threadId) {
         const thread = db.prepare('SELECT id, channel_id FROM threads WHERE id = ?').get(threadId);
-        if (!thread || thread.channel_id !== channelId) return socket.emit('error', 'Thread not found');
+        if (!thread || thread.channel_id !== channelId) return fail('Thread not found');
       }
       if (channel.type === 'media' && hasText) {
-        return socket.emit('error', 'Media channels do not allow text-only messages');
+        return fail('Media channels do not allow text-only messages');
       }
 
       // Check slowmode
@@ -1436,7 +1458,7 @@ function setupSocketHandlers(io) {
             const timeSince = now - lastMessage.created_at;
             if (timeSince < channelSettings.slowmode) {
               const remaining = channelSettings.slowmode - timeSince;
-              return socket.emit('error', `Slowmode active: please wait ${remaining}s before sending another message`);
+              return fail(`Slowmode active: please wait ${remaining}s before sending another message`);
             }
           }
         }
@@ -1446,13 +1468,13 @@ function setupSocketHandlers(io) {
       let normalizedScheduledAt = null;
       if (scheduled_at != null) {
         if (!hasChannelPermission(user, channelId, PERMISSIONS.SCHEDULE_MESSAGES, db)) {
-          return socket.emit('error', 'Missing permission: schedule_messages');
+          return fail('Missing permission: schedule_messages');
         }
         const nowSec = Math.floor(Date.now() / 1000);
         const parsed = typeof scheduled_at === 'number' ? Math.floor(scheduled_at) : null;
         const maxSec = nowSec + 30 * 24 * 60 * 60; // 30 days
         if (!parsed || parsed < nowSec + 30 || parsed > maxSec) {
-          return socket.emit('error', 'Invalid scheduled_at');
+          return fail('Invalid scheduled_at');
         }
         normalizedScheduledAt = parsed;
       }
@@ -1466,9 +1488,9 @@ function setupSocketHandlers(io) {
           JOIN users u ON u.id = m.user_id
           WHERE m.id = ?
         `).get(replyToId);
-        if (!replyTo) return socket.emit('error', 'Reply target not found');
+        if (!replyTo) return fail('Reply target not found');
         if (replyTo.channel_id !== channelId || replyTo.scheduled_at != null) {
-          return socket.emit('error', 'Reply target not available in this channel');
+          return fail('Reply target not available in this channel');
         }
         replyTo.content = decryptMessageContent(replyTo.content);
       }
@@ -1483,11 +1505,11 @@ function setupSocketHandlers(io) {
           JOIN channels c ON c.id = m.channel_id
           WHERE m.id = ?
         `).get(forwardFromId);
-        if (!forwardFrom) return socket.emit('error', 'Forward source not found');
+        if (!forwardFrom) return fail('Forward source not found');
         if (forwardFrom.scheduled_at != null
           || !hasChannelPermission(user, forwardFrom.channel_id, PERMISSIONS.VIEW_CHANNELS, db)
           || !canReadChannelHistory(user, forwardFrom.channel_id)) {
-          return socket.emit('error', 'Forward source not available');
+          return fail('Forward source not available');
         }
         forwardFrom.content = decryptMessageContent(forwardFrom.content);
       } else if (forwardMeta && typeof forwardMeta.serverName === 'string') {
@@ -1514,10 +1536,10 @@ function setupSocketHandlers(io) {
 
         const externalUse = detectExternalExpressionUsage(trimmed);
         if (externalUse.usesExternalEmote && !hasChannelPermission(user, channelId, PERMISSIONS.USE_EXTERNAL_EMOTES, db)) {
-          return socket.emit('error', 'Missing permission: use_external_emotes');
+          return fail('Missing permission: use_external_emotes');
         }
         if (externalUse.usesExternalSticker && !hasChannelPermission(user, channelId, PERMISSIONS.USE_EXTERNAL_STICKERS, db)) {
-          return socket.emit('error', 'Missing permission: use_external_stickers');
+          return fail('Missing permission: use_external_stickers');
         }
       }
       const firstAtt = attachmentsArray[0] ?? null;
@@ -1684,6 +1706,8 @@ function setupSocketHandlers(io) {
         }
       }
 
+      reply({ status: 'ok', messageId: id, scheduled: !!normalizedScheduledAt });
+
       // Auto-reaction (if configured)
       if (channelSettings && channelSettings.default_reaction) {
         // TODO: Implement reactions system
@@ -1693,7 +1717,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Invoke a bot slash command ─────────────────────────────────────────────
-    socket.on('interaction:invoke', ({ botId, command, channelId, threadId, options, nonce }, ack) => {
+    socket.on('interaction:invoke', ({ botId, command, channelId, threadId, replyToId, options, nonce }, ack) => {
       const reply = (payload) => { if (typeof ack === 'function') ack({ nonce: nonce || null, ...payload }); };
       if (user.is_bot) return reply({ status: 'denied', error: 'Bots cannot invoke commands' });
       touchActivity(user.id);
@@ -1704,6 +1728,9 @@ function setupSocketHandlers(io) {
       if (!bot || Number(bot.enabled) !== 1) return reply({ status: 'unknown_bot' });
       const commandRow = db.prepare('SELECT * FROM bot_commands WHERE bot_id = ? AND name = ?').get(botId, command.toLowerCase());
       if (!commandRow) return reply({ status: 'unknown_command' });
+      if (!canUseBotCommand(user, commandRow.default_permission, hasPermission)) {
+        return reply({ status: 'missing_permission', error: `Requires ${commandRow.default_permission}` });
+      }
       const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
       if (!channel) return reply({ status: 'invalid', error: 'Channel not found' });
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)
@@ -1744,6 +1771,27 @@ function setupSocketHandlers(io) {
           }
         }
       }
+      // Enforce declared choices and resolve role names/ids; undeclared keys pass through.
+      // (Older plugin rows may hold unvalidated option entries, hence the filter.)
+      let declaredOptions = [];
+      try { declaredOptions = JSON.parse(commandRow.options || '[]'); } catch { /* treat as none */ }
+      declaredOptions = Array.isArray(declaredOptions) ? declaredOptions.filter((o) => o && typeof o.name === 'string') : [];
+      const roles = declaredOptions.some((o) => o.type === 'role') ? db.prepare('SELECT id, name FROM roles').all() : [];
+      for (const key of Object.keys(safeOptions)) {
+        const option = declaredOptions.find((o) => o.name === key.toLowerCase());
+        if (!option) continue;
+        const resolved = resolveOptionValue(option, safeOptions[key], roles);
+        if (resolved.error) return reply({ status: 'invalid', error: resolved.error });
+        safeOptions[key] = resolved.value;
+      }
+
+      // Only pass through a reply target the invoker can actually see here.
+      const replyTarget = typeof replyToId === 'string'
+        ? db.prepare(`
+          SELECT id FROM messages
+          WHERE id = ? AND channel_id = ? AND COALESCE(thread_id, '') = ? AND (scheduled_at IS NULL OR user_id = ?)
+        `).get(replyToId, channelId, threadId || '', user.id)
+        : null;
 
       const interactionId = randomUUID();
       const timer = setTimeout(() => {
@@ -1762,7 +1810,14 @@ function setupSocketHandlers(io) {
         timer,
       });
 
-      const invokerPayload = { id: user.id, username: authUser.username };
+      // Server-level permissions (bigint string) + roles so bots can gate commands without admin calls.
+      const invokerPayload = {
+        id: user.id,
+        username: authUser.username,
+        isOwner: !!user.is_owner,
+        permissions: String(BigInt(Math.trunc(Number(user.permissions) || 0))),
+        roleIds: db.prepare('SELECT role_id FROM user_roles WHERE user_id = ?').all(user.id).map((r) => r.role_id),
+      };
       const invokerRow = db.prepare(`
         SELECT u.bio, u.pronouns, u.status, u.activity_type, u.activity_text,
           COALESCE(dno.display_name, u.display_name) as display_name
@@ -1788,6 +1843,7 @@ function setupSocketHandlers(io) {
           options: safeOptions,
           channelId,
           threadId: threadId || null,
+          replyToId: replyTarget?.id || null,
           user: invokerPayload,
           respondBy: Date.now() + INTERACTION_TTL_MS,
         });
@@ -1796,17 +1852,28 @@ function setupSocketHandlers(io) {
     });
 
     // ── Bot responds to an interaction ─────────────────────────────────────────
-    socket.on('interaction:respond', ({ id, content, ephemeral }, ack) => {
-      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
-      if (!socket.bot) return reply({ status: 'denied', error: 'Not a bot connection' });
-      if (!botEventAllowed(user.id)) return reply({ status: 'rate_limited' });
-      const interaction = pendingInteractions.get(id);
-      if (!interaction || interaction.botId !== socket.bot.id) return reply({ status: 'unknown_interaction' });
+    // Ghost message: shown only to `userId` in a channel, never persisted.
+    const emitGhostMessage = (userId, { channelId, threadId, content, interactionId = null, interaction = null }) => {
+      emitToUserSockets(userId, 'bot:ephemeral', {
+        id: randomUUID(),
+        interactionId,
+        channelId,
+        threadId: threadId || null,
+        botUserId: user.id,
+        username: authUser.username,
+        displayName: onlineUsers.get(user.id)?.display_name || null,
+        avatar: onlineUsers.get(user.id)?.avatar || null,
+        content,
+        interaction,
+        created_at: Math.floor(Date.now() / 1000),
+      });
+    };
+
+    // Shared by interaction:respond and interaction:followup. Returns the ack payload.
+    const deliverInteractionReply = (interactionId, interaction, content, ephemeral) => {
       const trimmed = typeof content === 'string' ? content.trim() : '';
-      if (!trimmed) return reply({ status: 'invalid', error: 'Content required' });
-      if (trimmed.length > 2000) return reply({ status: 'invalid', error: 'Message too long (max 2000 chars)' });
-      clearTimeout(interaction.timer);
-      pendingInteractions.delete(id);
+      if (!trimmed) return { status: 'invalid', error: 'Content required' };
+      if (trimmed.length > 2000) return { status: 'invalid', error: 'Message too long (max 2000 chars)' };
 
       const interactionMeta = {
         command: interaction.command,
@@ -1819,26 +1886,20 @@ function setupSocketHandlers(io) {
       };
 
       if (ephemeral === true) {
-        // Visible only to the invoker; never persisted.
-        emitToUserSockets(interaction.userId, 'bot:ephemeral', {
-          interactionId: id,
+        emitGhostMessage(interaction.userId, {
           channelId: interaction.channelId,
           threadId: interaction.threadId,
-          botUserId: user.id,
-          username: authUser.username,
-          displayName: onlineUsers.get(user.id)?.display_name || null,
-          avatar: onlineUsers.get(user.id)?.avatar || null,
           content: trimmed,
+          interactionId,
           interaction: interactionMeta,
-          created_at: Math.floor(Date.now() / 1000),
         });
-        return reply({ status: 'ok' });
+        return { status: 'ok' };
       }
 
       const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(interaction.channelId);
-      if (!channel) return reply({ status: 'invalid', error: 'Channel not found' });
+      if (!channel) return { status: 'not_found', error: 'Channel not found' };
       if (!canSendToChannel(user, interaction.channelId, channel.type, interaction.threadId)) {
-        return reply({ status: 'denied', error: 'Missing permission: send_messages' });
+        return { status: 'denied', error: 'Missing permission: send_messages' };
       }
 
       const messageId = randomUUID();
@@ -1883,7 +1944,69 @@ function setupSocketHandlers(io) {
         io.to(interaction.channelId).emit('message:new', message);
       }
       queueMessageCreatedEvent(message);
-      reply({ status: 'ok', messageId });
+      return { status: 'ok', messageId };
+    };
+
+    socket.on('interaction:respond', ({ id, content, ephemeral } = {}, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      if (!socket.bot) return reply({ status: 'denied', error: 'Not a bot connection' });
+      if (!botEventAllowed(user.id)) return reply({ status: 'rate_limited' });
+      const interaction = pendingInteractions.get(id);
+      if (!interaction || interaction.botId !== socket.bot.id) return reply({ status: 'unknown_interaction' });
+      const result = deliverInteractionReply(id, interaction, content, ephemeral);
+      // Invalid content leaves the interaction open so the bot can retry.
+      if (result.status === 'invalid') return reply(result);
+      clearTimeout(interaction.timer);
+      pendingInteractions.delete(id);
+      rememberRespondedInteraction(id, interaction);
+      reply(result);
+    });
+
+    // Extra messages after the first response (public or ghost), for FOLLOWUP_TTL_MS.
+    socket.on('interaction:followup', ({ id, content, ephemeral } = {}, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      if (!socket.bot) return reply({ status: 'denied', error: 'Not a bot connection' });
+      if (!botEventAllowed(user.id)) return reply({ status: 'rate_limited' });
+      const interaction = respondedInteractions.get(id);
+      if (!interaction || interaction.botId !== socket.bot.id || interaction.expiresAt <= Date.now()) {
+        return reply({ status: 'unknown_interaction' });
+      }
+      reply(deliverInteractionReply(id, interaction, content, ephemeral));
+    });
+
+    // Ghost message outside an interaction (e.g. reacting to a role panel).
+    // The bot must be able to post in the channel, the user must be able to see
+    // it, and the user must not have denied the bot.
+    socket.on('bot:ephemeral:send', ({ userId, channelId, threadId, content } = {}, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      if (!socket.bot) return reply({ status: 'denied', error: 'Not a bot connection' });
+      if (!botEventAllowed(user.id)) return reply({ status: 'rate_limited' });
+      const trimmed = typeof content === 'string' ? content.trim() : '';
+      if (!trimmed || typeof userId !== 'string' || typeof channelId !== 'string') {
+        return reply({ status: 'invalid', error: 'userId, channelId and content required' });
+      }
+      if (trimmed.length > 2000) return reply({ status: 'invalid', error: 'Message too long (max 2000 chars)' });
+      const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
+      if (!channel) return reply({ status: 'not_found', error: 'Channel not found' });
+      if (threadId) {
+        const thread = db.prepare('SELECT channel_id FROM threads WHERE id = ?').get(threadId);
+        if (!thread || thread.channel_id !== channelId) return reply({ status: 'not_found', error: 'Thread not found' });
+      }
+      if (!canSendToChannel(user, channelId, channel.type, threadId || null)) {
+        return reply({ status: 'denied', error: 'Missing permission: send_messages' });
+      }
+      const targetRow = db.prepare('SELECT * FROM users WHERE id = ? AND COALESCE(is_member, 1) = 1').get(userId);
+      if (!targetRow || Number(targetRow.is_bot) === 1) return reply({ status: 'not_found', error: 'Target user not found' });
+      const target = { ...targetRow, permissions: computePermissionsForUser(targetRow.id, targetRow.role, targetRow.is_owner, db) };
+      if (!hasChannelPermission(target, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+        return reply({ status: 'denied', error: 'Target user cannot view this channel' });
+      }
+      if (getBotConsent(db, socket.bot.id, userId)?.decision === 'denied') {
+        return reply({ status: 'denied', error: 'User has denied this bot' });
+      }
+      if (!onlineUsers.get(userId)?.sockets?.size) return reply({ status: 'user_offline' });
+      emitGhostMessage(userId, { channelId, threadId, content: trimmed });
+      reply({ status: 'ok' });
     });
 
     // ── Bot DMs (persisted, surfaced in the client's "Bot DMs" channel) ────────
@@ -1948,37 +2071,44 @@ function setupSocketHandlers(io) {
     });
 
     // ── Toggle a reaction on a message ─────────────────────────────────────────
-    socket.on('message:react', ({ messageId, emoji }) => {
+    socket.on('message:react', ({ messageId, emoji }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      const fail = (error) => { socket.emit('error', error); reply({ status: socketErrorStatus(error), error }); };
       touchActivity(user.id);
       const token = normalizeReactionToken(emoji);
-      if (!token) return socket.emit('error', 'Invalid reaction');
+      if (!token) return fail('Invalid reaction');
       const msg = db.prepare('SELECT id, channel_id, thread_id, message_type FROM messages WHERE id = ?').get(messageId);
-      if (!msg) return socket.emit('error', 'Message not found');
-      if (msg.message_type && msg.message_type !== 'user') return socket.emit('error', 'Cannot react to system messages');
-      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
-      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.ADD_REACTIONS, db)) return socket.emit('error', 'Missing permission: add_reactions');
+      if (!msg) return fail('Message not found');
+      if (msg.message_type && msg.message_type !== 'user') return fail('Cannot react to system messages');
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return fail('Not allowed');
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.ADD_REACTIONS, db)) return fail('Missing permission: add_reactions');
 
-      const { reactions } = toggleMessageReaction(msg.id, user.id, token);
-      const payload = { messageId: msg.id, channelId: msg.channel_id, threadId: msg.thread_id || null, reactions };
-      if (msg.thread_id) {
-        io.to(`thread:${msg.thread_id}`).emit('message:reaction:update', payload);
-      } else {
-        io.to(msg.channel_id).emit('message:reaction:update', payload);
-      }
+      const { reacted, reactions } = toggleMessageReaction(msg.id, user.id, token);
+      const threadId = msg.thread_id || null;
+      const room = threadId ? `thread:${threadId}` : msg.channel_id;
+      io.to(room).emit('message:reaction:update', { messageId: msg.id, channelId: msg.channel_id, threadId, reactions });
+      // Delta event so bots don't have to diff full summaries.
+      io.to(room).emit(reacted ? 'message:reaction:add' : 'message:reaction:remove', {
+        messageId: msg.id, channelId: msg.channel_id, threadId, userId: user.id, emoji: token,
+      });
+      reply({ status: 'ok', messageId: msg.id, reacted });
     });
 
     // ── Edit a message ─────────────────────────────────────────────────────────
-    socket.on('message:edit', ({ messageId, content }) => {
-      if (!content?.trim()) return;
+    socket.on('message:edit', ({ messageId, content }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      const fail = (error) => { socket.emit('error', error); reply({ status: socketErrorStatus(error), error }); };
+      if (!content?.trim()) return reply({ status: 'invalid', error: 'Content required' });
+      if (content.trim().length > 2000) return fail('Message too long (max 2000 chars)');
       const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
-      if (!msg) return socket.emit('error', 'Message not found');
-      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
+      if (!msg) return fail('Message not found');
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return fail('Not allowed');
       // Message edits are sender-only. Moderation permissions allow delete, not content rewrite.
-      if (msg.user_id !== user.id) return socket.emit('error', 'Not allowed');
+      if (msg.user_id !== user.id) return fail('Not allowed');
       const canEmbedLinks = hasChannelPermission(user, msg.channel_id, PERMISSIONS.EMBED_LINKS, db);
       const channel = db.prepare('SELECT type FROM channels WHERE id = ?').get(msg.channel_id);
       if (channel?.type === 'media') {
-        return socket.emit('error', 'Media channels do not allow text edits');
+        return fail('Media channels do not allow text edits');
       }
 
       db.prepare('UPDATE messages SET content = ?, edited = 1, embeds_enabled = ? WHERE id = ?').run(encryptMessageContent(content.trim()), canEmbedLinks ? 1 : 0, messageId);
@@ -1988,15 +2118,18 @@ function setupSocketHandlers(io) {
       } else {
         io.to(msg.channel_id).emit('message:edited', payload);
       }
+      reply({ status: 'ok', messageId });
     });
 
     // ── Delete a message ───────────────────────────────────────────────────────
-    socket.on('message:delete', ({ messageId }) => {
+    socket.on('message:delete', ({ messageId }, ack) => {
+      const reply = (payload) => { if (typeof ack === 'function') ack(payload); };
+      const fail = (error) => { socket.emit('error', error); reply({ status: socketErrorStatus(error), error }); };
       const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
-      if (!msg) return socket.emit('error', 'Message not found');
-      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return socket.emit('error', 'Not allowed');
+      if (!msg) return fail('Message not found');
+      if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return fail('Not allowed');
       const canDelete = msg.user_id === user.id || hasChannelPermission(user, msg.channel_id, PERMISSIONS.DELETE_MESSAGES, db);
-      if (!canDelete) return socket.emit('error', 'Not allowed');
+      if (!canDelete) return fail('Not allowed');
 
       const attachmentUrls = collectMessageAttachmentUrls(msg);
       db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
@@ -2022,6 +2155,7 @@ function setupSocketHandlers(io) {
       } else {
         io.to(msg.channel_id).emit('message:deleted', { messageId, channelId: msg.channel_id });
       }
+      reply({ status: 'ok', messageId });
     });
 
     // ── Typing indicator ───────────────────────────────────────────────────────

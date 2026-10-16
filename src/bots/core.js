@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { normalizeRequestedScopes, parseJsonSafe } = require('./scopes');
+const { PERMISSIONS } = require('../permissions');
 
 // Same fallback as middleware/auth.js; required here directly to avoid a
 // require cycle (middleware/auth needs this module for bot verification).
@@ -142,6 +143,118 @@ function serializeBot(db, bot, { onlineUserIds = null, pluginStatus = null } = {
   };
 }
 
+const COMMAND_NAME_RE = /^[a-z0-9_-]{1,32}$/;
+const COMMAND_OPTION_TYPES = ['string', 'user', 'channel', 'role', 'integer', 'boolean'];
+const MAX_OPTION_CHOICES = 25;
+const MAX_COMMANDS_PER_BOT = 50;
+
+// Bit value of a named permission (e.g. 'MANAGE_ROLES'), or null if unknown.
+function commandPermissionBits(name) {
+  if (typeof name !== 'string') return null;
+  const value = PERMISSIONS[name];
+  return typeof value === 'number' ? value : null;
+}
+
+// Fixed values for string/integer options, shown as a picker in the composer.
+function normalizeOptionChoices(raw, type) {
+  if (type !== 'string' && type !== 'integer') return { error: 'choices are only allowed on string or integer options' };
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_OPTION_CHOICES) {
+    return { error: `choices must have 1-${MAX_OPTION_CHOICES} entries` };
+  }
+  const choices = [];
+  for (const choice of raw) {
+    const choiceName = String(choice?.name ?? '').trim().slice(0, 100);
+    const value = choice?.value;
+    const validValue = type === 'integer'
+      ? Number.isInteger(value)
+      : typeof value === 'string' && value.length > 0 && value.length <= 100;
+    if (!choiceName || !validValue) return { error: `invalid choice ${JSON.stringify(choice)}` };
+    choices.push({ name: choiceName, value });
+  }
+  return { choices };
+}
+
+// Resolves a raw option value against its declared type/choices.
+// Returns { value } or { error }; `roles` is [{ id, name }].
+function resolveOptionValue(option, raw, roles) {
+  if (Array.isArray(option.choices)) {
+    const match = option.choices.find((c) => String(c.value) === String(raw)
+      || c.name.toLowerCase() === String(raw).toLowerCase());
+    if (!match) return { error: `${option.name} must be one of: ${option.choices.map((c) => c.name).join(', ')}` };
+    return { value: match.value };
+  }
+  if (option.type === 'role') {
+    const text = String(raw).trim().replace(/^@/, '');
+    const role = roles.find((r) => r.id === text) || roles.find((r) => r.name.toLowerCase() === text.toLowerCase());
+    if (!role) return { error: `Unknown role: ${text}` };
+    return { value: role.id };
+  }
+  return { value: raw };
+}
+
+// Validates a command set (REST registration and bot.json share this).
+// Returns { commands } or { error }.
+function normalizeBotCommands(commands) {
+  if (!Array.isArray(commands)) return { error: 'commands array required' };
+  if (commands.length > MAX_COMMANDS_PER_BOT) {
+    return { error: `Too many commands (max ${MAX_COMMANDS_PER_BOT})` };
+  }
+  const normalized = [];
+  const seen = new Set();
+  for (const cmd of commands) {
+    const name = String(cmd?.name || '').toLowerCase().trim();
+    if (!COMMAND_NAME_RE.test(name)) return { error: `Invalid command name: ${name || '(empty)'}` };
+    if (seen.has(name)) return { error: `Duplicate command name: ${name}` };
+    seen.add(name);
+    const defaultPermission = cmd?.defaultPermission ?? cmd?.default_permission ?? null;
+    if (defaultPermission !== null && commandPermissionBits(defaultPermission) === null) {
+      return { error: `Unknown defaultPermission on ${name}: ${defaultPermission}` };
+    }
+    const options = [];
+    if (Array.isArray(cmd?.options)) {
+      for (const opt of cmd.options.slice(0, 10)) {
+        const optName = String(opt?.name || '').toLowerCase().trim();
+        if (!COMMAND_NAME_RE.test(optName)) continue;
+        const type = COMMAND_OPTION_TYPES.includes(opt?.type) ? opt.type : 'string';
+        const option = {
+          name: optName,
+          description: String(opt?.description || '').slice(0, 200),
+          type,
+          required: opt?.required === true,
+        };
+        if (opt?.choices !== undefined) {
+          const choices = normalizeOptionChoices(opt.choices, type);
+          if (choices.error) return { error: `${name}.${optName}: ${choices.error}` };
+          option.choices = choices.choices;
+        }
+        options.push(option);
+      }
+    }
+    normalized.push({ name, description: String(cmd?.description || '').slice(0, 200), options, defaultPermission });
+  }
+  return { commands: normalized };
+}
+
+// Fails closed: an unresolvable permission name hides/refuses the command.
+function canUseBotCommand(user, defaultPermission, hasPermission) {
+  if (!defaultPermission) return true;
+  const bits = commandPermissionBits(defaultPermission);
+  return bits !== null && hasPermission(user, bits);
+}
+
+function replaceBotCommands(db, botId, commands) {
+  db.transaction(() => {
+    db.prepare('DELETE FROM bot_commands WHERE bot_id = ?').run(botId);
+    const insert = db.prepare(`
+      INSERT INTO bot_commands (id, bot_id, name, description, options, default_permission, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, unixepoch())
+    `);
+    for (const cmd of commands) {
+      insert.run(randomUUID(), botId, cmd.name, cmd.description, JSON.stringify(cmd.options), cmd.defaultPermission);
+    }
+  })();
+}
+
 module.exports = {
   BOT_TOKEN_PREFIX,
   hashToken,
@@ -154,4 +267,9 @@ module.exports = {
   getBotById,
   getBotByUserId,
   serializeBot,
+  commandPermissionBits,
+  canUseBotCommand,
+  normalizeBotCommands,
+  replaceBotCommands,
+  resolveOptionValue,
 };

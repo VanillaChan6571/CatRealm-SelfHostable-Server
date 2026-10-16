@@ -26,6 +26,77 @@ function attachNsfwTags(messages) {
   }));
 }
 
+// Shared row shape for history and single-message fetches.
+const MESSAGE_SELECT = `
+  SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
+    COALESCE(dno.display_name, u.display_name) as display_name,
+    (SELECT r.color FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+     LIMIT 1) AS role_color,
+    (SELECT r.icon FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY r.position DESC
+     LIMIT 1) AS role_icon,
+    (SELECT r.style_type FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+     LIMIT 1) AS role_style_type,
+    (SELECT r.style_colors FROM roles r
+     JOIN user_roles ur ON ur.role_id = r.id
+     WHERE ur.user_id = u.id
+     ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+     LIMIT 1) AS role_style_colors,
+    rm.id as reply_to_msg_id,
+    rm.user_id as reply_to_user_id,
+    rm.content as reply_to_content,
+    ru.username as reply_to_username
+  FROM messages m
+  JOIN users u ON u.id = m.user_id
+  LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+  LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
+  LEFT JOIN users ru ON ru.id = rm.user_id
+`;
+
+function normalizeMessageRows(rows) {
+  rows = decryptMessageRows(rows);
+
+  // Transform reply metadata
+  rows = rows.map(m => ({
+    ...m,
+    reply_to: m.reply_to_msg_id ? {
+      id: m.reply_to_msg_id,
+      user_id: m.reply_to_user_id,
+      content: m.reply_to_content,
+      username: m.reply_to_username,
+    } : null
+  }));
+  rows = attachNsfwTags(rows);
+
+  // Normalize attachments: parse JSON column or build from legacy single-attachment fields
+  rows = rows.map((m) => {
+    let attachments = null;
+    if (m.attachments) {
+      try { attachments = JSON.parse(m.attachments); } catch { attachments = null; }
+    }
+    if (!attachments && m.attachment_url) {
+      attachments = [{ url: m.attachment_url, mime: m.attachment_type, size: m.attachment_size }];
+    }
+    let interaction = null;
+    if (m.interaction_meta) {
+      try { interaction = JSON.parse(m.interaction_meta); } catch { interaction = null; }
+    }
+    return { ...m, attachments: attachments ?? [], interaction };
+  });
+
+  rows = attachReactionsToMessages(rows);
+
+  return rows;
+}
+
 // GET /api/messages/:channelId?before=<timestamp>&limit=50
 router.get('/:channelId', (req, res) => {
   const { channelId } = req.params;
@@ -41,114 +112,17 @@ router.get('/:channelId', (req, res) => {
     return res.status(403).json({ error: 'Missing permission: read_chat_history' });
   }
 
-  let messages;
-  if (before) {
-    messages = db.prepare(`
-      SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
-        COALESCE(dno.display_name, u.display_name) as display_name,
-        (SELECT r.color FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
-         LIMIT 1) AS role_color,
-        (SELECT r.icon FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY r.position DESC
-         LIMIT 1) AS role_icon,
-        (SELECT r.style_type FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
-         LIMIT 1) AS role_style_type,
-        (SELECT r.style_colors FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
-         LIMIT 1) AS role_style_colors,
-        rm.id as reply_to_msg_id,
-        rm.user_id as reply_to_user_id,
-        rm.content as reply_to_content,
-        ru.username as reply_to_username
-      FROM messages m
-      JOIN users u ON u.id = m.user_id
-      LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-      LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
-      LEFT JOIN users ru ON ru.id = rm.user_id
+  const messages = before
+    ? db.prepare(`${MESSAGE_SELECT}
       WHERE m.channel_id = ? AND m.thread_id IS NULL AND m.created_at < ? AND (m.scheduled_at IS NULL OR m.user_id = ?)
       ORDER BY m.created_at DESC LIMIT ?
-    `).all(channelId, before, req.user.id, limit);
-  } else {
-    messages = db.prepare(`
-      SELECT m.*, u.username, u.avatar, u.is_owner, u.is_bot,
-        COALESCE(dno.display_name, u.display_name) as display_name,
-        (SELECT r.color FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
-         LIMIT 1) AS role_color,
-        (SELECT r.icon FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY r.position DESC
-         LIMIT 1) AS role_icon,
-        (SELECT r.style_type FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
-         LIMIT 1) AS role_style_type,
-        (SELECT r.style_colors FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = u.id
-         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
-         LIMIT 1) AS role_style_colors,
-        rm.id as reply_to_msg_id,
-        rm.user_id as reply_to_user_id,
-        rm.content as reply_to_content,
-        ru.username as reply_to_username
-      FROM messages m
-      JOIN users u ON u.id = m.user_id
-      LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-      LEFT JOIN messages rm ON rm.id = m.reply_to_id AND rm.channel_id = m.channel_id AND rm.scheduled_at IS NULL
-      LEFT JOIN users ru ON ru.id = rm.user_id
+    `).all(channelId, before, req.user.id, limit)
+    : db.prepare(`${MESSAGE_SELECT}
       WHERE m.channel_id = ? AND m.thread_id IS NULL AND (m.scheduled_at IS NULL OR m.user_id = ?)
       ORDER BY m.created_at DESC LIMIT ?
     `).all(channelId, req.user.id, limit);
-  }
 
-  messages = decryptMessageRows(messages);
-
-  // Transform reply metadata
-  messages = messages.map(m => ({
-    ...m,
-    reply_to: m.reply_to_msg_id ? {
-      id: m.reply_to_msg_id,
-      user_id: m.reply_to_user_id,
-      content: m.reply_to_content,
-      username: m.reply_to_username,
-    } : null
-  }));
-  messages = attachNsfwTags(messages);
-
-  // Normalize attachments: parse JSON column or build from legacy single-attachment fields
-  messages = messages.map((m) => {
-    let attachments = null;
-    if (m.attachments) {
-      try { attachments = JSON.parse(m.attachments); } catch { attachments = null; }
-    }
-    if (!attachments && m.attachment_url) {
-      attachments = [{ url: m.attachment_url, mime: m.attachment_type, size: m.attachment_size }];
-    }
-    let interaction = null;
-    if (m.interaction_meta) {
-      try { interaction = JSON.parse(m.interaction_meta); } catch { interaction = null; }
-    }
-    return { ...m, attachments: attachments ?? [], interaction };
-  });
-
-  messages = attachReactionsToMessages(messages);
-
-  res.json(messages.reverse()); // Return oldest-first
+  res.json(normalizeMessageRows(messages).reverse()); // Return oldest-first
 });
 
 // POST /api/messages/forum - Create a forum post body message, returns it with id
@@ -417,6 +391,22 @@ router.get('/:channelId/search', searchLimiter, (req, res) => {
   // nextBefore lets the client resume when the scan cap was hit before the
   // page filled (found may even be empty, so it can't derive a cursor itself).
   return res.json({ results: found, hasMore, nextBefore: hasMore ? cursor : null });
+});
+
+// GET /api/messages/:channelId/:messageId - One message by id, thread messages included
+router.get('/:channelId/:messageId', (req, res) => {
+  const { channelId, messageId } = req.params;
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
+  const row = db.prepare(`${MESSAGE_SELECT}
+    WHERE m.id = ? AND m.channel_id = ? AND (m.scheduled_at IS NULL OR m.user_id = ?)
+  `).get(messageId, channelId, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Message not found' });
+  res.json(normalizeMessageRows([row])[0]);
 });
 
 module.exports = router;

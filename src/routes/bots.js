@@ -2,7 +2,6 @@ const router = require('express').Router();
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission } = require('../permissions');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
@@ -14,6 +13,9 @@ const {
   rotateBotToken,
   getBotById,
   serializeBot,
+  canUseBotCommand,
+  normalizeBotCommands,
+  replaceBotCommands,
 } = require('../bots/core');
 const {
   ALL_BOT_SCOPES,
@@ -43,10 +45,6 @@ function requireBot(req, res, next) {
   if (!req.bot) return res.status(403).json({ error: 'Bot token required' });
   next();
 }
-
-const COMMAND_NAME_RE = /^[a-z0-9_-]{1,32}$/;
-const COMMAND_OPTION_TYPES = ['string', 'user', 'channel', 'integer', 'boolean'];
-const MAX_COMMANDS_PER_BOT = 50;
 
 // ── Uploads (admin sets the bot's avatar/banner) ─────────────────────────────
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../data/uploads');
@@ -88,49 +86,9 @@ router.get('/self', requireBot, (req, res) => {
 
 // PUT /api/bots/self/commands — full replace of the bot's command set
 router.put('/self/commands', requireBot, (req, res) => {
-  const commands = Array.isArray(req.body?.commands) ? req.body.commands : null;
-  if (!commands) return res.status(400).json({ error: 'commands array required' });
-  if (commands.length > MAX_COMMANDS_PER_BOT) {
-    return res.status(400).json({ error: `Too many commands (max ${MAX_COMMANDS_PER_BOT})` });
-  }
-
-  const normalized = [];
-  const seen = new Set();
-  for (const cmd of commands) {
-    const name = String(cmd?.name || '').toLowerCase().trim();
-    if (!COMMAND_NAME_RE.test(name)) {
-      return res.status(400).json({ error: `Invalid command name: ${name || '(empty)'}` });
-    }
-    if (seen.has(name)) return res.status(400).json({ error: `Duplicate command name: ${name}` });
-    seen.add(name);
-    const description = String(cmd?.description || '').slice(0, 200);
-    const options = [];
-    if (Array.isArray(cmd?.options)) {
-      for (const opt of cmd.options.slice(0, 10)) {
-        const optName = String(opt?.name || '').toLowerCase().trim();
-        if (!COMMAND_NAME_RE.test(optName)) continue;
-        options.push({
-          name: optName,
-          description: String(opt?.description || '').slice(0, 200),
-          type: COMMAND_OPTION_TYPES.includes(opt?.type) ? opt.type : 'string',
-          required: opt?.required === true,
-        });
-      }
-    }
-    normalized.push({ name, description, options });
-  }
-
-  const replaceCommands = db.transaction(() => {
-    db.prepare('DELETE FROM bot_commands WHERE bot_id = ?').run(req.bot.id);
-    const insert = db.prepare(`
-      INSERT INTO bot_commands (id, bot_id, name, description, options, updated_at)
-      VALUES (?, ?, ?, ?, ?, unixepoch())
-    `);
-    for (const cmd of normalized) {
-      insert.run(randomUUID(), req.bot.id, cmd.name, cmd.description, JSON.stringify(cmd.options));
-    }
-  });
-  replaceCommands();
+  const { commands: normalized, error } = normalizeBotCommands(req.body?.commands);
+  if (error) return res.status(400).json({ error });
+  replaceBotCommands(db, req.bot.id, normalized);
   emitBotCommandsUpdated();
   res.json({ commands: normalized });
 });
@@ -140,7 +98,7 @@ router.put('/self/commands', requireBot, (req, res) => {
 // GET /api/bots/commands — all commands of enabled bots (composer typeahead)
 router.get('/commands', (req, res) => {
   const rows = db.prepare(`
-    SELECT bc.name, bc.description, bc.options, b.id as bot_id, b.user_id as bot_user_id,
+    SELECT bc.name, bc.description, bc.options, bc.default_permission, b.id as bot_id, b.user_id as bot_user_id,
       u.username, u.display_name, u.avatar
     FROM bot_commands bc
     JOIN bots b ON b.id = bc.bot_id
@@ -148,8 +106,10 @@ router.get('/commands', (req, res) => {
     WHERE b.enabled = 1
     ORDER BY bc.name
   `).all();
+  // Hide permission-gated commands from members who can't run them.
+  const visible = rows.filter((r) => canUseBotCommand(req.user, r.default_permission, hasPermission));
   res.json({
-    commands: rows.map((r) => ({
+    commands: visible.map((r) => ({
       botId: r.bot_id,
       botUserId: r.bot_user_id,
       botUsername: r.username,
@@ -158,6 +118,7 @@ router.get('/commands', (req, res) => {
       name: r.name,
       description: r.description,
       options: parseJsonSafe(r.options, []),
+      defaultPermission: r.default_permission || null,
     })),
   });
 });

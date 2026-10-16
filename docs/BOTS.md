@@ -105,7 +105,8 @@ one sends the bot an `interaction:create` socket event:
 
 ```js
 socket.on('interaction:create', (interaction) => {
-  // { id, command, options, channelId, threadId, user: {id, username, displayName, ...}, respondBy }
+  // { id, command, options, channelId, threadId, replyToId,
+  //   user: {id, username, displayName, isOwner, permissions, roleIds, ...}, respondBy }
   socket.emit('interaction:respond', {
     id: interaction.id,
     content: 'pong!',
@@ -113,6 +114,16 @@ socket.on('interaction:create', (interaction) => {
   }, (ack) => { /* ack.status === 'ok' */ });
 });
 ```
+
+Commands can declare `"defaultPermission": "MANAGE_ROLES"` (any permission
+name); members without it don't see the command and the server refuses
+their invocations. Options can declare `choices` (shown as a picker) or use
+the `role` type (role picker; the bot receives the role id).
+
+After responding, a bot can send more messages for 15 minutes with
+`interaction:followup` (public or `ephemeral`). Outside interactions,
+`bot:ephemeral:send { userId, channelId, content }` shows a ghost message only
+that user sees.
 
 A non-ephemeral response becomes a normal bot message in the channel with a
 "used /command" header. Bots have 60 seconds to respond before the interaction
@@ -151,7 +162,7 @@ User endpoints:
 
 Socket events:
 - user → server: `interaction:invoke`, `bot:dm:reply`
-- bot → server: `interaction:respond`, `bot:dm:send`
+- bot → server: `interaction:respond`, `interaction:followup`, `bot:ephemeral:send`, `bot:dm:send`
 - server → bot: `interaction:create`, `bot:dm:incoming`
 - server → user: `interaction:failed`, `bot:ephemeral`, `bot:dm`,
   `bots:commands_updated`

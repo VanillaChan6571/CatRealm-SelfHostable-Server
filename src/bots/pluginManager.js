@@ -1,10 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 const { fork, spawn } = require('child_process');
-const { randomUUID } = require('crypto');
 const db = require('../db');
 const pteroLog = require('../logger');
-const { createBotAccount, rotateBotToken, getBotByUserId } = require('./core');
+const { createBotAccount, rotateBotToken, getBotByUserId, normalizeBotCommands, replaceBotCommands } = require('./core');
 const { normalizeRequestedScopes } = require('./scopes');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
@@ -108,20 +107,9 @@ function provisionPlugin(manifest) {
   }
 
   if (manifest.commands) {
-    const replace = db.transaction(() => {
-      db.prepare('DELETE FROM bot_commands WHERE bot_id = ?').run(botRow.id);
-      const insert = db.prepare(`
-        INSERT INTO bot_commands (id, bot_id, name, description, options, updated_at)
-        VALUES (?, ?, ?, ?, ?, unixepoch())
-      `);
-      for (const cmd of manifest.commands.slice(0, 50)) {
-        const name = String(cmd?.name || '').toLowerCase().trim();
-        if (!/^[a-z0-9_-]{1,32}$/.test(name)) continue;
-        insert.run(randomUUID(), botRow.id, name, String(cmd?.description || '').slice(0, 200),
-          JSON.stringify(Array.isArray(cmd?.options) ? cmd.options : []));
-      }
-    });
-    replace();
+    const { commands, error } = normalizeBotCommands(manifest.commands);
+    if (error) pteroLog(`[Bots] ${manifest.name}: bot.json commands rejected — ${error}`);
+    else replaceBotCommands(db, botRow.id, commands);
   }
 
   return db.prepare('SELECT * FROM bots WHERE id = ?').get(botRow.id);

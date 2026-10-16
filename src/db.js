@@ -654,6 +654,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_bot_dm_bot ON bot_dm_messages(bot_id, created_at);
 `);
 
+const botCommandColumns = db.prepare('PRAGMA table_info(bot_commands)').all().map((c) => c.name);
+if (!botCommandColumns.includes('default_permission')) {
+  db.prepare('ALTER TABLE bot_commands ADD COLUMN default_permission TEXT').run();
+  pteroLog('[CatRealm] Added bot_commands.default_permission column');
+}
+
 const webhookColumns = db.prepare('PRAGMA table_info(webhooks)').all().map((c) => c.name);
 if (webhookColumns.length > 0) {
   if (!webhookColumns.includes('secret_encrypted')) {
