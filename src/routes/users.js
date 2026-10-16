@@ -48,7 +48,7 @@ router.get('/', (req, res) => {
       SELECT r.color FROM roles r
       JOIN user_roles ur ON ur.role_id = r.id
       WHERE ur.user_id = ?
-      ORDER BY r.position DESC
+      ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
       LIMIT 1
     `).get(u.id);
     return {

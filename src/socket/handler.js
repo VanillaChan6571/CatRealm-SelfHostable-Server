@@ -33,6 +33,16 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Name color/style comes from the highest role that has a color, so a colorless
+// role ranked above a colored one does not blank the member's name.
+const COLOR_ROLE_SQL = `
+  SELECT r.color, r.style_type, r.style_colors FROM roles r
+  JOIN user_roles ur ON ur.role_id = r.id
+  WHERE ur.user_id = ?
+  ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+  LIMIT 1
+`;
+
 // Track online users: userId -> { username, role, is_owner, role_color, avatar, status, lastActivityAt, sockets: Set<socketId> }
 const onlineUsers = new Map();
 // Tracks which socketIds are actively foregrounded. Desktop sockets default to foreground
@@ -217,10 +227,10 @@ setInterval(() => {
     const due = db.prepare(`
       SELECT m.*, u.username, u.avatar,
         COALESCE(dno.display_name, u.display_name) as display_name,
-        (SELECT r.color FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_color,
+        (SELECT r.color FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC LIMIT 1) as role_color,
         (SELECT r.icon  FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_icon,
-        (SELECT r.style_type   FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_style_type,
-        (SELECT r.style_colors FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY r.position DESC LIMIT 1) as role_style_colors
+        (SELECT r.style_type   FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC LIMIT 1) as role_style_type,
+        (SELECT r.style_colors FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = m.user_id ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC LIMIT 1) as role_style_colors
       FROM messages m
       JOIN users u ON u.id = m.user_id
       LEFT JOIN display_name_overrides dno ON dno.user_id = m.user_id
@@ -517,6 +527,7 @@ function setupSocketHandlers(io) {
         ORDER BY r.position DESC
         LIMIT 1
       `).get(authUser.id);
+      const colorRole = db.prepare(COLOR_ROLE_SQL).get(authUser.id);
       const userRow = db.prepare(`
         SELECT u.avatar, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type,
           COALESCE(dno.display_name, u.display_name) as effective_display_name
@@ -536,13 +547,13 @@ function setupSocketHandlers(io) {
         role: authUser.role,
         is_owner: authUser.is_owner ? 1 : 0,
         is_bot: authUser.is_bot ? 1 : 0,
-        role_color: topRole?.color || null,
+        role_color: colorRole?.color || null,
         role_hoist: topRole?.hoist || 0,
         role_icon: topRole?.icon || null,
         role_name: topRole?.name || null,
         role_position: topRole?.position || 0,
-        role_style_type: topRole?.style_type || 'solid',
-        role_style_colors: topRole?.style_colors || null,
+        role_style_type: colorRole?.style_type || 'solid',
+        role_style_colors: colorRole?.style_colors || null,
         avatar: userRow?.avatar || null,
         status: presenceStatus,
         display_name: userRow?.effective_display_name || null,
@@ -1558,6 +1569,7 @@ function setupSocketHandlers(io) {
         ORDER BY r.position DESC
         LIMIT 1
       `).get(user.id);
+      const colorRole = db.prepare(COLOR_ROLE_SQL).get(user.id);
       const userInfo = db.prepare(`
         SELECT u.avatar, COALESCE(dno.display_name, u.display_name) as display_name
         FROM users u
@@ -1572,10 +1584,10 @@ function setupSocketHandlers(io) {
         content:    trimmed,
         edited:     0,
         is_owner:   authUser.is_owner ? 1 : 0,
-        role_color: topRole?.color || null,
+        role_color: colorRole?.color || null,
         role_icon: topRole?.icon || null,
-        role_style_type: topRole?.style_type || 'solid',
-        role_style_colors: topRole?.style_colors || null,
+        role_style_type: colorRole?.style_type || 'solid',
+        role_style_colors: colorRole?.style_colors || null,
         avatar: userInfo?.avatar || null,
         display_name: userInfo?.display_name || null,
         verified: authUser.verified || false,
@@ -2086,6 +2098,7 @@ function refreshAllOnlineRoleMetadata() {
     ORDER BY r.position DESC
     LIMIT 1
   `);
+  const colorRoleStmt = db.prepare(COLOR_ROLE_SQL);
   const userStmt = db.prepare(`
     SELECT
       u.username,
@@ -2106,18 +2119,19 @@ function refreshAllOnlineRoleMetadata() {
 
   for (const [userId, entry] of onlineUsers.entries()) {
     const topRole = topRoleStmt.get(userId);
+    const colorRole = colorRoleStmt.get(userId);
     const userRow = userStmt.get(userId);
     if (!userRow) continue;
     entry.username = userRow.username || entry.username;
     entry.role = userRow.role || entry.role;
     entry.is_owner = userRow.is_owner ? 1 : 0;
-    entry.role_color = topRole?.color || null;
+    entry.role_color = colorRole?.color || null;
     entry.role_hoist = topRole?.hoist || 0;
     entry.role_icon = topRole?.icon || null;
     entry.role_name = topRole?.name || null;
     entry.role_position = topRole?.position || 0;
-    entry.role_style_type = topRole?.style_type || 'solid';
-    entry.role_style_colors = topRole?.style_colors || null;
+    entry.role_style_type = colorRole?.style_type || 'solid';
+    entry.role_style_colors = colorRole?.style_colors || null;
     entry.avatar = userRow.avatar || null;
     entry.account_type = userRow.account_type || entry.account_type || 'local';
     const storedStatus = userRow.status || 'online';

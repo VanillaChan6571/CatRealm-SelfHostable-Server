@@ -234,7 +234,7 @@ router.get('/:id/messages', (req, res) => {
         (SELECT r.color FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id
          WHERE ur.user_id = u.id
-         ORDER BY r.position DESC
+         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
          LIMIT 1) AS role_color,
         rm.id as reply_to_msg_id,
         rm.user_id as reply_to_user_id,
@@ -255,7 +255,7 @@ router.get('/:id/messages', (req, res) => {
         (SELECT r.color FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id
          WHERE ur.user_id = u.id
-         ORDER BY r.position DESC
+         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
          LIMIT 1) AS role_color,
         rm.id as reply_to_msg_id,
         rm.user_id as reply_to_user_id,
