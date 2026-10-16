@@ -567,6 +567,7 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
       details: { name: role.name, changes: roleChanges },
     });
   }
+  if (role.is_default && role.name !== existing.name) emitServerInfoUpdate({ defaultRoleName: role.name });
   emitPermissionsChanged();
   res.json(role);
 });

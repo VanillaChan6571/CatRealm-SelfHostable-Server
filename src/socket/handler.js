@@ -609,6 +609,7 @@ function setupSocketHandlers(io) {
       mode,
       registrationOpen: registrationOpen === 'true',
       mentionAlias,
+      defaultRoleName: db.prepare('SELECT name FROM roles WHERE is_default = 1').get()?.name || null,
       serverIcon,
       serverBanner,
       welcomeBoardEnabled,

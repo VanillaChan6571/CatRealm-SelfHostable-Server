@@ -48,6 +48,7 @@ router.get('/', (req, res) => {
     process.env.REGISTRATION_OPEN !== 'false' ? 'true' : 'false'
   );
   const mentionAlias = getSetting('mention_alias', '@everyone');
+  const defaultRoleName = db.prepare('SELECT name FROM roles WHERE is_default = 1').get()?.name || null;
   const serverIcon = getSetting('server_icon', null);
   const serverBanner = getSetting('server_banner', null);
   const secureMode = {
@@ -64,6 +65,7 @@ router.get('/', (req, res) => {
     registrationOpen: registrationOpen === 'true',
     userCount,
     mentionAlias,
+    defaultRoleName,
     serverIcon,
     serverBanner,
     secureMode,
