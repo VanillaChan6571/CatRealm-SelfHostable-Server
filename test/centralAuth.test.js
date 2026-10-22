@@ -99,6 +99,7 @@ test('a new realm exchanges an audience-bound assertion with central before issu
   assert.equal(accepted.status, 200);
   assert.equal(jwt.verify(accepted.body.token, 'synthetic-realm-secret').account_type, 'central');
   assert.equal(verifyCalls.length, 1);
+  assert.equal(verifyCalls[0].config.family, 4, 'official Central verification should use IPv4');
 
   const legacy = jwt.sign({ type: 'central', sub: 'central-alice' }, 'synthetic-central-secret');
   assert.equal((await post(legacy)).status, 401);

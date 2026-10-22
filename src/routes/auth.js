@@ -278,6 +278,7 @@ router.post('/central', async (req, res) => {
     const resp = await axios.get(`${AUTH_SERVER_URL}/api/verify`, {
       headers: { Authorization: `Bearer ${token}`, 'X-CatRealm-Realm-Origin': realmOrigin },
       timeout: AUTH_VERIFY_TIMEOUT,
+      ...(new URL(AUTH_SERVER_URL).hostname === 'auth.catrealm.app' ? { family: 4 } : {}),
     });
     if (!resp.data.valid || resp.data.audience !== realmOrigin) return res.status(401).json({ error: 'Central account verification failed' });
     centralUser = resp.data.user;
