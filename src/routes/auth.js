@@ -226,6 +226,36 @@ router.get('/needs-admin', (req, res) => {
 });
 
 // POST /api/auth/central  (central account authentication for game servers)
+async function centralAssertionOrigin(req) {
+  const configured = new URL(process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '');
+  if (configured.username || configured.password || configured.pathname !== '/' || configured.search || configured.hash) {
+    throw new Error('Invalid realm origin');
+  }
+  if (configured.protocol !== 'http:' && configured.protocol !== 'https:') throw new Error('Invalid realm origin');
+  if (!req.get('X-CatRealm-Gateway-Origin')) {
+    if (configured.protocol !== 'https:') throw new Error('An HTTP realm requires a gateway binding');
+    return configured.origin;
+  }
+
+  // The browser reaches this HTTP realm through the separately hosted gateway.
+  // Do not trust the request header alone: confirm its binding over the fixed
+  // HTTPS gateway endpoint and compare it with this realm's own signing key.
+  const claimed = new URL(req.get('X-CatRealm-Gateway-Origin') || '');
+  const match = /^r-([a-f0-9]{40})\.bridge\.catrealm\.app$/.exec(claimed.hostname);
+  if (claimed.protocol !== 'https:' || claimed.origin !== claimed.href.replace(/\/$/, '')
+    || claimed.port || !match) throw new Error('Invalid gateway origin');
+  const gateway = await axios.get(`https://bridge.catrealm.app/api/bindings/${match[1]}`, {
+    timeout: 4000, maxContentLength: 4096, maxRedirects: 0,
+  });
+  const identity = require('../lib/realmIdentity').getPublicRealmIdentity();
+  if (gateway.data?.gatewayOrigin !== claimed.origin
+    || gateway.data?.realmInstanceId !== identity.realmInstanceId
+    || gateway.data?.realmKeyFingerprint !== identity.realmKeyFingerprint) {
+    throw new Error('Gateway binding does not match this realm');
+  }
+  return claimed.origin;
+}
+
 router.post('/central', async (req, res) => {
   if (SERVER_MODE === 'decentral_only') {
     return res.status(403).json({ error: 'This server only accepts local accounts' });
@@ -235,14 +265,12 @@ router.post('/central', async (req, res) => {
   if (!token) return res.status(400).json({ error: 'Realm assertion required' });
   let realmOrigin;
   try {
-    const url = new URL(process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '');
-    if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Invalid realm origin');
-    realmOrigin = url.origin;
+    realmOrigin = await centralAssertionOrigin(req);
     const assertion = jwt.decode(token);
     if (assertion?.type !== 'realm_assertion' || assertion.aud !== realmOrigin) {
       return res.status(401).json({ error: 'An assertion issued for this realm is required. Update your client.' });
     }
-  } catch { return res.status(503).json({ error: 'Configure this realm PUBLIC_URL, PUBLIC_SERVER_URL or SERVER_URL with its public HTTPS origin.' }); }
+  } catch { return res.status(503).json({ error: 'Configure a public HTTPS realm origin, or use a verified CatRealm gateway binding.' }); }
 
   // Verify the central token with the auth server
   let centralUser;

@@ -84,6 +84,40 @@ router.get('/identity', (_req, res) => {
   res.json(getPublicRealmIdentity());
 });
 
+// A gateway can enroll a public HTTP realm without operator-entered secrets.
+// This signs only the origin actually used to reach this server. The gateway
+// still has to validate and pin that public address before accepting a claim.
+router.post('/gateway-attestation', (req, res) => {
+  const { nonce, realmOrigin, gatewayOrigin } = req.body || {};
+  let realm;
+  let gateway;
+  try {
+    realm = new URL(realmOrigin);
+    gateway = new URL(gatewayOrigin);
+  } catch {
+    return res.status(400).json({ error: 'Invalid gateway claim' });
+  }
+  const expectedHost = String(req.get('host') || '').toLowerCase();
+  if (typeof nonce !== 'string' || !/^[a-f0-9]{64}$/.test(nonce)
+    || realm.protocol !== 'http:' || realm.origin !== realmOrigin
+    || realm.host.toLowerCase() !== expectedHost
+    || gateway.protocol !== 'https:' || gateway.origin !== gatewayOrigin
+    || !/^r-[a-f0-9]{40}\.bridge\.catrealm\.app$/.test(gateway.hostname)) {
+    return res.status(400).json({ error: 'Invalid gateway claim' });
+  }
+  const identity = getPublicRealmIdentity();
+  const payload = {
+    nonce,
+    realmOrigin,
+    gatewayOrigin,
+    realmInstanceId: identity.realmInstanceId,
+    realmKeyFingerprint: identity.realmKeyFingerprint,
+    expiresAt: Math.floor(Date.now() / 1000) + 60,
+  };
+  const signed = signRelayPayload(payload);
+  return res.json({ payload, realmPublicKeyPem: identity.realmPublicKeyPem, signature: signed.signature });
+});
+
 // POST /api/server/identity/attestation — signed proof that the authenticated
 // local central-linked user belongs to the requested central identity.
 router.post('/identity/attestation', authenticateToken, (req, res) => {

@@ -105,3 +105,53 @@ test('a new realm exchanges an audience-bound assertion with central before issu
   assert.equal((await post(jwt.sign({ type: 'realm_assertion', aud: 'https://other.example' }, 'synthetic-central-secret'))).status, 401);
   assert.equal(verifyCalls.length, 1, 'wrong-purpose or wrong-audience tokens must not reach central');
 });
+
+test('an HTTP realm accepts Central assertions only for its verified gateway binding', async t => {
+  const db = makeDatabase();
+  t.after(() => db.close());
+  db.exec("ALTER TABLE users ADD COLUMN central_id TEXT; UPDATE users SET central_id = 'central-alice' WHERE id = 'alice'");
+  const id = 'a'.repeat(40);
+  const gatewayOrigin = `https://r-${id}.bridge.catrealm.app`;
+  const assertion = jwt.sign({ type: 'realm_assertion', aud: gatewayOrigin, sub: 'central-alice' }, 'synthetic-central-secret');
+  let boundFingerprint = 'realm-fingerprint';
+  const axios = {
+    get: async (url) => {
+      if (url === `https://bridge.catrealm.app/api/bindings/${id}`) {
+        return { data: { gatewayOrigin, realmInstanceId: 'realm-instance', realmKeyFingerprint: boundFingerprint } };
+      }
+      if (url === 'https://auth.catrealm.app/api/verify') {
+        return { data: { valid: true, audience: gatewayOrigin,
+          user: { id: 'central-alice', username: 'Alice', verified: true } } };
+      }
+      throw new Error('Unexpected outbound request');
+    },
+    isAxiosError: () => false,
+  };
+  const router = loadModule('src/routes/auth.js', {
+    '../db': db, axios,
+    '../lib/realmIdentity': { getPublicRealmIdentity: () => ({ realmInstanceId: 'realm-instance', realmKeyFingerprint: 'realm-fingerprint' }) },
+    '../middleware/auth': { JWT_SECRET: 'synthetic-realm-secret', SERVER_MODE: 'mixed',
+      checkUsernameConflict: async () => false, authenticateToken: (_req, _res, next) => next() },
+    '../permissions': { computePermissionsForUser: () => 0 }, '../logger': () => {},
+    '../usernameBlocklist': { isBlockedUsername: () => false },
+    '../settings': { getSetting: (_key, fallback) => fallback },
+    '../lib/auditLog': { AUDIT_ACTIONS: {}, logAuditAction: () => {} },
+  }, { process: { env: { AUTH_SERVER_URL: 'https://auth.catrealm.app',
+    SERVER_URL: 'http://0.0.0.0:40500' } } });
+  const app = express(); app.use(express.json()); app.use('/api/auth', router);
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const post = async (origin = gatewayOrigin) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/auth/central`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json',
+        ...(origin ? { 'X-CatRealm-Gateway-Origin': origin } : {}) },
+      body: JSON.stringify({ token: assertion }),
+    });
+    return response.status;
+  };
+  assert.equal(await post(), 200);
+  assert.equal(await post(null), 503);
+  boundFingerprint = 'different-realm';
+  assert.equal(await post(), 503);
+});

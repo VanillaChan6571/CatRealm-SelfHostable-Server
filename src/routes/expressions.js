@@ -170,7 +170,14 @@ async function processExpressionUpload(type, file) {
 
 function withAbsoluteUrl(req, row) {
   if (!row) return row;
-  const base = `${req.protocol}://${req.get('host')}`;
+  const forwardedHost = req.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const forwardedProto = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const gatewayOrigin = req.get('x-catrealm-gateway-origin');
+  const base = forwardedProto === 'https'
+    && /^r-[a-f0-9]{40}\.bridge\.catrealm\.app$/.test(forwardedHost || '')
+    && gatewayOrigin === `https://${forwardedHost}`
+    ? `https://${forwardedHost}`
+    : `${req.protocol}://${req.get('host')}`;
   const variants = parseVariantsJson(row.variants_json);
   const absoluteVariants = {};
   for (const [size, url] of Object.entries(variants)) {
