@@ -1663,7 +1663,8 @@ function setupSocketHandlers(io) {
                 if (m.id === user.id) return false;
                 const isMentioned = (
                   new RegExp(`(^|\\s)@${escapeRegex(m.username)}(\\b|$)`, 'i').test(trimmed) ||
-                  new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed)
+                  new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed) ||
+                  trimmed.includes(`<@${m.id}>`)
                 );
                 if (!isMentioned) return false;
                 // Bot authors need the user's per-user "mentions" consent to ping them.
