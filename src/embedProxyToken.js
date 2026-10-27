@@ -1,8 +1,8 @@
 const crypto = require('crypto');
 
-const DEFAULT_TTL_SECONDS = 30 * 60;
+const DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60;
 const MIN_TTL_SECONDS = 30;
-const MAX_TTL_SECONDS = 6 * 60 * 60;
+const MAX_TTL_SECONDS = 7 * 24 * 60 * 60;
 const ALLOWED_PROXY_HOSTS = new Set([
   'video.twimg.com',
   'pbs.twimg.com',
