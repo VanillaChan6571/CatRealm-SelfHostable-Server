@@ -2164,12 +2164,12 @@ function setupSocketHandlers(io) {
       touchActivity(user.id);
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
       if (!canSendToChannel(user, channelId, db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId)?.type, null)) return;
-      socket.to(channelId).emit('typing:update', { userId: user.id, username: authUser.username, typing: true });
+      socket.to(channelId).emit('typing:update', { channelId, userId: user.id, username: authUser.username, typing: true });
     });
 
     socket.on('typing:stop', ({ channelId }) => {
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) return;
-      socket.to(channelId).emit('typing:update', { userId: user.id, username: authUser.username, typing: false });
+      socket.to(channelId).emit('typing:update', { channelId, userId: user.id, username: authUser.username, typing: false });
     });
 
     // ── Disconnect ─────────────────────────────────────────────────────────────
