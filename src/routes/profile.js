@@ -223,7 +223,7 @@ router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
   const { userId } = req.params;
   if (!isUuid(userId)) return next();
   const user = db.prepare(`
-    SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.is_bot, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type, u.central_id, u.pronouns, u.created_at,
+    SELECT u.id, u.username, u.role, u.avatar, u.banner, u.bio, u.is_owner, u.is_bot, u.status, u.display_name, u.custom_status_text, u.activity_type, u.activity_text, u.activity_started_at, u.account_type, u.central_id, u.pronouns, u.created_at, u.is_member,
       COALESCE(dno.display_name, u.display_name) as effective_display_name
     FROM users u
     LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
@@ -241,6 +241,7 @@ router.get('/:userId', ensureProfileAllowed, (req, res, next) => {
     serverJoinDate: user.created_at ?? null,
     isOwner: !!user.is_owner,
     isBot: !!user.is_bot,
+    isMember: Number(user.is_member ?? 1) === 1,
     accountType: user.account_type || 'local'
   };
 
