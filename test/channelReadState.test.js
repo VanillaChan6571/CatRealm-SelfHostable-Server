@@ -35,7 +35,7 @@ test('read-state flags channels with newer messages from others, per user', (t) 
   const readState = loadReadStateRoute(db);
 
   // Bob posted at 100 and Alice never read: unread for Alice, not for Bob (it's his own message).
-  assert.deepEqual(readState(getUser(db, 'alice')), { public: { lastMessageAt: 100, lastReadAt: 0, muted: false, unread: true } });
+  assert.deepEqual(readState(getUser(db, 'alice')), { public: { lastMessageAt: 100, lastReadAt: 0, muted: false, unread: true, unreadCount: 1 } });
   assert.equal(readState(getUser(db, 'bob')).public.unread, false);
 
   // Reading past it clears it; thread replies and pending scheduled messages don't bring it back.
@@ -47,5 +47,7 @@ test('read-state flags channels with newer messages from others, per user', (t) 
   assert.equal(readState(getUser(db, 'alice')).public.unread, false);
 
   db.prepare("INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type) VALUES ('new', 'public', 'bob', 'x', 300, 'user')").run();
-  assert.deepEqual(readState(getUser(db, 'alice')).public, { lastMessageAt: 300, lastReadAt: 150, muted: false, unread: true });
+  db.prepare("INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type) VALUES ('new2', 'public', 'bob', 'x', 310, 'user')").run();
+  // Counts only Bob's visible messages after the read position (not the thread/scheduled/system ones).
+  assert.deepEqual(readState(getUser(db, 'alice')).public, { lastMessageAt: 310, lastReadAt: 150, muted: false, unread: true, unreadCount: 2 });
 });

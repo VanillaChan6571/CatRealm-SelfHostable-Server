@@ -99,6 +99,15 @@ router.get('/read-state', (req, res) => {
     WHERE channel_id = ? AND thread_id IS NULL AND scheduled_at IS NULL AND message_type != 'system'
     ORDER BY created_at DESC LIMIT 1
   `);
+  // Capped so a never-read busy channel stays a bounded index scan; clients show 99+.
+  const countStmt = db.prepare(`
+    SELECT COUNT(*) AS n FROM (
+      SELECT 1 FROM messages
+      WHERE channel_id = ? AND created_at > ? AND user_id != ?
+        AND thread_id IS NULL AND scheduled_at IS NULL AND message_type != 'system'
+      LIMIT 100
+    )
+  `);
   const prefs = new Map(
     db.prepare('SELECT channel_id, muted, last_read_at FROM channel_prefs WHERE user_id = ?')
       .all(req.user.id)
@@ -109,12 +118,14 @@ router.get('/read-state', (req, res) => {
     const latest = latestStmt.get(channel.id);
     const pref = prefs.get(channel.id);
     const lastReadAt = pref?.last_read_at ?? 0;
+    // Your own latest message means you've seen the channel up to there.
+    const unread = !!latest && latest.created_at > lastReadAt && latest.user_id !== req.user.id;
     state[channel.id] = {
       lastMessageAt: latest?.created_at ?? 0,
       lastReadAt,
       muted: !!pref?.muted,
-      // Your own latest message means you've seen the channel up to there.
-      unread: !!latest && latest.created_at > lastReadAt && latest.user_id !== req.user.id,
+      unread,
+      unreadCount: unread ? countStmt.get(channel.id, lastReadAt, req.user.id).n : 0,
     };
   }
   res.json({ channels: state });
