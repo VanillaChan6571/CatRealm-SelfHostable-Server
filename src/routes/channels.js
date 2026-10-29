@@ -89,6 +89,37 @@ router.get('/', (req, res) => {
   res.json(visibleChannelListForUser(req.user, channels));
 });
 
+// GET /api/channels/read-state - latest message vs. the caller's read position, per visible channel.
+// Clients that are not connected to this realm's socket (mobile background, other servers) use it
+// to decide which channels to highlight. Thread replies and unpublished scheduled messages don't count.
+router.get('/read-state', (req, res) => {
+  const channels = visibleChannelListForUser(req.user, db.prepare('SELECT * FROM channels').all());
+  const latestStmt = db.prepare(`
+    SELECT created_at, user_id FROM messages
+    WHERE channel_id = ? AND thread_id IS NULL AND scheduled_at IS NULL AND message_type != 'system'
+    ORDER BY created_at DESC LIMIT 1
+  `);
+  const prefs = new Map(
+    db.prepare('SELECT channel_id, muted, last_read_at FROM channel_prefs WHERE user_id = ?')
+      .all(req.user.id)
+      .map((row) => [row.channel_id, row]),
+  );
+  const state = {};
+  for (const channel of channels) {
+    const latest = latestStmt.get(channel.id);
+    const pref = prefs.get(channel.id);
+    const lastReadAt = pref?.last_read_at ?? 0;
+    state[channel.id] = {
+      lastMessageAt: latest?.created_at ?? 0,
+      lastReadAt,
+      muted: !!pref?.muted,
+      // Your own latest message means you've seen the channel up to there.
+      unread: !!latest && latest.created_at > lastReadAt && latest.user_id !== req.user.id,
+    };
+  }
+  res.json({ channels: state });
+});
+
 // POST /api/channels - create channel (admin only)
 router.post('/', (req, res) => {
   if (!hasPermission(req.user, PERMISSIONS.MANAGE_CHANNELS)) {
