@@ -41,6 +41,53 @@ const MIME_TO_EXT = {
   'audio/wav': '.wav',
 };
 
+// Archives are stored and served as downloads only. Browsers report them under several MIME
+// names (Windows often sends application/octet-stream for .rar), so they are also recognised
+// by file extension, then checked against their signature bytes before being kept.
+const ARCHIVES = {
+  '.zip': { mime: 'application/zip', magic: [Buffer.from('PK\x03\x04', 'latin1'), Buffer.from('PK\x05\x06', 'latin1')] },
+  '.rar': { mime: 'application/vnd.rar', magic: [Buffer.from('Rar!\x1a\x07', 'latin1')] },
+  '.7z': { mime: 'application/x-7z-compressed', magic: [Buffer.from('7z\xbc\xaf\x27\x1c', 'latin1')] },
+};
+const ARCHIVE_EXT_BY_MIME = {
+  'application/zip': '.zip',
+  'application/x-zip-compressed': '.zip',
+  'application/vnd.rar': '.rar',
+  'application/x-rar-compressed': '.rar',
+  'application/x-rar': '.rar',
+  'application/x-7z-compressed': '.7z',
+};
+const GENERIC_MIME_TYPES = new Set(['application/octet-stream', 'binary/octet-stream', '']);
+
+function uploadExtension(file) {
+  const byMime = MIME_TO_EXT[file.mimetype] ?? ARCHIVE_EXT_BY_MIME[file.mimetype];
+  if (byMime) return byMime;
+  if (!GENERIC_MIME_TYPES.has(file.mimetype ?? '')) return null;
+  const ext = path.extname(String(file.originalname || '')).toLowerCase();
+  return ARCHIVES[ext] ? ext : null;
+}
+
+function hasArchiveSignature(filePath, ext) {
+  const { magic } = ARCHIVES[ext];
+  const head = Buffer.alloc(Math.max(...magic.map((m) => m.length)));
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const read = fs.readSync(fd, head, 0, head.length, 0);
+    return magic.some((m) => read >= m.length && head.subarray(0, m.length).equals(m));
+  } catch (_err) {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/** Display name for a download: the original base name, stripped to safe characters. */
+function safeDisplayName(originalname, ext) {
+  const base = path.basename(String(originalname || '')).replace(/[^\p{L}\p{N} ._()-]/gu, '').trim().slice(0, 120);
+  return base.toLowerCase().endsWith(ext) ? base : `${base || 'archive'}${ext}`;
+}
+
 const THUMBNAIL_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -73,7 +120,7 @@ async function generateChatThumbnail(file) {
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UGC_IMAGES_DIR),
   filename: (_req, file, cb) => {
-    const ext = MIME_TO_EXT[file.mimetype];
+    const ext = uploadExtension(file);
     if (!ext) return cb(new Error('Invalid file type'));
     // Unguessable name: served files have no auth, so the URL must not be enumerable.
     cb(null, `${crypto.randomUUID()}${ext}`);
@@ -91,7 +138,7 @@ const upload = multer({
         },
       }),
   fileFilter: (_req, file, cb) => {
-    if (!MIME_TO_EXT[file.mimetype]) return cb(new Error('Invalid file type'));
+    if (!uploadExtension(file)) return cb(new Error('Invalid file type'));
     cb(null, true);
   },
 });
@@ -121,6 +168,21 @@ router.post('/chat', upload.single('file'), async (req, res) => {
   if (req.file.size > maxBytes) {
     cleanupUploadedFile();
     return res.status(400).json({ error: `File exceeds ${mediaMaxMb}MB limit` });
+  }
+
+  const archiveExt = path.extname(req.file.filename).toLowerCase();
+  if (ARCHIVES[archiveExt]) {
+    // The declared type is the client's word; only keep files that really are archives.
+    if (!hasArchiveSignature(req.file.path, archiveExt)) {
+      cleanupUploadedFile();
+      return res.status(400).json({ error: 'Invalid file type' });
+    }
+    return res.json({
+      url: `/ugc/images/${req.file.filename}`,
+      mime: ARCHIVES[archiveExt].mime,
+      size: req.file.size,
+      name: safeDisplayName(req.file.originalname, archiveExt),
+    });
   }
 
   let finalSize = req.file.size;
