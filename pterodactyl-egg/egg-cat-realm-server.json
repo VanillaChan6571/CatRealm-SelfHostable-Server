@@ -323,9 +323,9 @@
         },
         {
             "name": "Central LiveKit Fallback",
-            "description": "When true, self-hosted voice/theater uses CatRealm central LiveKit if no local LiveKit is available. Requires operator enrollment, CENTRAL_MEDIA_RELAY_SECRET, and the exact public HTTPS realm origin.",
+            "description": "When true (the default), voice and theater use CatRealm Central LiveKit whenever this server has no LiveKit of its own. The realm enrolls itself with Central; set Public Realm URL to its exact public origin.",
             "env_variable": "CENTRAL_LIVEKIT_FALLBACK",
-            "default_value": "false",
+            "default_value": "true",
             "user_viewable": true,
             "user_editable": true,
             "rules": "nullable|in:true,false,1,0,yes,no,on,off",
