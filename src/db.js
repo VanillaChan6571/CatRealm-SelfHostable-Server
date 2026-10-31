@@ -808,10 +808,17 @@ db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(moderato
 db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_id, created_at DESC)').run();
 
 const { ALL_PERMISSIONS, PERMISSIONS } = require('./permissions');
-const DEFAULT_MEMBER_PERMISSIONS =
-  PERMISSIONS.VIEW_CHANNELS |
-  PERMISSIONS.READ_CHAT_HISTORY |
-  PERMISSIONS.SEND_MESSAGES;
+// Everyday member abilities, including voice and theater. Moderation and
+// management stay with Admin. Only seeds new realms; existing roles keep
+// whatever their admins configured.
+const DEFAULT_MEMBER_PERMISSIONS = [
+  'VIEW_CHANNELS', 'READ_CHAT_HISTORY', 'SEND_MESSAGES',
+  'SEND_MESSAGES_IN_THREADS', 'SEND_MESSAGES_IN_POSTS', 'SEND_VOICE_MESSAGES',
+  'CREATE_PUBLIC_THREADS', 'CREATE_POST_IN_FORUMS',
+  'EMBED_LINKS', 'ATTACH_FILES', 'ADD_REACTIONS',
+  'CONNECT_TO_VOICE', 'USE_VOICE_ACTIVITY', 'USE_PUSH_TO_TALK', 'CAMERA', 'SCREENSHARE',
+  'CHANGE_SELF_NICKNAME',
+].reduce((bits, name) => bits + PERMISSIONS[name], 0);
 db.exec(`
   CREATE TABLE IF NOT EXISTS role_categories (
     id          TEXT PRIMARY KEY,
