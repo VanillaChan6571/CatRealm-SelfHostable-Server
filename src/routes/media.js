@@ -72,6 +72,10 @@ function buildPublishSources(user, channelId) {
   return { publishSources, permissions };
 }
 
+function screenPublishSources(publishSources) {
+  return publishSources.filter((source) => source === TRACK_SOURCES.screenVideo || source === TRACK_SOURCES.screenAudio);
+}
+
 function sanitizeLiveKitIdentityPart(value) {
   return String(value || '').replace(/[^A-Za-z0-9._:-]/g, '_');
 }
@@ -420,7 +424,7 @@ async function releaseSelfHostWhipIngressSession({ context, channelId, ingressId
   }
 }
 
-function createSelfHostMediaSession({ context, channelId, user }) {
+function createSelfHostMediaSession({ context, channelId, user, role }) {
   if (!['voice', 'theater'].includes(context)) {
     return { ok: false, status: 400, error: 'Unsupported media context' };
   }
@@ -439,16 +443,25 @@ function createSelfHostMediaSession({ context, channelId, user }) {
     return { ok: false, status: 403, error: 'Missing permission: connect_to_voice' };
   }
 
+  const screen = role === 'screen';
+  if (screen && !hasChannelPermission(user, channelId, PERMISSIONS.SCREENSHARE, db)) {
+    return { ok: false, status: 403, error: 'Missing permission: screenshare' };
+  }
+
   const serverId = getSelfHostServerId();
   const userProfile = getUserProfile(user.id);
-  const { publishSources, permissions } = buildPublishSources(user, channelId);
+  const built = buildPublishSources(user, channelId);
+  const { permissions } = built;
+  const publishSources = screen ? screenPublishSources(built.publishSources) : built.publishSources;
   const roomName = `${context}:${serverId}:${channelId}`;
+  const displayName = userProfile?.effective_display_name || userProfile?.display_name || userProfile?.username || user.id;
   const token = createMediaToken({
-    identity: user.id,
-    name: userProfile?.effective_display_name || userProfile?.display_name || userProfile?.username || user.id,
+    identity: screen ? getWhipIngressParticipantIdentity(user.id, channelId) : user.id,
+    name: screen ? `${displayName} screen` : displayName,
     roomName,
     publishSources,
     canPublish: publishSources.length > 0,
+    ...(screen ? { canSubscribe: false, canPublishData: false } : {}),
     metadata: {
       userId: user.id,
       username: userProfile?.username || user.username || null,
@@ -459,6 +472,7 @@ function createSelfHostMediaSession({ context, channelId, user }) {
       serverId,
       channelId,
       permissions,
+      ...(screen ? { role: 'screen' } : {}),
     },
   });
 
@@ -471,22 +485,23 @@ function createSelfHostMediaSession({ context, channelId, user }) {
   };
 }
 
-async function createSelfHostMediaSessionWithFallback({ context, channelId, user }) {
-  const result = createSelfHostMediaSession({ context, channelId, user });
+async function createSelfHostMediaSessionWithFallback({ context, channelId, user, role }) {
+  const result = createSelfHostMediaSession({ context, channelId, user, role });
   if (result.ok || !['voice', 'theater'].includes(context) || !channelId || result.status !== 503) {
     return result;
   }
 
   try {
     const userProfile = getUserProfile(user.id);
-    const { publishSources } = buildPublishSources(user, channelId);
+    const built = buildPublishSources(user, channelId);
     const fallback = await requestFederatedMediaToken({
       context,
       channelId,
       userId: user.id,
       displayName: userProfile?.effective_display_name || userProfile?.display_name || userProfile?.username || null,
       avatar: userProfile?.avatar || null,
-      publishSources,
+      publishSources: role === 'screen' ? screenPublishSources(built.publishSources) : built.publishSources,
+      role,
     });
     if (fallback?.ok) return fallback;
   } catch {
@@ -516,6 +531,17 @@ router.post('/token', authenticateToken, async (req, res) => {
       capability: getMediaCapability(getSelfHostMediaContexts()),
     });
   }
+  res.json(result);
+});
+
+// A screen-only token for native clients that encode and publish screen
+// share themselves (no WHIP ingress), e.g. Windows Sushi on Central fallback.
+// Joins as the same identity a WHIP ingress would, so clients show it as the
+// user's screen; it may only publish screen tracks and never subscribes.
+router.post('/screen-token', authenticateToken, async (req, res) => {
+  const { context, channelId } = req.body || {};
+  const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user: req.user, role: 'screen' });
+  if (!result.ok) return res.status(result.status || 400).json({ ok: false, error: result.error });
   res.json(result);
 });
 
