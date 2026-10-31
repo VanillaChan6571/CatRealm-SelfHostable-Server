@@ -6,11 +6,12 @@ const { getSetting, setSetting } = require('../settings');
 const pteroLog = require('../logger');
 const { getSelfHostServerId } = require('./mediaConfig');
 const { getPublicRealmIdentity, signRelayPayload } = require('./realmIdentity');
+const { centralFallbackOrigin } = require('./centralFallbackConfig');
 
 const FALLBACK_ENABLED = /^(1|true|yes|on)$/i.test((process.env.CENTRAL_LIVEKIT_FALLBACK || '').trim());
 const CENTRAL_URL = (process.env.AUTH_SERVER_URL || 'https://auth.catrealm.app').replace(/\/+$/, '');
 const ENV_SECRET = process.env.CENTRAL_MEDIA_RELAY_SECRET || '';
-const SERVER_URL = (process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '').replace(/\/+$/, '');
+const SERVER_URL = centralFallbackOrigin(process.env) || '';
 const SECRET_SETTING = 'central_media_relay_secret';
 const ORIGIN_SETTING = 'central_media_relay_origin';
 const GATEWAY_SETTING = 'central_media_gateway_origin';
@@ -20,16 +21,9 @@ const ENROLLMENT_TTL_MS = 60 * 1000;
 const pendingEnrollments = new Map(); // state -> expiresAt
 let enrollmentInFlight = null;
 
-function exactOrigin(value, protocols) {
-  try {
-    const url = new URL(value);
-    return protocols.includes(url.protocol) && url.origin === value ? url.origin : null;
-  } catch { return null; }
-}
-
 // HTTPS realms enroll directly; HTTP realms enroll through their gateway binding.
 function isConfigured() {
-  return FALLBACK_ENABLED && !!exactOrigin(SERVER_URL, ['https:', 'http:']);
+  return FALLBACK_ENABLED && !!SERVER_URL;
 }
 
 function hasPendingEnrollment(state) {
@@ -55,7 +49,7 @@ function gatewayOriginForThisRealm() {
 }
 
 function enrollmentRequest(state) {
-  if (exactOrigin(SERVER_URL, ['https:'])) return { origin: SERVER_URL, body: { origin: SERVER_URL, state } };
+  if (SERVER_URL.startsWith('https:')) return { origin: SERVER_URL, body: { origin: SERVER_URL, state } };
   // Plain HTTP: prove our identity with the key the gateway pinned for us.
   const gatewayOrigin = gatewayOriginForThisRealm();
   const identity = getPublicRealmIdentity();

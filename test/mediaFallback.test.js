@@ -38,6 +38,24 @@ test('central media fallback needs only the toggle and a public realm origin', (
   assert.equal(loadFallback(env).isConfigured(), false);
 });
 
+test('a listen address is not an enrollable origin, and the startup log says why', () => {
+  const { describeCentralFallback, centralFallbackOrigin } = require('../src/lib/centralFallbackConfig');
+  // The Pterodactyl egg always sets SERVER_URL to a listen address.
+  const egg = { CENTRAL_LIVEKIT_FALLBACK: 'true', SERVER_URL: 'http://0.0.0.0:40820' };
+  assert.equal(centralFallbackOrigin(egg), null);
+  assert.equal(loadFallback(egg).isConfigured(), false);
+  assert.match(describeCentralFallback(egg), /^OFF: set PUBLIC_URL .*current: http:\/\/0\.0\.0\.0:40820/);
+  for (const url of ['http://localhost:40500', 'http://127.0.0.1', 'https://[::1]:443', 'https://realm.example/path']) {
+    assert.equal(centralFallbackOrigin({ PUBLIC_URL: url }), null, url);
+  }
+  assert.equal(centralFallbackOrigin({ PUBLIC_URL: 'https://realm.example:40820/' }), 'https://realm.example:40820');
+
+  assert.match(describeCentralFallback({}), /^OFF \(set CENTRAL_LIVEKIT_FALLBACK=true/);
+  assert.match(describeCentralFallback({ ...egg, PUBLIC_URL: 'https://realm.example:40820' }),
+    /^ON for https:\/\/realm\.example:40820 \(self-enrolls with Central\)$/);
+  assert.match(describeCentralFallback({ ...egg, PUBLIC_URL: 'http://203.0.113.7:40820' }), /via the bridge\.catrealm\.app gateway/);
+});
+
 test('the enrollment challenge only confirms states this realm issued', () => {
   const fallback = loadFallback({ CENTRAL_LIVEKIT_FALLBACK: 'true', PUBLIC_URL: 'https://realm.example' });
   assert.equal(fallback.hasPendingEnrollment('not-issued-by-this-realm'), false);

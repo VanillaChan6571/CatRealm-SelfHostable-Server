@@ -134,6 +134,7 @@ function logLiveKitRuntimeStatus() {
   }
 
   pteroLog('[CatRealm] LiveKit media: DISABLED');
+  pteroLog(`[CatRealm] Central LiveKit fallback: ${require('./lib/centralFallbackConfig').describeCentralFallback()}`);
 }
 
 function ensureRepoReady(repoRoot, repo, branch) {
