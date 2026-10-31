@@ -9,22 +9,37 @@ function isTruthy(value) {
   return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
 }
 
-function rawPublicUrl(env) {
-  return (env.PUBLIC_URL || env.PUBLIC_SERVER_URL || env.SERVER_URL || '').trim().replace(/\/+$/, '');
+function trimUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
 }
 
-/**
- * The exact public http(s) origin Central enrolls this realm under, or null.
- * A listen address such as the egg's SERVER_URL=http://0.0.0.0:PORT is not
- * reachable from Central, so it never counts.
- */
-function centralFallbackOrigin(env = process.env) {
-  const raw = rawPublicUrl(env);
+function rawPublicUrl(env) {
+  return trimUrl(env.PUBLIC_URL || env.PUBLIC_SERVER_URL || env.SERVER_URL);
+}
+
+function exactPublicOrigin(raw) {
   try {
     const url = new URL(raw);
     if (!['http:', 'https:'].includes(url.protocol) || url.origin !== raw || LISTEN_ONLY_HOST.test(url.hostname)) return null;
     return url.origin;
   } catch { return null; }
+}
+
+/**
+ * The exact public http(s) origin Central enrolls this realm under, or null.
+ * Tries PUBLIC_URL, PUBLIC_SERVER_URL and SERVER_URL in order, skipping
+ * listen addresses such as the egg's SERVER_URL=http://0.0.0.0:PORT, then
+ * falls back to the HTTPS origin this realm serves when SSL_DOMAIN is set.
+ */
+function centralFallbackOrigin(env = process.env) {
+  const port = trimUrl(env.PORT);
+  const candidates = [env.PUBLIC_URL, env.PUBLIC_SERVER_URL, env.SERVER_URL]
+    .concat(env.SSL_DOMAIN ? [`https://${trimUrl(env.SSL_DOMAIN)}${port && port !== '443' ? `:${port}` : ''}`] : []);
+  for (const candidate of candidates.map(trimUrl).filter(Boolean)) {
+    const origin = exactPublicOrigin(candidate);
+    if (origin) return origin;
+  }
+  return null;
 }
 
 function isCentralFallbackEnabled(env = process.env) {
@@ -38,7 +53,7 @@ function describeCentralFallback(env = process.env) {
   }
   const origin = centralFallbackOrigin(env);
   if (!origin) {
-    return `OFF: set PUBLIC_URL to this realm's public origin, e.g. https://realm.example.com:40500 (current: ${rawPublicUrl(env) || 'unset'})`;
+    return `OFF: set PUBLIC_URL (or SSL_DOMAIN) so this realm has a public origin, e.g. https://realm.example.com:40500 (current: ${rawPublicUrl(env) || 'unset'})`;
   }
   const key = (env.CENTRAL_MEDIA_RELAY_SECRET || '').length >= 32 ? 'operator-issued key' : 'self-enrolls with Central';
   return origin.startsWith('https:')

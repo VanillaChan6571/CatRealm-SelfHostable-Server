@@ -57,6 +57,19 @@ test('a listen address is not an enrollable origin, and the startup log says why
   assert.match(describeCentralFallback({ ...egg, PUBLIC_URL: 'http://203.0.113.7:40820' }), /via the bridge\.catrealm\.app gateway/);
 });
 
+test('an Auto-SSL realm derives its public origin without PUBLIC_URL', () => {
+  const { describeCentralFallback, centralFallbackOrigin } = require('../src/lib/centralFallbackConfig');
+  // What a Pterodactyl realm with Auto-SSL and a blank Public Realm URL sees.
+  const egg = { CENTRAL_LIVEKIT_FALLBACK: 'true', SERVER_URL: 'http://0.0.0.0:40820', PORT: '40820', SSL_DOMAIN: 'realm.example' };
+  assert.equal(centralFallbackOrigin(egg), 'https://realm.example:40820');
+  assert.equal(describeCentralFallback(egg), 'ON for https://realm.example:40820 (self-enrolls with Central)');
+  assert.equal(loadFallback(egg).isConfigured(), true);
+  assert.equal(centralFallbackOrigin({ ...egg, PORT: '443' }), 'https://realm.example');
+  // Explicit settings still win, and a public SERVER_URL beats the derived one.
+  assert.equal(centralFallbackOrigin({ ...egg, PUBLIC_URL: 'https://chat.example' }), 'https://chat.example');
+  assert.equal(centralFallbackOrigin({ ...egg, SERVER_URL: 'https://realm.example:40820' }), 'https://realm.example:40820');
+});
+
 test('the enrollment challenge only confirms states this realm issued', () => {
   const fallback = loadFallback({ CENTRAL_LIVEKIT_FALLBACK: 'true', PUBLIC_URL: 'https://realm.example' });
   assert.equal(fallback.hasPendingEnrollment('not-issued-by-this-realm'), false);

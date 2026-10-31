@@ -11,7 +11,6 @@ const { centralFallbackOrigin } = require('./centralFallbackConfig');
 const FALLBACK_ENABLED = /^(1|true|yes|on)$/i.test((process.env.CENTRAL_LIVEKIT_FALLBACK || '').trim());
 const CENTRAL_URL = (process.env.AUTH_SERVER_URL || 'https://auth.catrealm.app').replace(/\/+$/, '');
 const ENV_SECRET = process.env.CENTRAL_MEDIA_RELAY_SECRET || '';
-const SERVER_URL = centralFallbackOrigin(process.env) || '';
 const SECRET_SETTING = 'central_media_relay_secret';
 const ORIGIN_SETTING = 'central_media_relay_origin';
 const GATEWAY_SETTING = 'central_media_gateway_origin';
@@ -21,9 +20,14 @@ const ENROLLMENT_TTL_MS = 60 * 1000;
 const pendingEnrollments = new Map(); // state -> expiresAt
 let enrollmentInFlight = null;
 
+// Read when needed: Auto-SSL can settle the public origin after this loads.
+function realmOrigin() {
+  return centralFallbackOrigin(process.env) || '';
+}
+
 // HTTPS realms enroll directly; HTTP realms enroll through their gateway binding.
 function isConfigured() {
-  return FALLBACK_ENABLED && !!SERVER_URL;
+  return FALLBACK_ENABLED && !!realmOrigin();
 }
 
 function hasPendingEnrollment(state) {
@@ -43,13 +47,14 @@ function gatewayOriginForThisRealm() {
   if (remembered && GATEWAY_ORIGIN.test(remembered)) return remembered;
   const identity = getPublicRealmIdentity();
   const id = crypto.createHash('sha256')
-    .update(`${SERVER_URL}\n${identity.realmInstanceId}\n${identity.realmKeyFingerprint}`)
+    .update(`${realmOrigin()}\n${identity.realmInstanceId}\n${identity.realmKeyFingerprint}`)
     .digest('hex').slice(0, 40);
   return `https://r-${id}.bridge.catrealm.app`;
 }
 
 function enrollmentRequest(state) {
-  if (SERVER_URL.startsWith('https:')) return { origin: SERVER_URL, body: { origin: SERVER_URL, state } };
+  const origin = realmOrigin();
+  if (origin.startsWith('https:')) return { origin, body: { origin, state } };
   // Plain HTTP: prove our identity with the key the gateway pinned for us.
   const gatewayOrigin = gatewayOriginForThisRealm();
   const identity = getPublicRealmIdentity();
@@ -67,7 +72,7 @@ function enrollmentRequest(state) {
 
 /**
  * Self-enroll with central and persist the origin-bound relay key. HTTPS realms
- * answer GET {SERVER_URL}/api/media/central-enrollment/:state; HTTP realms sign
+ * answer GET {origin}/api/media/central-enrollment/:state; HTTP realms sign
  * the request instead and are enrolled under their gateway origin.
  */
 async function enroll() {
@@ -91,7 +96,7 @@ async function enroll() {
 }
 
 async function getRelayCredentials({ refresh = false } = {}) {
-  if (ENV_SECRET.length >= 32) return { secret: ENV_SECRET, origin: SERVER_URL, fromEnv: true };
+  if (ENV_SECRET.length >= 32) return { secret: ENV_SECRET, origin: realmOrigin(), fromEnv: true };
   if (!refresh) {
     const secret = getSetting(SECRET_SETTING, null);
     const origin = getSetting(ORIGIN_SETTING, null);
