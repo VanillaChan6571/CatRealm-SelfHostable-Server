@@ -2,10 +2,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadModule } = require('./helpers');
 
-test('central media fallback uses its enrolled secret and the public realm origin', () => {
+const loadFallback = env => loadModule('src/lib/centralMediaFallback.js', {
+  '../settings': { getSetting: (_key, fallback) => fallback, setSetting: () => {} },
+  './realmIdentity': { getPublicRealmIdentity: () => ({}), signRelayPayload: () => ({}) },
+  '../logger': () => {},
+  './mediaConfig': { getSelfHostServerId: () => 'synthetic-realm' },
+}, { process: { env } });
+
+test('central media fallback needs only the toggle and a public realm origin', () => {
   const env = {
     CENTRAL_LIVEKIT_FALLBACK: 'true',
-    CENTRAL_MEDIA_RELAY_SECRET: 'synthetic-media-secret-at-least-32-chars',
     PUBLIC_SERVER_URL: 'https://realm.example',
     SERVER_URL: 'http://0.0.0.0:40500',
   };
@@ -13,19 +19,39 @@ test('central media fallback uses its enrolled secret and the public realm origi
     '../db': {},
     './hostNetworkLimits': { getHostUdpBufferLimit: () => ({ available: false }) },
   }, { process: { env } });
+  // No CENTRAL_MEDIA_RELAY_SECRET: the realm self-enrolls with central.
   assert.equal(mediaConfig.readLiveKitConfig().centralLiveKitFallback, true);
+  assert.equal(loadFallback(env).isConfigured(), true);
 
-  const fallback = loadModule('src/lib/centralMediaFallback.js', {
-    '../logger': () => {},
-    './mediaConfig': { getSelfHostServerId: () => 'synthetic-realm' },
-  }, { process: { env } });
-  assert.equal(fallback.isConfigured(), true);
+  // HTTP realms enroll through their CatRealm gateway binding instead.
+  env.PUBLIC_SERVER_URL = 'http://realm.example';
+  assert.equal(mediaConfig.readLiveKitConfig().centralLiveKitFallback, true);
+  assert.equal(loadFallback(env).isConfigured(), true);
 
-  delete env.CENTRAL_MEDIA_RELAY_SECRET;
-  env.PUSH_RELAY_SECRET = 'retired-push-secret-at-least-32-chars';
+  env.PUBLIC_SERVER_URL = 'ftp://realm.example';
   assert.equal(mediaConfig.readLiveKitConfig().centralLiveKitFallback, false);
-  assert.equal(loadModule('src/lib/centralMediaFallback.js', {
+  assert.equal(loadFallback(env).isConfigured(), false);
+
+  env.PUBLIC_SERVER_URL = 'https://realm.example';
+  env.CENTRAL_LIVEKIT_FALLBACK = 'false';
+  assert.equal(mediaConfig.readLiveKitConfig().centralLiveKitFallback, false);
+  assert.equal(loadFallback(env).isConfigured(), false);
+});
+
+test('the enrollment challenge only confirms states this realm issued', () => {
+  const fallback = loadFallback({ CENTRAL_LIVEKIT_FALLBACK: 'true', PUBLIC_URL: 'https://realm.example' });
+  assert.equal(fallback.hasPendingEnrollment('not-issued-by-this-realm'), false);
+});
+
+test('only verified-looking gateway origins are remembered', () => {
+  const saved = [];
+  const fallback = loadModule('src/lib/centralMediaFallback.js', {
+    '../settings': { getSetting: (_key, fallback) => fallback, setSetting: (key, value) => saved.push([key, value]) },
+    './realmIdentity': { getPublicRealmIdentity: () => ({}), signRelayPayload: () => ({}) },
     '../logger': () => {},
     './mediaConfig': { getSelfHostServerId: () => 'synthetic-realm' },
-  }, { process: { env } }).isConfigured(), false);
+  }, { process: { env: { CENTRAL_LIVEKIT_FALLBACK: 'true', PUBLIC_URL: 'http://realm.example' } } });
+  fallback.rememberGatewayOrigin('https://evil.example');
+  fallback.rememberGatewayOrigin(`https://r-${'a'.repeat(40)}.bridge.catrealm.app`);
+  assert.deepEqual(saved, [['central_media_gateway_origin', `https://r-${'a'.repeat(40)}.bridge.catrealm.app`]]);
 });

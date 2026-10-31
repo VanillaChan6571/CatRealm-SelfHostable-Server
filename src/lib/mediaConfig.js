@@ -36,9 +36,10 @@ function readLiveKitConfig() {
     process.env.LIVEKIT_URL ||
     ''
   ).trim();
+  // The relay key is optional: without CENTRAL_MEDIA_RELAY_SECRET the realm
+  // self-enrolls with central (HTTPS directly, HTTP via its gateway binding).
   const centralLiveKitFallback = isTruthy(process.env.CENTRAL_LIVEKIT_FALLBACK, false)
-    && (process.env.CENTRAL_MEDIA_RELAY_SECRET || '').trim().length >= 32
-    && !!(process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '').trim();
+    && /^https?:\/\//i.test((process.env.PUBLIC_URL || process.env.PUBLIC_SERVER_URL || process.env.SERVER_URL || '').trim());
   const ttlSeconds = Math.max(
     60,
     Math.min(60 * 60, Number(process.env.MEDIA_TOKEN_TTL_SECONDS || DEFAULT_TOKEN_TTL_SECONDS) || DEFAULT_TOKEN_TTL_SECONDS),

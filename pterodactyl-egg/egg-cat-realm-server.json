@@ -333,7 +333,7 @@
         },
         {
             "name": "Central Media Relay Secret",
-            "description": "Operator-enrolled secret for central LiveKit fallback. Requires CENTRAL_LIVEKIT_FALLBACK=true and the exact public HTTPS realm origin.",
+            "description": "Optional explicit key for central LiveKit fallback. Leave blank to self-enroll automatically (requires CENTRAL_LIVEKIT_FALLBACK=true and the exact public HTTPS realm origin).",
             "env_variable": "CENTRAL_MEDIA_RELAY_SECRET",
             "default_value": "",
             "user_viewable": false,

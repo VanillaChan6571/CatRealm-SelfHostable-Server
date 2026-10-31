@@ -14,7 +14,7 @@ const {
   getSelfHostServerId,
   readLiveKitIngressConfig,
 } = require('../lib/mediaConfig');
-const { requestFederatedMediaToken } = require('../lib/centralMediaFallback');
+const { requestFederatedMediaToken, hasPendingEnrollment } = require('../lib/centralMediaFallback');
 const { getHostUdpBufferLimit } = require('../lib/hostNetworkLimits');
 
 const LIVEKIT_INGRESS_INPUT_WHIP = 1; // @livekit/protocol IngressInput.WHIP_INPUT
@@ -498,6 +498,12 @@ async function createSelfHostMediaSessionWithFallback({ context, channelId, user
 
 router.get('/capabilities', (_req, res) => {
   res.json({ ok: true, capability: getMediaCapability(getSelfHostMediaContexts()) });
+});
+
+// Central reads this back during self-enrollment to confirm we serve our origin.
+router.get('/central-enrollment/:state', (req, res) => {
+  if (!hasPendingEnrollment(req.params.state)) return res.status(404).json({ ok: false });
+  res.json({ ok: true, state: req.params.state });
 });
 
 router.post('/token', authenticateToken, async (req, res) => {

@@ -253,6 +253,7 @@ async function centralAssertionOrigin(req) {
     || gateway.data?.realmKeyFingerprint !== identity.realmKeyFingerprint) {
     throw new Error('Gateway binding does not match this realm');
   }
+  require('../lib/centralMediaFallback').rememberGatewayOrigin(claimed.origin);
   return claimed.origin;
 }
 
