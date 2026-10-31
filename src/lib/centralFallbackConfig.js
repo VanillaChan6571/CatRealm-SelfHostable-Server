@@ -33,7 +33,8 @@ function isCentralFallbackEnabled(env = process.env) {
 
 function describeCentralFallback(env = process.env) {
   if (!isTruthy(env.CENTRAL_LIVEKIT_FALLBACK)) {
-    return 'OFF (set CENTRAL_LIVEKIT_FALLBACK=true to use CatRealm Central LiveKit)';
+    const seen = env.CENTRAL_LIVEKIT_FALLBACK === undefined ? 'unset' : JSON.stringify(env.CENTRAL_LIVEKIT_FALLBACK);
+    return `OFF (CENTRAL_LIVEKIT_FALLBACK is ${seen}; set it to true to use CatRealm Central LiveKit)`;
   }
   const origin = centralFallbackOrigin(env);
   if (!origin) {

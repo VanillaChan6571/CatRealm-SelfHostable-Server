@@ -41,6 +41,13 @@ if (needsInstall()) {
   installDependencies();
 }
 
+// Pterodactyl passes every egg variable into the container, blank ones as "".
+// dotenv never overrides an existing key, so a blank panel field would hide
+// the same key in .env. Treat blank panel values as unset instead.
+for (const [key, value] of Object.entries(process.env)) {
+  if (value === '') delete process.env[key];
+}
+
 require('dotenv').config();
 
 const { startBundledLiveKit } = require(path.join(repoRoot, 'src', 'livekitRuntime'));

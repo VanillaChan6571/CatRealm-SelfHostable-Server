@@ -50,7 +50,8 @@ test('a listen address is not an enrollable origin, and the startup log says why
   }
   assert.equal(centralFallbackOrigin({ PUBLIC_URL: 'https://realm.example:40820/' }), 'https://realm.example:40820');
 
-  assert.match(describeCentralFallback({}), /^OFF \(set CENTRAL_LIVEKIT_FALLBACK=true/);
+  assert.match(describeCentralFallback({}), /^OFF \(CENTRAL_LIVEKIT_FALLBACK is unset; set it to true/);
+  assert.match(describeCentralFallback({ CENTRAL_LIVEKIT_FALLBACK: 'false' }), /is "false"/);
   assert.match(describeCentralFallback({ ...egg, PUBLIC_URL: 'https://realm.example:40820' }),
     /^ON for https:\/\/realm\.example:40820 \(self-enrolls with Central\)$/);
   assert.match(describeCentralFallback({ ...egg, PUBLIC_URL: 'http://203.0.113.7:40820' }), /via the bridge\.catrealm\.app gateway/);
