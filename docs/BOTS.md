@@ -120,6 +120,10 @@ name); members without it don't see the command and the server refuses
 their invocations. Options can declare `choices` (shown as a picker) or use
 the `role` type (role picker; the bot receives the role id).
 
+Commands with `"type": "message"` (plus a `label`) appear under **Apps** in
+the message right-click menu instead of the slash typeahead; the bot receives
+the clicked message as `targetMessageId`.
+
 After responding, a bot can send more messages for 15 minutes with
 `interaction:followup` (public or `ephemeral`). Outside interactions,
 `bot:ephemeral:send { userId, channelId, content }` shows a ghost message only

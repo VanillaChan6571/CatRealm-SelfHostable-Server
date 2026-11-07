@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const { loadModule } = require('./helpers');
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -14,8 +15,10 @@ function setup({ cachedDays = null, failures = 0, wrongHost = false } = {}) {
   let remainingFailures = failures;
   const timers = [];
   const files = new Map();
-  const certPath = '/synthetic-ssl/cert.pem';
-  const keyPath = '/synthetic-ssl/key.pem';
+  // autossl.js resolves SSL_DATA_DIR, which gains a drive letter on Windows.
+  const sslDir = path.resolve('/synthetic-ssl');
+  const certPath = path.join(sslDir, 'cert.pem');
+  const keyPath = path.join(sslDir, 'key.pem');
   const certificate = (days, domain = DOMAIN, key = 'key') => Buffer.from(JSON.stringify({
     validFrom: new Date(now - DAY).toISOString(), validTo: new Date(now + days * DAY).toISOString(), domain, key,
   }));

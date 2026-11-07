@@ -1,3 +1,6 @@
+// Protect generated secrets, databases, journals, and backups even when the
+// host or panel starts the process with a permissive default umask.
+process.umask(0o077);
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -7,6 +10,13 @@ const { ensureDependenciesInstalled } = require('./lib/dependencyInstall');
 
 ensureDependenciesInstalled(path.join(__dirname, '..'));
 require('dotenv').config();
+const startupEnvPath = String(process.env.CATREALM_REALM_ENV_FILE || '').trim()
+  || path.join(__dirname, '../.env');
+try {
+  fs.chmodSync(startupEnvPath, 0o600);
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
 const pteroLog = require('./logger');
 const { getDiagnosticHelpText, runDiagnosticCommand } = require('./diagnosticCommands');
 const { startBundledLiveKit, applySharedLiveKitClientEnv } = require('./livekitRuntime');

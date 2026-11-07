@@ -21,7 +21,7 @@ function setup() {
     '../middleware/auth': { SERVER_MODE: 'standalone' },
     '../settings': { getSetting: () => null, setSetting() {} },
     '../permissions': { PERMISSIONS, hasPermission: () => true },
-    '../socket/handler': { emitServerInfoUpdate() {}, emitPermissionsChanged() {}, kickUserFromServer() {} },
+    '../socket/handler': { emitServerInfoUpdate() {}, emitPermissionsChanged() {}, kickUserFromServer() {}, emitServerEvent() {} },
     '../diagnosticCommands': {},
     '../theaterYouTubeCookies': {},
     '../webhooks': {},

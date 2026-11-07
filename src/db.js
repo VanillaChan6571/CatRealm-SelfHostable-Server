@@ -22,13 +22,22 @@ function resolveDbPath() {
 
 const DB_PATH = resolveDbPath();
 const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
 const db = new Database(DB_PATH);
 
 // Enable WAL mode for better performance
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+for (const databaseFile of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+  try {
+    fs.chmodSync(databaseFile, 0o600);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      pteroLog(`[CatRealm] Could not restrict database permissions on ${databaseFile}: ${error.message}`);
+    }
+  }
+}
 
 function isTruthy(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -46,7 +55,10 @@ function activeEnvFilePath() {
 
 function ensureEnvFile() {
   const envPath = activeEnvFilePath();
-  if (fs.existsSync(envPath)) return envPath;
+  if (fs.existsSync(envPath)) {
+    fs.chmodSync(envPath, 0o600);
+    return envPath;
+  }
   if ((process.env.CATREALM_REALM_ENV_FILE || '').trim()) {
     fs.mkdirSync(path.dirname(envPath), { recursive: true });
     fs.writeFileSync(envPath, '', { mode: 0o600 });
@@ -658,6 +670,11 @@ const botCommandColumns = db.prepare('PRAGMA table_info(bot_commands)').all().ma
 if (!botCommandColumns.includes('default_permission')) {
   db.prepare('ALTER TABLE bot_commands ADD COLUMN default_permission TEXT').run();
   pteroLog('[CatRealm] Added bot_commands.default_permission column');
+}
+if (!botCommandColumns.includes('command_type')) {
+  db.prepare("ALTER TABLE bot_commands ADD COLUMN command_type TEXT NOT NULL DEFAULT 'chat'").run();
+  db.prepare('ALTER TABLE bot_commands ADD COLUMN label TEXT').run();
+  pteroLog('[CatRealm] Added bot_commands.command_type/label columns');
 }
 
 const webhookColumns = db.prepare('PRAGMA table_info(webhooks)').all().map((c) => c.name);

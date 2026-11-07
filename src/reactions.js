@@ -72,6 +72,19 @@ function toggleMessageReaction(messageId, userId, emoji) {
   };
 }
 
+// Remove reactions matching the optional emoji/userId filters. Returns the
+// removed { userId, emoji } pairs and the message's fresh summary.
+function removeMessageReactions(messageId, { emoji = null, userId = null } = {}) {
+  const where = ['message_id = ?'];
+  const params = [messageId];
+  if (emoji) { where.push('emoji = ?'); params.push(emoji); }
+  if (userId) { where.push('user_id = ?'); params.push(userId); }
+  const clause = where.join(' AND ');
+  const removed = db.prepare(`SELECT user_id AS userId, emoji FROM message_reactions WHERE ${clause}`).all(...params);
+  if (removed.length > 0) db.prepare(`DELETE FROM message_reactions WHERE ${clause}`).run(...params);
+  return { removed, reactions: summarizeMessageReactions([messageId])[messageId] || [] };
+}
+
 function attachReactionsToMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
   const summary = summarizeMessageReactions(messages.map((m) => m.id));
@@ -82,5 +95,6 @@ module.exports = {
   normalizeReactionToken,
   summarizeMessageReactions,
   toggleMessageReaction,
+  removeMessageReactions,
   attachReactionsToMessages,
 };

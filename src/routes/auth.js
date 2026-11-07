@@ -10,10 +10,7 @@ const pteroLog = require('../logger');
 const { isBlockedUsername } = require('../usernameBlocklist');
 const { getSetting } = require('../settings');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
-const DEFAULT_AVATAR_URL = (
-  process.env.DEFAULT_AVATAR_URL ||
-  'https://catrealm.app/uploads/avatars/default.jpg'
-).trim();
+const { DEFAULT_AVATAR_URL } = require('../lib/defaultAvatar');
 
 function consumeInviteForRejoin(inviteCode) {
   const code = String(inviteCode || '').trim();
@@ -434,8 +431,9 @@ router.post('/leave', authenticateToken, (req, res) => {
   });
 
   // Lazy require to avoid any module-load ordering issues with the socket handler.
-  const { emitPermissionsChanged, kickUserFromServer } = require('../socket/handler');
+  const { emitPermissionsChanged, kickUserFromServer, emitServerEvent } = require('../socket/handler');
   emitPermissionsChanged();
+  emitServerEvent('member:leave', { userId: authenticatedUser.id, reason: 'left' });
   kickUserFromServer(authenticatedUser.id, { reason: 'left', message: 'You left this server.' });
 
   res.json({ success: true });

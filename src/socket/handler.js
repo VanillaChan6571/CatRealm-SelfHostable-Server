@@ -28,6 +28,7 @@ const {
 } = require('../routes/media');
 const { getMediaCapability } = require('../lib/mediaConfig');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
+const COMPACT_OWNER_TOKEN_REGEX = /:(?:(sticker):)?[a-z0-9_-]{1,64}:[a-z0-9_-]{3,128}:/gi;
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -371,6 +372,11 @@ function emitServerImportStatus(status, data) {
   ioInstance.emit('server:import:status', { status, ...data });
 }
 
+// Realm-wide state events (role/member changes) for clients and bots.
+function emitServerEvent(event, payload) {
+  ioInstance?.emit(event, payload);
+}
+
 function kickUserFromServer(userId, payload = {}) {
   if (!ioInstance || !userId) return 0;
   const entry = onlineUsers.get(userId);
@@ -396,9 +402,20 @@ function detectExternalExpressionUsage(text) {
   }
   let usesExternalEmote = false;
   let usesExternalSticker = false;
+  let serverOrigin = null;
+  try { serverOrigin = new URL(process.env.SERVER_URL).origin; } catch (_err) {}
   COMPACT_EXTERNAL_TOKEN_REGEX.lastIndex = 0;
   for (const match of text.matchAll(COMPACT_EXTERNAL_TOKEN_REGEX)) {
+    let tokenOrigin = null;
+    try { tokenOrigin = new URL(match[1]).origin; } catch (_err) {}
+    if (serverOrigin && tokenOrigin === serverOrigin) continue;
     if (match?.[2] === 'sticker') usesExternalSticker = true;
+    else usesExternalEmote = true;
+    if (usesExternalEmote && usesExternalSticker) break;
+  }
+  COMPACT_OWNER_TOKEN_REGEX.lastIndex = 0;
+  for (const match of text.matchAll(COMPACT_OWNER_TOKEN_REGEX)) {
+    if (match?.[1] === 'sticker') usesExternalSticker = true;
     else usesExternalEmote = true;
     if (usesExternalEmote && usesExternalSticker) break;
   }
@@ -1527,8 +1544,9 @@ function setupSocketHandlers(io) {
 
       let trimmed = hasText ? content.trim() : '';
       if (trimmed) {
-        // Replace @uuid with @username where possible
-        trimmed = trimmed.replace(/@([0-9a-fA-F-]{36})/g, (match, id) => {
+        // Replace bare @uuid with @username where possible. <@userId> mention
+        // tokens are left alone: they survive renames and drive mention pushes.
+        trimmed = trimmed.replace(/(?<!<)@([0-9a-fA-F-]{36})/g, (match, id) => {
           const u = db.prepare('SELECT username FROM users WHERE id = ?').get(id);
           if (!u?.username) return match;
           return `@${u.username}`;
@@ -1718,7 +1736,7 @@ function setupSocketHandlers(io) {
     });
 
     // ── Invoke a bot slash command ─────────────────────────────────────────────
-    socket.on('interaction:invoke', ({ botId, command, channelId, threadId, replyToId, options, nonce }, ack) => {
+    socket.on('interaction:invoke', ({ botId, command, channelId, threadId, replyToId, targetMessageId, options, nonce }, ack) => {
       const reply = (payload) => { if (typeof ack === 'function') ack({ nonce: nonce || null, ...payload }); };
       if (user.is_bot) return reply({ status: 'denied', error: 'Bots cannot invoke commands' });
       touchActivity(user.id);
@@ -1786,13 +1804,19 @@ function setupSocketHandlers(io) {
         safeOptions[key] = resolved.value;
       }
 
-      // Only pass through a reply target the invoker can actually see here.
-      const replyTarget = typeof replyToId === 'string'
+      // Only pass through messages the invoker can actually see here.
+      const findVisibleMessage = (messageId) => (typeof messageId === 'string'
         ? db.prepare(`
           SELECT id FROM messages
           WHERE id = ? AND channel_id = ? AND COALESCE(thread_id, '') = ? AND (scheduled_at IS NULL OR user_id = ?)
-        `).get(replyToId, channelId, threadId || '', user.id)
-        : null;
+        `).get(messageId, channelId, threadId || '', user.id)
+        : null);
+      const replyTarget = findVisibleMessage(replyToId);
+      const commandType = commandRow.command_type || 'chat';
+      const targetMessage = commandType === 'message' ? findVisibleMessage(targetMessageId) : null;
+      if (commandType === 'message' && !targetMessage) {
+        return reply({ status: 'invalid', error: 'Message actions need a message in this channel' });
+      }
 
       const interactionId = randomUUID();
       const timer = setTimeout(() => {
@@ -1841,10 +1865,12 @@ function setupSocketHandlers(io) {
         botSocket.emit('interaction:create', {
           id: interactionId,
           command: commandRow.name,
+          type: commandType,
           options: safeOptions,
           channelId,
           threadId: threadId || null,
           replyToId: replyTarget?.id || null,
+          targetMessageId: targetMessage?.id || null,
           user: invokerPayload,
           respondBy: Date.now() + INTERACTION_TTL_MS,
         });
@@ -2083,6 +2109,18 @@ function setupSocketHandlers(io) {
       if (msg.message_type && msg.message_type !== 'user') return fail('Cannot react to system messages');
       if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.VIEW_CHANNELS, db)) return fail('Not allowed');
       if (!hasChannelPermission(user, msg.channel_id, PERMISSIONS.ADD_REACTIONS, db)) return fail('Missing permission: add_reactions');
+
+      const existingReaction = db.prepare('SELECT 1 FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?')
+        .get(msg.id, user.id, token);
+      if (!existingReaction) {
+        const externalUse = detectExternalExpressionUsage(token);
+        if (externalUse.usesExternalEmote && !hasChannelPermission(user, msg.channel_id, PERMISSIONS.USE_EXTERNAL_EMOTES, db)) {
+          return fail('Missing permission: use_external_emotes');
+        }
+        if (externalUse.usesExternalSticker && !hasChannelPermission(user, msg.channel_id, PERMISSIONS.USE_EXTERNAL_STICKERS, db)) {
+          return fail('Missing permission: use_external_stickers');
+        }
+      }
 
       const { reacted, reactions } = toggleMessageReaction(msg.id, user.id, token);
       const threadId = msg.thread_id || null;
@@ -2327,6 +2365,7 @@ module.exports.emitServerInfoUpdate = emitServerInfoUpdate;
 module.exports.emitServerImportStatus = emitServerImportStatus;
 module.exports.emitPermissionsChanged = emitPermissionsChanged;
 module.exports.kickUserFromServer = kickUserFromServer;
+module.exports.emitServerEvent = emitServerEvent;
 module.exports.disconnectUserSockets = disconnectUserSockets;
 module.exports.emitToUserSockets = emitToUserSockets;
 module.exports.getOnlineUserIds = () => new Set(onlineUsers.keys());

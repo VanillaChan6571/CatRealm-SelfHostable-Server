@@ -146,6 +146,8 @@ function serializeBot(db, bot, { onlineUserIds = null, pluginStatus = null } = {
 const COMMAND_NAME_RE = /^[a-z0-9_-]{1,32}$/;
 const COMMAND_OPTION_TYPES = ['string', 'user', 'channel', 'role', 'integer', 'boolean'];
 const MAX_OPTION_CHOICES = 25;
+// 'chat' = slash command; 'message' = entry in the message right-click menu.
+const COMMAND_TYPES = ['chat', 'message'];
 const MAX_COMMANDS_PER_BOT = 50;
 
 // Bit value of a named permission (e.g. 'MANAGE_ROLES'), or null if unknown.
@@ -206,12 +208,16 @@ function normalizeBotCommands(commands) {
     if (!COMMAND_NAME_RE.test(name)) return { error: `Invalid command name: ${name || '(empty)'}` };
     if (seen.has(name)) return { error: `Duplicate command name: ${name}` };
     seen.add(name);
+    const type = cmd?.type ?? 'chat';
+    if (!COMMAND_TYPES.includes(type)) return { error: `Invalid command type on ${name}: ${type}` };
+    const label = type === 'message' ? String(cmd?.label || name).trim().slice(0, 40) : null;
     const defaultPermission = cmd?.defaultPermission ?? cmd?.default_permission ?? null;
     if (defaultPermission !== null && commandPermissionBits(defaultPermission) === null) {
       return { error: `Unknown defaultPermission on ${name}: ${defaultPermission}` };
     }
     const options = [];
-    if (Array.isArray(cmd?.options)) {
+    // Message actions take their input from the clicked message, not options.
+    if (type === 'chat' && Array.isArray(cmd?.options)) {
       for (const opt of cmd.options.slice(0, 10)) {
         const optName = String(opt?.name || '').toLowerCase().trim();
         if (!COMMAND_NAME_RE.test(optName)) continue;
@@ -230,7 +236,7 @@ function normalizeBotCommands(commands) {
         options.push(option);
       }
     }
-    normalized.push({ name, description: String(cmd?.description || '').slice(0, 200), options, defaultPermission });
+    normalized.push({ name, type, label, description: String(cmd?.description || '').slice(0, 200), options, defaultPermission });
   }
   return { commands: normalized };
 }
@@ -246,11 +252,12 @@ function replaceBotCommands(db, botId, commands) {
   db.transaction(() => {
     db.prepare('DELETE FROM bot_commands WHERE bot_id = ?').run(botId);
     const insert = db.prepare(`
-      INSERT INTO bot_commands (id, bot_id, name, description, options, default_permission, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, unixepoch())
+      INSERT INTO bot_commands (id, bot_id, name, description, options, default_permission, command_type, label, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
     `);
     for (const cmd of commands) {
-      insert.run(randomUUID(), botId, cmd.name, cmd.description, JSON.stringify(cmd.options), cmd.defaultPermission);
+      insert.run(randomUUID(), botId, cmd.name, cmd.description, JSON.stringify(cmd.options), cmd.defaultPermission,
+        cmd.type, cmd.label);
     }
   })();
 }

@@ -4,7 +4,8 @@ const db = require('../db');
 const { PERMISSIONS, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows, isSecureModeEnabled, encryptMessageContent } = require('../messageCrypto');
 const { searchLimiter } = require('../middleware/rateLimits');
-const { attachReactionsToMessages } = require('../reactions');
+const { attachReactionsToMessages, normalizeReactionToken, removeMessageReactions } = require('../reactions');
+const { emitToChannel } = require('../socket/handler');
 
 function attachNsfwTags(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
@@ -407,6 +408,35 @@ router.get('/:channelId/:messageId', (req, res) => {
   `).get(messageId, channelId, req.user.id);
   if (!row) return res.status(404).json({ error: 'Message not found' });
   res.json(normalizeMessageRows([row])[0]);
+});
+
+// DELETE /api/messages/:channelId/:messageId/reactions?emoji=&userId=
+// Removes reactions matching the filters (none = all). Removing anyone else's
+// needs Manage Messages; members may always remove their own.
+router.delete('/:channelId/:messageId/reactions', (req, res) => {
+  const { channelId, messageId } = req.params;
+  const emoji = req.query.emoji ? normalizeReactionToken(String(req.query.emoji)) : null;
+  if (req.query.emoji && !emoji) return res.status(400).json({ error: 'Invalid emoji' });
+  const userId = typeof req.query.userId === 'string' && req.query.userId ? req.query.userId : null;
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  if (userId !== req.user.id && !hasChannelPermission(req.user, channelId, PERMISSIONS.MANAGE_MESSAGES, db)) {
+    return res.status(403).json({ error: 'Missing permission: manage_messages' });
+  }
+  const msg = db.prepare('SELECT id, thread_id FROM messages WHERE id = ? AND channel_id = ?').get(messageId, channelId);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+
+  const { removed, reactions } = removeMessageReactions(msg.id, { emoji, userId });
+  if (removed.length > 0) {
+    const threadId = msg.thread_id || null;
+    const room = threadId ? `thread:${threadId}` : channelId;
+    emitToChannel(room, 'message:reaction:update', { messageId: msg.id, channelId, threadId, reactions });
+    for (const row of removed) {
+      emitToChannel(room, 'message:reaction:remove', { messageId: msg.id, channelId, threadId, userId: row.userId, emoji: row.emoji });
+    }
+  }
+  res.json({ removed: removed.length, reactions });
 });
 
 module.exports = router;

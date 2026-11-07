@@ -246,3 +246,15 @@ test('history omits legacy cross-channel and unpublished reply content', (t) => 
     assert(!JSON.stringify(res.data).includes('Public content'));
   }
 });
+
+test('message:send keeps <@userId> mention tokens and only rewrites bare @uuid', (t) => {
+  const db = makeDatabase();
+  t.after(() => db.close());
+  const id = '11111111-2222-3333-4444-555555555555';
+  db.prepare("INSERT INTO users (id, username) VALUES (?, 'Carol')").run(id);
+  const h = makeSocketHarness(db);
+  h.dispatch('message:send', { channelId: 'public', content: `hi <@${id}> and @${id}` });
+  const sent = h.events.findLast(event => event.event === 'message:new').data;
+  assert.equal(sent.content, `hi <@${id}> and @Carol`);
+  assert.equal(db.prepare('SELECT content FROM messages WHERE id = ?').get(sent.id).content, `hi <@${id}> and @Carol`);
+});

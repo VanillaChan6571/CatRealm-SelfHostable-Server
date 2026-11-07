@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
 const { PERMISSIONS: P } = require('../src/permissions');
 const { normalizeBotCommands, commandPermissionBits, canUseBotCommand, resolveOptionValue } = require('../src/bots/core');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { loadModule, makeDatabase, getUser, makeSocketHarness } = require('./helpers');
 
 // vm-sandboxed modules build objects with foreign prototypes; compare plain copies.
@@ -69,9 +72,12 @@ function setupInteraction(t) {
   const { commands } = normalizeBotCommands([
     { name: 'mode', options: [{ name: 'mode', choices: [{ name: 'Normal', value: 'normal' }, { name: 'Unique', value: 'unique' }] }] },
     { name: 'give', options: [{ name: 'role', type: 'role' }] },
+    { name: 'setup-roles', type: 'message', label: 'Set up reaction roles' },
   ]);
+  db.exec("ALTER TABLE bot_commands ADD COLUMN command_type TEXT NOT NULL DEFAULT 'chat'");
   for (const cmd of commands) {
-    db.prepare('INSERT INTO bot_commands VALUES (?, ?, ?, ?, ?, NULL)').run(cmd.name, 'b1', cmd.name, '', JSON.stringify(cmd.options));
+    db.prepare('INSERT INTO bot_commands VALUES (?, ?, ?, ?, ?, NULL, ?)')
+      .run(cmd.name, 'b1', cmd.name, '', JSON.stringify(cmd.options), cmd.type);
   }
   const consent = { decision: 'allowed' };
   const h = makeSocketHarness(db, {
@@ -139,12 +145,16 @@ test('single-role add/remove keeps hierarchy and default-role rules', (t) => {
     INSERT INTO user_roles VALUES ('modUser', 'cats'), ('modUser', 'mod'), ('target', 'cats');
   `);
   const audits = [];
+  const serverEvents = [];
   const router = loadModule('src/routes/admin.js', {
     '../db': db,
     '../middleware/auth': { SERVER_MODE: 'standalone' },
     '../settings': { getSetting: () => null, setSetting() {} },
     '../permissions': { PERMISSIONS: P, hasPermission: () => true },
-    '../socket/handler': { emitServerInfoUpdate() {}, emitPermissionsChanged() {}, kickUserFromServer() {} },
+    '../socket/handler': {
+      emitServerInfoUpdate() {}, emitPermissionsChanged() {}, kickUserFromServer() {},
+      emitServerEvent: (event, data) => serverEvents.push({ event, data: plain(data) }),
+    },
     '../diagnosticCommands': {},
     '../theaterYouTubeCookies': {},
     '../webhooks': {},
@@ -161,6 +171,8 @@ test('single-role add/remove keeps hierarchy and default-role rules', (t) => {
   assert.equal(audits.length, 1);
   assert.equal(role('put', 'rebel').statusCode, 200); // idempotent
   assert.equal(audits.length, 1);
+  assert.deepEqual(serverEvents, [{ event: 'member:update',
+    data: { userId: 'target', roleIds: ['cats', 'rebel'], addedRoleIds: ['rebel'], removedRoleIds: [] } }]);
 
   assert.equal(role('put', 'admin').statusCode, 403); // above the actor
   assert.equal(role('put', 'missing').statusCode, 404);
@@ -171,10 +183,21 @@ test('single-role add/remove keeps hierarchy and default-role rules', (t) => {
   assert.equal(res.statusCode, 200);
   assert.deepEqual(plain(res.data.roleIds), ['cats']);
 
+  assert.equal(serverEvents.at(-1).event, 'member:update');
+  assert.deepEqual(serverEvents.at(-1).data.removedRoleIds, ['rebel']);
+
+
   res = call(router, 'get', '/users/:id', { user: mod, params: { id: 'target' } });
   assert.equal(res.data.id, 'target');
   assert.deepEqual(plain(res.data.roleIds), ['cats']);
   assert.equal(call(router, 'get', '/users/:id', { user: mod, params: { id: 'nobody' } }).statusCode, 404);
+
+  // Role and member lifecycle events.
+  const owner = { id: 'owner', is_owner: 1 };
+  call(router, 'delete', '/roles/:id', { user: owner, params: { id: 'rebel' } });
+  assert.deepEqual(serverEvents.at(-1), { event: 'role:delete', data: { roleId: 'rebel', name: 'Rebel' } });
+  call(router, 'post', '/users/:id/kick', { user: owner, params: { id: 'target' } });
+  assert.deepEqual(serverEvents.at(-1), { event: 'member:leave', data: { userId: 'target', reason: 'kicked' } });
 });
 
 test('single message fetch covers threads and hides others’ scheduled messages', (t) => {
@@ -283,4 +306,90 @@ test('option choices and role options are validated and resolved', (t) => {
   // Undeclared keys still pass through untouched.
   assert.equal(invoke({ command: 'pick', options: { extra: 'kept' } }).status, 'ok');
   assert.equal(created().options.extra, 'kept');
+});
+
+test('message actions need a visible target message', (t) => {
+  const normalized = normalizeBotCommands([{ name: 'setup-roles', type: 'message', options: [{ name: 'x' }] }]).commands[0];
+  assert.equal(normalized.type, 'message');
+  assert.equal(normalized.label, 'setup-roles'); // label defaults to the name
+  assert.deepEqual(normalized.options, []); // message actions take no options
+  assert.match(normalizeBotCommands([{ name: 'x', type: 'user' }]).error, /Invalid command type/);
+
+  const { invoke, created } = setupInteraction(t);
+  assert.equal(invoke({ command: 'setup-roles' }).status, 'invalid');
+  assert.equal(invoke({ command: 'setup-roles', targetMessageId: 'private-message' }).status, 'invalid');
+  assert.equal(invoke({ command: 'setup-roles', targetMessageId: 'public-message' }).status, 'ok');
+  assert.equal(created().type, 'message');
+  assert.equal(created().targetMessageId, 'public-message');
+  // Chat commands ignore targetMessageId.
+  invoke({ command: 'pick', targetMessageId: 'public-message' });
+  assert.equal(created().type, 'chat');
+  assert.equal(created().targetMessageId, null);
+});
+
+test('reactions can be cleared by moderators or by their own author', (t) => {
+  const db = makeDatabase();
+  t.after(() => db.close());
+  db.exec(`
+    CREATE TABLE message_reactions (message_id TEXT, user_id TEXT, emoji TEXT, created_at INTEGER DEFAULT 1);
+    INSERT INTO message_reactions (message_id, user_id, emoji) VALUES
+      ('public-message', 'alice', '👍'), ('public-message', 'bob', '👍'), ('public-message', 'bob', '🐱');
+  `);
+  const emitted = [];
+  const router = loadModule('src/routes/messages.js', {
+    '../db': db,
+    '../socket/handler': { emitToChannel: (room, event, data) => emitted.push({ room, event, data: plain(data) }) },
+    '../middleware/rateLimits': { searchLimiter: (_req, _res, next) => next() },
+    '../reactions': loadModule('src/reactions.js', { './db': db }),
+  });
+  const clear = (user, query) => call(router, 'delete', '/:channelId/:messageId/reactions', {
+    user, params: { channelId: 'public', messageId: 'public-message' }, query,
+  });
+
+  // Members can't clear other people's reactions...
+  assert.equal(clear(getUser(db), { emoji: '👍', userId: 'bob' }).statusCode, 403);
+  // ...but can always clear their own.
+  let res = clear(getUser(db), { emoji: '👍', userId: 'alice' });
+  assert.equal(res.data.removed, 1);
+  assert.deepEqual(plain(emitted.map((e) => e.event)), ['message:reaction:update', 'message:reaction:remove']);
+  assert.deepEqual(emitted[1].data, { messageId: 'public-message', channelId: 'public', threadId: null, userId: 'alice', emoji: '👍' });
+
+  db.prepare('UPDATE roles SET permissions = permissions + ? WHERE id = ?').run(P.MANAGE_MESSAGES, 'member');
+  res = clear(getUser(db), { emoji: '👍' }); // everyone's 👍
+  assert.equal(res.data.removed, 1);
+  assert.deepEqual(plain(res.data.reactions).map((r) => r.emoji), ['🐱']);
+  res = clear(getUser(db), {}); // everything left
+  assert.equal(res.data.removed, 1);
+  assert.equal(clear(getUser(db), {}).data.removed, 0);
+  assert.equal(call(router, 'delete', '/:channelId/:messageId/reactions', {
+    user: getUser(db), params: { channelId: 'public', messageId: 'private-message' }, query: {},
+  }).statusCode, 404);
+});
+
+test('bots/self reports roles, top role position and permissions', (t) => {
+  const db = makeDatabase();
+  t.after(() => db.close());
+  const uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'catrealm-bots-test-'));
+  t.after(() => fs.rmSync(uploads, { recursive: true, force: true }));
+  db.exec(`
+    INSERT INTO users (id, username, is_bot) VALUES ('botuser', 'Bot', 1);
+    INSERT INTO roles (id, name, permissions, position) VALUES ('helper', 'Helper', 0, 4);
+    INSERT INTO user_roles VALUES ('botuser', 'member'), ('botuser', 'helper');
+  `);
+  const router = loadModule('src/routes/bots.js', {
+    '../db': db,
+    '../lib/auditLog': { AUDIT_ACTIONS: {}, logAuditAction() {} },
+    '../messageCrypto': {},
+    '../settings': { getSetting: () => null },
+    '../bots/core': { serializeBot: (_db, bot) => ({ id: bot.id }) },
+    '../bots/scopes': {},
+    '../socket/handler': {},
+    '../bots/pluginManager': {},
+  }, { process: { env: { UPLOADS_DIR: uploads } } });
+  const bot = getUser(db, 'botuser');
+  const res = call(router, 'get', '/self', { user: bot, bot: { id: 'b1', user_id: 'botuser' } });
+  assert.equal(res.data.id, 'b1');
+  assert.deepEqual(plain(res.data.roleIds), ['helper', 'member']);
+  assert.equal(res.data.highestRolePosition, 4);
+  assert.equal(res.data.permissions, String(bot.permissions));
 });

@@ -3,7 +3,7 @@ const db = require('../db');
 const { SERVER_MODE } = require('../middleware/auth');
 const { getSetting, setSetting } = require('../settings');
 const { PERMISSIONS, hasPermission } = require('../permissions');
-const { emitServerInfoUpdate, emitPermissionsChanged, kickUserFromServer } = require('../socket/handler');
+const { emitServerInfoUpdate, emitPermissionsChanged, kickUserFromServer, emitServerEvent } = require('../socket/handler');
 const { randomUUID } = require('crypto');
 const multer = require('multer');
 const path = require('path');
@@ -473,6 +473,7 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
     details: { name: role.name, color: role.color, permissions: String(role.permissions) },
   });
   emitPermissionsChanged();
+  emitServerEvent('role:create', { role });
   res.status(201).json(role);
 });
 
@@ -512,7 +513,9 @@ router.put('/roles/reorder', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, 
     });
   }
   emitPermissionsChanged();
-  res.json(db.prepare('SELECT * FROM roles ORDER BY position DESC, name COLLATE NOCASE').all());
+  const roles = db.prepare('SELECT * FROM roles ORDER BY position DESC, name COLLATE NOCASE').all();
+  emitServerEvent('roles:reorder', { roles: roles.map((r) => ({ id: r.id, position: r.position })) });
+  res.json(roles);
 });
 
 // PUT /api/admin/roles/:id
@@ -581,6 +584,7 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   }
   if (role.is_default && role.name !== existing.name) emitServerInfoUpdate({ defaultRoleName: role.name });
   emitPermissionsChanged();
+  emitServerEvent('role:update', { role });
   res.json(role);
 });
 
@@ -597,6 +601,7 @@ router.delete('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, r
     details: { name: existing.name, permissions: String(existing.permissions) },
   });
   emitPermissionsChanged();
+  emitServerEvent('role:delete', { roleId: id, name: existing.name });
   res.json({ success: true });
 });
 
@@ -742,6 +747,9 @@ function setMemberRoles(req, res, id, roleIds) {
   }
 
   emitPermissionsChanged();
+  if (addedRoleIds.length > 0 || removedRoleIds.length > 0) {
+    emitServerEvent('member:update', { userId: id, roleIds: filtered, addedRoleIds, removedRoleIds });
+  }
   res.json({ id, roleIds: filtered });
 }
 
@@ -813,6 +821,7 @@ router.post('/users/:id/kick', requirePermission(PERMISSIONS.KICK_MEMBER), (req,
   });
 
   emitPermissionsChanged();
+  emitServerEvent('member:leave', { userId: id, reason: 'kicked' });
   kickUserFromServer(id, {
     reason: typeof reason === 'string' ? reason : '',
     message: `Meow! You were kicked from this server.`
@@ -848,6 +857,7 @@ router.post('/users/:id/ban', requirePermission(PERMISSIONS.BAN_MEMBER), (req, r
   });
 
   emitPermissionsChanged();
+  emitServerEvent('member:leave', { userId: id, reason: 'banned' });
   kickUserFromServer(id, {
     reason: typeof reason === 'string' ? reason : '',
     message: 'Meow! You were banned from this server.'

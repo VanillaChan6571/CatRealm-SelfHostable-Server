@@ -5,6 +5,7 @@ const db = require('../db');
 const pteroLog = require('../logger');
 const { createBotAccount, rotateBotToken, getBotByUserId, normalizeBotCommands, replaceBotCommands } = require('./core');
 const { normalizeRequestedScopes } = require('./scopes');
+const { npmSpawnSpec } = require('../lib/npmCommand');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
 // Primary plugin location is ./realm-plugins/<name>/ at the install root so
@@ -129,9 +130,12 @@ function installDependencies(state) {
   const { manifest } = state;
   state.status = 'installing';
   pteroLog(`[Bots] Installing dependencies for plugin "${manifest.name}" (npm install)...`);
-  const npm = spawn('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+  const spec = npmSpawnSpec(['install', '--omit=dev', '--no-audit', '--no-fund']);
+  const npm = spawn(spec.command, spec.args, {
     cwd: manifest.dir,
     stdio: ['ignore', 'pipe', 'pipe'],
+    shell: spec.shell,
+    windowsHide: true,
   });
   let stderr = '';
   npm.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });

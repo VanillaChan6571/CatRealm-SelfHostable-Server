@@ -27,6 +27,7 @@ const {
 const {
   disconnectUserSockets,
   emitBotCommandsUpdated,
+  emitServerEvent,
   updateOnlineUserAvatar,
   updateOnlineUserDisplayName,
 } = require('../socket/handler');
@@ -81,7 +82,17 @@ const botImageUpload = multer({
 
 // GET /api/bots/self — the bot introspects itself
 router.get('/self', requireBot, (req, res) => {
-  res.json(serializeBot(db, req.bot));
+  // Rank info so bots can pre-check role hierarchy instead of hitting 403s.
+  const roles = db.prepare(`
+    SELECT r.id, r.position FROM roles r JOIN user_roles ur ON ur.role_id = r.id
+    WHERE ur.user_id = ? ORDER BY r.position DESC
+  `).all(req.bot.user_id);
+  res.json({
+    ...serializeBot(db, req.bot),
+    roleIds: roles.map((r) => r.id),
+    highestRolePosition: roles[0]?.position ?? -1,
+    permissions: String(BigInt(Math.trunc(Number(req.user?.permissions) || 0))),
+  });
 });
 
 // PUT /api/bots/self/commands — full replace of the bot's command set
@@ -98,7 +109,8 @@ router.put('/self/commands', requireBot, (req, res) => {
 // GET /api/bots/commands — all commands of enabled bots (composer typeahead)
 router.get('/commands', (req, res) => {
   const rows = db.prepare(`
-    SELECT bc.name, bc.description, bc.options, bc.default_permission, b.id as bot_id, b.user_id as bot_user_id,
+    SELECT bc.name, bc.description, bc.options, bc.default_permission, bc.command_type, bc.label,
+      b.id as bot_id, b.user_id as bot_user_id,
       u.username, u.display_name, u.avatar
     FROM bot_commands bc
     JOIN bots b ON b.id = bc.bot_id
@@ -116,6 +128,8 @@ router.get('/commands', (req, res) => {
       botDisplayName: r.display_name || null,
       botAvatar: r.avatar || null,
       name: r.name,
+      type: r.command_type || 'chat',
+      label: r.label || null,
       description: r.description,
       options: parseJsonSafe(r.options, []),
       defaultPermission: r.default_permission || null,
@@ -397,6 +411,7 @@ router.delete('/:id', requirePermission(PERMISSIONS.MANAGE_BOTS), (req, res) => 
   });
   remove();
   emitBotCommandsUpdated();
+  emitServerEvent('member:leave', { userId: bot.user_id, reason: 'removed' });
   logAuditAction(AUDIT_ACTIONS.BOT_DELETE, req.user.id, {
     targetType: 'bot',
     targetId: bot.id,

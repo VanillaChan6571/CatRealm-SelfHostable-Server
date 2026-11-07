@@ -8,6 +8,7 @@ const { updateOnlineUserAvatar, updateOnlineUserStatus, updateOnlineUserDisplayN
 const { getSetting } = require('../settings');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 const { BOT_SCOPES, botHasScope } = require('../bots/scopes');
+const { isServerAvatarOverride } = require('../lib/defaultAvatar');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../data/uploads');
 const AVATAR_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -79,6 +80,7 @@ router.get('/me', (req, res) => {
 
   res.json({
     ...user,
+    avatar_override: req.user.accountType === 'central' && isServerAvatarOverride(user.avatar),
     display_name: displayName,
     pronouns: user.pronouns ?? null,
     serverJoinDate: user.created_at ?? null,
@@ -108,7 +110,7 @@ router.post('/me/avatar-url', (req, res) => {
 
   const existing = db.prepare('SELECT avatar FROM users WHERE id = ?').get(req.user.id);
   const existingAvatar = existing?.avatar || null;
-  const isLocalUpload = !!existingAvatar && existingAvatar.startsWith('/uploads/avatars/');
+  const isLocalUpload = isServerAvatarOverride(existingAvatar);
   if (isLocalUpload) {
     return res.status(409).json({ error: 'Server-specific avatar is set. Remove it to sync from central.' });
   }
@@ -155,7 +157,7 @@ router.post('/me/avatar', upload.single('avatar'), (req, res) => {
   db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(avatarPath, req.user.id);
   updateOnlineUserAvatar(req.user.id, avatarPath);
 
-  if (existing?.avatar && existing.avatar.startsWith('/uploads/avatars/')) {
+  if (isServerAvatarOverride(existing?.avatar)) {
     const oldPath = path.join(UPLOADS_DIR, existing.avatar.replace('/uploads/', ''));
     fs.unlink(oldPath, () => {});
   }
@@ -195,7 +197,7 @@ router.delete('/me/avatar', (req, res) => {
   db.prepare('UPDATE users SET avatar = NULL WHERE id = ?').run(req.user.id);
   updateOnlineUserAvatar(req.user.id, null);
 
-  if (existing?.avatar && existing.avatar.startsWith('/uploads/avatars/')) {
+  if (isServerAvatarOverride(existing?.avatar)) {
     const oldPath = path.join(UPLOADS_DIR, existing.avatar.replace('/uploads/', ''));
     fs.unlink(oldPath, () => {});
   }
@@ -561,7 +563,9 @@ const LOCKED_ALLOWED_DOMAINS = new Set([
   'linkedin.com',
   'snapchat.com',
   'pinterest.com',
-  'tumblr.com'
+  'tumblr.com',
+  'pixiv.net',
+  'testflight.apple.com'
 ]);
 const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 
