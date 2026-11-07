@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { PERMISSIONS: P } = require('../src/permissions');
 const { localUploadSuffix, resolveUploadForDeletion } = require('../src/lib/uploadPaths');
+const { decryptMessageContent } = require('../src/messageCrypto');
 const { loadModule, makeDatabase, getUser, makeSocketHarness } = require('./helpers');
 
 test('upload deletion rejects traversal, escaped paths, and symlinks outside uploads', (t) => {
@@ -256,5 +257,5 @@ test('message:send keeps <@userId> mention tokens and only rewrites bare @uuid',
   h.dispatch('message:send', { channelId: 'public', content: `hi <@${id}> and @${id}` });
   const sent = h.events.findLast(event => event.event === 'message:new').data;
   assert.equal(sent.content, `hi <@${id}> and @Carol`);
-  assert.equal(db.prepare('SELECT content FROM messages WHERE id = ?').get(sent.id).content, `hi <@${id}> and @Carol`);
+  assert.equal(decryptMessageContent(db.prepare('SELECT content FROM messages WHERE id = ?').get(sent.id).content), `hi <@${id}> and @Carol`);
 });

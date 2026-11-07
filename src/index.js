@@ -539,6 +539,7 @@ const welcomeRoutes = require('./routes/welcome');
 const theaterRoutes = require('./routes/theater');
 const mediaRoutes = require('./routes/media').router;
 const landingRoutes = require('./routes/landing');
+const safetyRoutes = require('./routes/safety');
 const { authenticateToken } = require('./middleware/auth');
 const setupSocketHandlers = require('./socket/handler');
 const { startWebhookWorker, stopWebhookWorker } = require('./webhooks');
@@ -563,7 +564,16 @@ app.use(express.json({
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../data/uploads');
 app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '7d', etag: true }));
 const UGC_IMAGES_DIR = process.env.UGC_IMAGES_DIR || path.join(__dirname, '../data/ugc/images');
-app.use('/ugc/images', express.static(UGC_IMAGES_DIR, { maxAge: '7d', etag: true }));
+app.use('/ugc/images', (req, res, next) => {
+  const { isUploadQuarantined } = require('./safety');
+  let decodedPath;
+  try { decodedPath = decodeURIComponent(req.path); } catch { return res.status(400).json({ error: 'Invalid media path' }); }
+  if (isUploadQuarantined(`/ugc/images${decodedPath}`)) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(410).json({ error: 'This media is unavailable while a child-safety report is reviewed.' });
+  }
+  next();
+}, express.static(UGC_IMAGES_DIR, { maxAge: '7d', etag: true }));
 const UGC_SERVER_DIR = process.env.UGC_SERVER_DIR || path.join(__dirname, '../data/ugc/server');
 if (!fs.existsSync(UGC_SERVER_DIR)) fs.mkdirSync(UGC_SERVER_DIR, { recursive: true });
 app.use('/ugc/server', express.static(UGC_SERVER_DIR, { maxAge: '7d', etag: true }));
@@ -606,6 +616,7 @@ app.use('/api/server',   serverRoutes); // public info endpoint
 app.use('/api/profile',  authenticateToken, profileRoutes);
 app.use('/api/admin',    authenticateToken, adminRoutes);
 app.use('/api/moderation', authenticateToken, moderationRoutes);
+app.use('/api/safety', authenticateToken, safetyRoutes);
 app.use('/api/uploads',  authenticateToken, uploadRoutes);
 app.use('/api/categories', authenticateToken, categoryRoutes);
 app.use('/api/threads', authenticateToken, threadRoutes);

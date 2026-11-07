@@ -1434,6 +1434,12 @@ function setupSocketHandlers(io) {
       ))) return fail('Invalid attachment URL');
       const hasText = typeof content === 'string' && content.trim().length > 0;
       const hasAttachment = attachmentsArray.length > 0;
+      let safetyRestricted = false;
+      try {
+        safetyRestricted = !!db.prepare(`SELECT 1 FROM safety_restrictions WHERE subject_user_id = ? AND status = 'active' AND expires_at > unixepoch()`).get(user.id);
+      } catch {}
+      if (safetyRestricted && hasAttachment) return fail('Media uploads are temporarily restricted while a child-safety report is reviewed.');
+      if (safetyRestricted && /https?:\/\/[^\s<>"'`]+/i.test(String(content || ''))) return fail('Links are temporarily restricted while a child-safety report is reviewed.');
       if (!channelId || (!hasText && !hasAttachment)) return reply({ status: 'invalid', error: 'Content required' });
       if (content && content.length > 2000) return fail('Message too long (max 2000 chars)');
       if (!hasChannelPermission(user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {

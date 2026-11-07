@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { decryptMessageRows } = require('../messageCrypto');
+const { attachSafetyArtifacts } = require('../safety');
 const { attachReactionsToMessages } = require('../reactions');
 const { emitToChannel } = require('../socket/handler');
 
@@ -299,7 +300,7 @@ router.get('/:id/messages', (req, res) => {
 
   messages = attachReactionsToMessages(messages);
 
-  res.json(messages.reverse());
+  res.json(attachSafetyArtifacts(messages.reverse(), req.user.id));
 });
 
 // POST /api/threads/:id/archive - Manually archive thread

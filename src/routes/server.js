@@ -71,6 +71,11 @@ router.get('/', (req, res) => {
     secureMode,
     welcomeBoardEnabled,
     mediaMaxMb,
+    capabilities: {
+      childSafetyReports: 1,
+      childSafetyQuarantine: 1,
+      childSafetyReviewQueue: 1,
+    },
     version: packageVersion,
     gitHash: gitHash,
     buildInfo: `v${packageVersion} (${gitHash})`

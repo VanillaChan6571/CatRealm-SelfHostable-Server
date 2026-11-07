@@ -6,6 +6,7 @@ const { decryptMessageRows, isSecureModeEnabled, encryptMessageContent } = requi
 const { searchLimiter } = require('../middleware/rateLimits');
 const { attachReactionsToMessages, normalizeReactionToken, removeMessageReactions } = require('../reactions');
 const { emitToChannel } = require('../socket/handler');
+const { attachSafetyArtifacts } = require('../safety');
 
 function attachNsfwTags(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
@@ -123,7 +124,7 @@ router.get('/:channelId', (req, res) => {
       ORDER BY m.created_at DESC LIMIT ?
     `).all(channelId, req.user.id, limit);
 
-  res.json(normalizeMessageRows(messages).reverse()); // Return oldest-first
+  res.json(attachSafetyArtifacts(normalizeMessageRows(messages).reverse(), req.user.id)); // Return oldest-first
 });
 
 // POST /api/messages/forum - Create a forum post body message, returns it with id
@@ -407,7 +408,7 @@ router.get('/:channelId/:messageId', (req, res) => {
     WHERE m.id = ? AND m.channel_id = ? AND (m.scheduled_at IS NULL OR m.user_id = ?)
   `).get(messageId, channelId, req.user.id);
   if (!row) return res.status(404).json({ error: 'Message not found' });
-  res.json(normalizeMessageRows([row])[0]);
+  res.json(attachSafetyArtifacts(normalizeMessageRows([row]), req.user.id)[0]);
 });
 
 // DELETE /api/messages/:channelId/:messageId/reactions?emoji=&userId=

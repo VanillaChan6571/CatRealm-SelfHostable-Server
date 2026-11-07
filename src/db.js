@@ -1127,6 +1127,68 @@ db.exec(`
     used INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
   );
+
+  CREATE TABLE IF NOT EXISTS safety_reports (
+    id TEXT PRIMARY KEY,
+    reporter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subject_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    artifact_kind TEXT NOT NULL CHECK (artifact_kind IN ('image', 'link')),
+    artifact_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_encrypted TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'dismissed', 'escalated')),
+    reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at INTEGER,
+    review_note_encrypted TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(reporter_user_id, channel_id, message_id, artifact_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_safety_reports_queue ON safety_reports(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_safety_reports_subject ON safety_reports(subject_user_id, status, created_at);
+
+  CREATE TABLE IF NOT EXISTS safety_report_events (
+    id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL REFERENCES safety_reports(id) ON DELETE CASCADE,
+    actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    metadata_encrypted TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  CREATE INDEX IF NOT EXISTS idx_safety_report_events_report ON safety_report_events(report_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS safety_artifact_visibility (
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    artifact_key TEXT NOT NULL,
+    viewer_user_id TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'reported' CHECK (state IN ('reported', 'quarantined', 'removed')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY(channel_id, message_id, artifact_key, viewer_user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS safety_restrictions (
+    subject_user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'lifted')),
+    reason TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    lifted_at INTEGER,
+    lifted_by TEXT REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS safety_quarantined_uploads (
+    upload_path TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL REFERENCES safety_reports(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    artifact_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    cleared_at INTEGER
+  );
 `);
 
 const ownerExists = db.prepare(`SELECT id FROM users WHERE role = 'owner' OR is_owner = 1`).get();

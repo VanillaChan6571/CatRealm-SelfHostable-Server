@@ -6,6 +6,13 @@ const multer = require('multer');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
 const { getSetting } = require('../settings');
+
+function isMediaLinkRestricted(userId) {
+  if (typeof db.prepare !== 'function') return false;
+  try {
+    return !!db.prepare(`SELECT 1 FROM safety_restrictions WHERE subject_user_id = ? AND status = 'active' AND expires_at > unixepoch()`).get(userId);
+  } catch { return false; }
+}
 const {
   classifyChatUploadForCompression,
   compressChatImageInline,
@@ -149,7 +156,10 @@ const upload = multer({
 });
 
 // POST /api/uploads/chat
-router.post('/chat', upload.single('file'), async (req, res) => {
+router.post('/chat', (req, res, next) => {
+  if (isMediaLinkRestricted(req.user.id)) return res.status(403).json({ code: 'SAFETY_MEDIA_RESTRICTED', error: 'Media uploads are temporarily restricted while a child-safety report is reviewed.' });
+  next();
+}, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'File required' });
 
   const cleanupUploadedFile = () => {
