@@ -7,6 +7,35 @@ const { initHostUdpBufferLimit, getHostUdpBufferWarningLines } = require('./lib/
 const repoRoot = path.join(__dirname, '..');
 const dataDir = path.join(repoRoot, 'data');
 
+const logDir = path.join(dataDir, 'logs');
+const MAX_CHILD_LOG_BYTES = 10 * 1024 * 1024;
+
+// LiveKit logs every join (including the full SDP offer) at INFO, which buries
+// the realm console. Send a child's output to data/logs/<name>.log instead,
+// keeping one rotated copy (<name>.log.1) so the file cannot grow unbounded.
+function pipeChildLog(child, name) {
+  const file = path.join(logDir, `${name}.log`);
+  fs.mkdirSync(logDir, { recursive: true });
+  let size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+  let stream = fs.createWriteStream(file, { flags: 'a' });
+  stream.on('error', () => {});
+  const write = (chunk) => {
+    if (size + chunk.length > MAX_CHILD_LOG_BYTES) {
+      stream.end();
+      try { fs.renameSync(file, `${file}.1`); } catch { /* keep appending */ }
+      stream = fs.createWriteStream(file, { flags: 'a' });
+      stream.on('error', () => {});
+      size = 0;
+    }
+    size += chunk.length;
+    stream.write(chunk);
+  };
+  child.stdout.on('data', write);
+  child.stderr.on('data', write);
+  child.on('close', () => stream.end());
+  return file;
+}
+
 let livekitChild = null;
 let redisChild = null;
 let ingressChild = null;
@@ -293,9 +322,10 @@ function startBundledIngress({ apiKey, apiSecret, internalUrl, redisAddress, whi
   log(`[CatRealm] LiveKit Ingress WHIP UDP port: ${ingressUdpPort}`);
   ingressChild = spawn(ingressCommand, ['--config', configPath], {
     cwd: repoRoot,
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: process.env,
   });
+  log(`[CatRealm] LiveKit Ingress output: ${path.relative(repoRoot, pipeChildLog(ingressChild, 'livekit-ingress'))}`);
 
   ingressChild.on('spawn', () => {
     log(`[CatRealm] Bundled LiveKit Ingress process started pid=${ingressChild.pid}`);
@@ -435,9 +465,10 @@ function startBundledLiveKit(options = {}) {
 
   livekitChild = spawn('livekit-server', ['--config', configPath], {
     cwd: repoRoot,
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: process.env,
   });
+  log(`[CatRealm] LiveKit output: ${path.relative(repoRoot, pipeChildLog(livekitChild, 'livekit'))}`);
 
   livekitChild.on('spawn', () => {
     log(`[CatRealm] Bundled LiveKit process started pid=${livekitChild.pid}`);
@@ -450,7 +481,7 @@ function startBundledLiveKit(options = {}) {
   livekitChild.on('exit', (code, signal) => {
     livekitChild = null;
     if (code === 0 || signal) return;
-    error(`[CatRealm] Bundled LiveKit exited with code ${code}.`);
+    error(`[CatRealm] Bundled LiveKit exited with code ${code}. See data/logs/livekit.log.`);
   });
 
   if (ingressEnabled) {
