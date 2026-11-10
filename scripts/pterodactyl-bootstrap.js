@@ -21,9 +21,21 @@ function needsInstall() {
   return !fs.existsSync(nodeModulesDir) || !fs.existsSync(betterSqliteBinary);
 }
 
-function installDependencies() {
-  console.log('[CatRealm] Dependencies missing — running npm install...');
-  const result = spawnSync('npm', ['install', '--production'], {
+// A binary built for another Node major (e.g. the runtime image moved from
+// Node 20 to 24) still exists on disk but cannot load. Probe in a child
+// process: on musl an in-process dlopen succeeds lazily and only fails later.
+function nativeModuleStale() {
+  const probe = spawnSync(
+    process.execPath,
+    ['-e', "new (require('better-sqlite3'))(':memory:').close()"],
+    { cwd: repoRoot, stdio: 'ignore' }
+  );
+  return probe.status !== 0;
+}
+
+function runNpm(args, reason) {
+  console.log(`[CatRealm] ${reason} — running npm ${args.join(' ')}...`);
+  const result = spawnSync('npm', args, {
     cwd: repoRoot,
     stdio: 'inherit',
     env: {
@@ -38,7 +50,9 @@ function installDependencies() {
 }
 
 if (needsInstall()) {
-  installDependencies();
+  runNpm(['install', '--omit=dev'], 'Dependencies missing');
+} else if (nativeModuleStale()) {
+  runNpm(['rebuild', 'better-sqlite3'], `Native modules do not match Node ${process.version}`);
 }
 
 // Pterodactyl passes every egg variable into the container, blank ones as "".
@@ -48,7 +62,7 @@ for (const [key, value] of Object.entries(process.env)) {
   if (value === '') delete process.env[key];
 }
 
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const { startBundledLiveKit } = require(path.join(repoRoot, 'src', 'livekitRuntime'));
 

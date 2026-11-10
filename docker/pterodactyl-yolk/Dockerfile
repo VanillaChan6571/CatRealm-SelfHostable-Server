@@ -1,5 +1,8 @@
-ARG BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
-ARG LIVEKIT_VERSION=1.13.1
+# Built straight from the official Node image: upstream pterodactyl/yolks stops
+# at nodejs_20, so the user, packages and entrypoint it provided live here now.
+ARG NODE_VERSION=24.22.2
+ARG BASE_IMAGE=node:${NODE_VERSION}-alpine
+ARG LIVEKIT_VERSION=1.13.11
 ARG LIVEKIT_INGRESS_VERSION=1.5.0
 FROM ${BASE_IMAGE}
 
@@ -30,10 +33,15 @@ RUN set -eux; \
       gstreamer \
       gstreamer-dev \
       make \
+      openssl \
       pkgconf \
       python3 \
       redis \
-      tini; \
+      sqlite \
+      tar \
+      tini \
+      tzdata; \
+    id container >/dev/null 2>&1 || adduser -D -h /home/container container; \
   elif command -v apt-get >/dev/null 2>&1; then \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -55,9 +63,14 @@ RUN set -eux; \
       libgstreamer1.0-dev \
       make \
       pkg-config \
+      openssl \
       python3 \
       redis-server \
-      tini; \
+      sqlite3 \
+      tini \
+      tzdata; \
+    id container >/dev/null 2>&1 || useradd -m -d /home/container container; \
+    ln -sf /usr/bin/tini /sbin/tini; \
     rm -rf /var/lib/apt/lists/*; \
   else \
     echo "Unsupported base image: no apk or apt-get available"; \
@@ -84,9 +97,15 @@ RUN set -eux; \
   /usr/local/bin/livekit-server --version; \
   /usr/local/bin/ingress --help >/dev/null; \
   redis-server --version; \
+  node --version; \
   ffmpeg -version | head -n 1
 
+# Pterodactyl entrypoint (vendored from pterodactyl/yolks, MIT).
+COPY docker/pterodactyl-yolk/entrypoint.sh /entrypoint.sh
+
 USER container
+ENV USER=container HOME=/home/container
+WORKDIR /home/container
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["/bin/ash", "/entrypoint.sh"]
+CMD ["/bin/sh", "/entrypoint.sh"]

@@ -14,6 +14,7 @@ on:
     paths:
       - ".github/workflows/publish-pterodactyl-yolk.yml"
       - "docker/pterodactyl-yolk/Dockerfile"
+      - "docker/pterodactyl-yolk/entrypoint.sh"
       - "pterodactyl-egg/egg-cat-realm-server.json"
       - "pterodactyl-egg/EGG_REPOSITORY.md"
       - "docs/PTERODACTYL_RUNTIME_IMAGE.md"
@@ -25,6 +26,16 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Current runtime: official Node image, pinned patch release.
+          - node: "24"
+            base: node:24.22.2-alpine
+          # Legacy tag kept for servers that have not switched images yet.
+          - node: "20"
+            base: ghcr.io/pterodactyl/yolks:nodejs_20
 
     steps:
       - name: Checkout
@@ -47,7 +58,7 @@ jobs:
           file: docker/pterodactyl-yolk/Dockerfile
           push: true
           build-args: |
-            BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20
+            BASE_IMAGE=${{ matrix.base }}
           tags: |
-            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_20
-            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_20-livekit
+            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_${{ matrix.node }}
+            ghcr.io/${{ env.GHCR_OWNER }}/catrealm-selfhostable-server-yolk:nodejs_${{ matrix.node }}-livekit

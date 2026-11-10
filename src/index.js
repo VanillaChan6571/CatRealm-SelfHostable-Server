@@ -9,7 +9,7 @@ const { spawnSync } = require('child_process');
 const { ensureDependenciesInstalled } = require('./lib/dependencyInstall');
 
 ensureDependenciesInstalled(path.join(__dirname, '..'));
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const startupEnvPath = String(process.env.CATREALM_REALM_ENV_FILE || '').trim()
   || path.join(__dirname, '../.env');
 try {

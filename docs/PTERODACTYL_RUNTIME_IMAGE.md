@@ -16,7 +16,10 @@ The Dockerfile lives at:
 
 The GitHub Actions workflow publishes these tags to GHCR:
 
-- `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_20`
+- `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_24` (recommended, Node.js 24 LTS)
+- `ghcr.io/vanillachan6571/catrealm-selfhostable-server-yolk:nodejs_20` (legacy, for servers that have not switched yet)
+
+The Node 24 image builds directly on the official `node:24-alpine` image, because the upstream Pterodactyl yolks stop at Node 20.
 
 ## Why this exists
 
@@ -75,7 +78,8 @@ To move an existing server:
 1. Update or re-import the CatRealm egg.
 2. Change the server Docker image to one of the CatRealm runtime tags above.
 3. Rebuild or reinstall the server so Pterodactyl recreates the container on that image.
-4. Start the server and confirm startup logs show `yt-dlp`, `ffmpeg`, and `livekit-server` detected.
+4. If the server is moving from Node 20 to Node 24, no manual step is needed: on first start the bootstrap detects that `better-sqlite3` was built for the old Node version and rebuilds it.
+5. Start the server and confirm startup logs show `yt-dlp`, `ffmpeg`, and `livekit-server` detected.
 
 ## Manual build
 
@@ -84,8 +88,8 @@ If you want to publish your own image instead of using GHCR:
 ```bash
 docker build \
   -f docker/pterodactyl-yolk/Dockerfile \
-  --build-arg BASE_IMAGE=ghcr.io/pterodactyl/yolks:nodejs_20 \
-  -t your-registry/catrealm-selfhostable-server-yolk:nodejs_20 \
+  --build-arg NODE_VERSION=24.22.2 \
+  -t your-registry/catrealm-selfhostable-server-yolk:nodejs_24 \
   .
 ```
 

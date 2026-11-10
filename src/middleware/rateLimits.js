@@ -1,4 +1,4 @@
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 
 // Buckets keyed by authenticated user when possible so users behind a shared
@@ -17,7 +17,9 @@ function getAuthenticatedRateLimitKey(req) {
       // Invalid token: fall back to IP bucket.
     }
   }
-  return `ip:${req.ip || req.connection?.remoteAddress || 'unknown'}`;
+  // ipKeyGenerator buckets IPv6 by /56 so one client can't rotate addresses.
+  const ip = req.ip || req.connection?.remoteAddress;
+  return `ip:${ip ? ipKeyGenerator(ip) : 'unknown'}`;
 }
 
 // General API limiter — generous; protects against unauthenticated floods and
