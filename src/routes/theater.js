@@ -520,9 +520,10 @@ router.post('/:channelId/queue', async (req, res) => {
 
   // Domain allowlist — YouTube bypasses it so yt-dlp can handle it without
   // requiring admins to explicitly allow youtube.com
+  const allowlist = db.prepare('SELECT domain FROM theater_domain_allowlist WHERE channel_id = ?').all(channel.id).map((r) => r.domain);
+  const urlAllowed = (candidate) => isDomainAllowed(candidate, allowlist);
   if (!youtubeId) {
-    const allowlist = db.prepare('SELECT domain FROM theater_domain_allowlist WHERE channel_id = ?').all(channel.id).map((r) => r.domain);
-    if (!isDomainAllowed(url, allowlist)) {
+    if (!urlAllowed(url)) {
       pteroLog(`[Theater] Queue add blocked — domain not in allowlist: ${parsedUrl.hostname} (channel ${channel.id})`);
       return res.status(403).json({ error: 'Domain not in allowlist' });
     }
@@ -606,7 +607,7 @@ router.post('/:channelId/queue', async (req, res) => {
         pteroLog(`[Theater] Download progress for ${itemId}: ${progress}%`);
         lastLoggedProgress = progress;
       }
-    }).then(({ filename, durationSeconds }) => {
+    }, urlAllowed).then(({ filename, durationSeconds }) => {
       pteroLog(`[Theater] Download complete for ${itemId}: ${path.basename(filename)}${durationSeconds ? ` (${durationSeconds}s)` : ''}`);
       db.prepare(`
         UPDATE theater_queue
@@ -656,7 +657,7 @@ router.post('/:channelId/queue', async (req, res) => {
     broadcastTheaterQueueUpdate(channel.id);
     downloadVideo(url, channel.id, (progress) => {
       db.prepare('UPDATE theater_queue SET cache_progress = ? WHERE id = ?').run(progress, itemId);
-    }).then(({ filename, durationSeconds }) => {
+    }, urlAllowed).then(({ filename, durationSeconds }) => {
       pteroLog(`[Theater] Download complete (no metadata) for ${itemId}: ${path.basename(filename)}`);
       db.prepare(`
         UPDATE theater_queue

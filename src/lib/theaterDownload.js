@@ -37,8 +37,10 @@ function isDirectVideoUrl(url) {
   }
 }
 
+// Deny by default: the realm fetches these URLs itself, so an empty list must
+// not mean "any host" (that let members reach the realm's own network).
 function isDomainAllowed(url, allowlist) {
-  if (!allowlist || allowlist.length === 0) return true;
+  if (!allowlist || allowlist.length === 0) return false;
   try {
     const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
     return allowlist.some((d) => {
@@ -120,14 +122,15 @@ function extractFilenameFromUrl(url) {
   }
 }
 
-async function downloadVideo(url, channelId, onProgress) {
+// isAllowed re-checks every redirect hop of a direct download.
+async function downloadVideo(url, channelId, onProgress, isAllowed) {
   const dir = ensureCacheDir(channelId);
   const fileId = randomUUID();
 
   if (isYtDlpAvailable() && !isDirectVideoUrl(url)) {
     return downloadWithYtDlp(url, dir, fileId, onProgress);
   }
-  return downloadDirect(url, dir, fileId, onProgress);
+  return downloadDirect(url, dir, fileId, onProgress, isAllowed);
 }
 
 function downloadWithYtDlp(url, dir, fileId, onProgress) {
@@ -215,10 +218,16 @@ function downloadWithYtDlp(url, dir, fileId, onProgress) {
   });
 }
 
-function downloadDirect(url, dir, fileId, onProgress) {
+const MAX_DIRECT_REDIRECTS = 5;
+
+function downloadDirect(url, dir, fileId, onProgress, isAllowed = () => false, depth = 0) {
   pteroLog(`[Theater] Direct download start: ${url}`);
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
+    if (!['http:', 'https:'].includes(urlObj.protocol) || !isAllowed(url)) {
+      pteroLog(`[Theater] Direct download blocked — domain not in allowlist: ${urlObj.hostname}`);
+      return reject(new Error('Domain not in allowlist'));
+    }
     const extMatch = urlObj.pathname.match(/\.([a-z0-9]+)(\?|$)/i);
     const ext = extMatch ? extMatch[1].toLowerCase() : 'mp4';
     const filename = path.join(dir, `${fileId}.${ext}`);
@@ -229,8 +238,12 @@ function downloadDirect(url, dir, fileId, onProgress) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
         fs.unlink(filename, () => {});
-        pteroLog(`[Theater] Direct download redirect → ${res.headers.location}`);
-        return downloadDirect(res.headers.location, dir, fileId, onProgress)
+        res.resume();
+        if (depth >= MAX_DIRECT_REDIRECTS) return reject(new Error('Too many redirects'));
+        let nextUrl;
+        try { nextUrl = new URL(res.headers.location, url).href; } catch { return reject(new Error('Invalid redirect')); }
+        pteroLog(`[Theater] Direct download redirect → ${nextUrl}`);
+        return downloadDirect(nextUrl, dir, fileId, onProgress, isAllowed, depth + 1)
           .then(resolve)
           .catch(reject);
       }
