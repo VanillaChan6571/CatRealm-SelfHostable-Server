@@ -1210,4 +1210,7 @@ if (unmappedPermissionCount) {
   pteroLog(`[CatRealm] ${unmappedPermissionCount} legacy permission values contain unmapped bits; retained in the database and excluded from grants`);
 }
 
+// Tracker and Board channels; needs the named permission tables above.
+require('./channelItems').migrate(db);
+
 module.exports = db;

@@ -462,6 +462,8 @@ function filterChannelsForUser(user, channels) {
 }
 
 function canSendToChannel(user, channelId, channelType, threadId) {
+  // Tracker and board channels hold issues/cards, not chat messages.
+  if (channelType === 'tracker' || channelType === 'board') return false;
   if (threadId) return hasChannelPermission(user, channelId, PERMISSIONS.SEND_MESSAGES_IN_THREADS, db);
   if (channelType === 'forum') return hasChannelPermission(user, channelId, PERMISSIONS.SEND_MESSAGES_IN_POSTS, db);
   return hasChannelPermission(user, channelId, PERMISSIONS.SEND_MESSAGES, db);

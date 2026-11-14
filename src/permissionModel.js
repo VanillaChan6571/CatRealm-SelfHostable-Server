@@ -30,7 +30,12 @@ const ALIASES = Object.freeze({
 });
 
 // Add future permissions here without assigning another JavaScript number bit.
-const NAMED_ONLY_KEYS = Object.freeze([]);
+const NAMED_ONLY_KEYS = Object.freeze([
+  // Tracker channels
+  'CREATE_ISSUES', 'COMMENT_ON_ISSUES', 'ASSIGN_ISSUES', 'MANAGE_ISSUES',
+  // Board channels
+  'CREATE_CARDS', 'COMMENT_ON_CARDS', 'ASSIGN_CARDS', 'MANAGE_BOARDS',
+]);
 const KEYS = Object.freeze([...Object.keys(LEGACY_POSITIONS), ...NAMED_ONLY_KEYS]);
 const KEY_SET = new Set(KEYS);
 const LEGACY_MASK = KEYS.reduce((bits, key) => LEGACY_POSITIONS[key] === undefined
