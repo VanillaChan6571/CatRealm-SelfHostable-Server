@@ -8,9 +8,11 @@ const {
   PERMISSIONS,
   ALL_PERMISSIONS,
   computePermissionsForUser,
+  computePermissionKeysForUser,
   hasPermission,
   hasChannelPermission,
   computeUserChannelPermissions,
+  computeUserChannelPermissionKeys,
 } = require('../permissions');
 const { applyRoleViewToUser } = require('../viewAsRole');
 const { isBotToken, resolveBotToken, canUseBotCommand, resolveOptionValue } = require('../bots/core');
@@ -356,6 +358,7 @@ function emitPermissionsChanged() {
       ...dbUser,
       is_owner: dbUser.is_owner ? 1 : 0,
       permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
+      permission_keys: computePermissionKeysForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
     };
     const { user, session } = applyRoleViewToUser(authUser, db);
     socket.authUser = authUser;
@@ -444,6 +447,7 @@ function filterChannelsForUser(user, channels) {
       visibleChannels.push({
         ...ch,
         effective_permissions: computeUserChannelPermissions(user, ch.id, db),
+        effective_permission_keys: computeUserChannelPermissionKeys(user, ch.id, db),
       });
     }
     return visibleChannels;
@@ -453,6 +457,7 @@ function filterChannelsForUser(user, channels) {
     .map((ch) => ({
       ...ch,
       effective_permissions: computeUserChannelPermissions(user, ch.id, db),
+      effective_permission_keys: computeUserChannelPermissionKeys(user, ch.id, db),
     }));
 }
 
@@ -487,6 +492,7 @@ function setupSocketHandlers(io) {
           is_bot: 1,
           account_type: 'bot',
           permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
+          permission_keys: computePermissionKeysForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
         };
         socket.authUser = authUser;
         socket.user = authUser;
@@ -511,6 +517,7 @@ function setupSocketHandlers(io) {
         role: dbUser.role,
         is_owner: dbUser.is_owner ? 1 : 0,
         permissions: computePermissionsForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
+        permission_keys: computePermissionKeysForUser(dbUser.id, dbUser.role, dbUser.is_owner, db),
       };
       const { user, session } = applyRoleViewToUser(authUser, db);
       socket.authUser = authUser;
@@ -1847,6 +1854,7 @@ function setupSocketHandlers(io) {
         username: authUser.username,
         isOwner: !!user.is_owner,
         permissions: String(BigInt(Math.trunc(Number(user.permissions) || 0))),
+        permissionKeys: user.permission_keys || [],
         roleIds: db.prepare('SELECT role_id FROM user_roles WHERE user_id = ?').all(user.id).map((r) => r.role_id),
       };
       const invokerRow = db.prepare(`

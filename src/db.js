@@ -901,13 +901,6 @@ try {
   // Ignore if index creation fails in legacy environments.
 }
 
-// Ensure Admin role has all permissions
-const adminRole = db.prepare('SELECT id, permissions FROM roles WHERE name = ?').get('Admin');
-if (adminRole && (adminRole.permissions & ALL_PERMISSIONS) !== ALL_PERMISSIONS) {
-  db.prepare('UPDATE roles SET permissions = ? WHERE id = ?').run(ALL_PERMISSIONS, adminRole.id);
-  pteroLog('[CatRealm] Updated Admin role permissions');
-}
-
 // Every member holds the default role, so it must rank lowest or it would win
 // name color and role hierarchy for everyone. Renumber if it sits at/above any role.
 {
@@ -1207,6 +1200,14 @@ if (!ownerExists && !tokenRow) {
   pteroLog(`║  ${tokenRow.token}  ║`);
   pteroLog('║  Register an account, then use this token to claim owner ║');
   pteroLog('╚══════════════════════════════════════════════════════════╝');
+}
+
+// Backfill named grants and overwrite rules once, atomically. A failed decode
+// aborts startup rather than silently changing access to a realm.
+require('./permissionModel').migrate(db);
+const unmappedPermissionCount = db.prepare('SELECT COUNT(*) AS count FROM permission_migration_unmapped').get().count;
+if (unmappedPermissionCount) {
+  pteroLog(`[CatRealm] ${unmappedPermissionCount} legacy permission values contain unmapped bits; retained in the database and excluded from grants`);
 }
 
 module.exports = db;

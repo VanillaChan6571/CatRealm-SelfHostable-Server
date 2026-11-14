@@ -1,4 +1,5 @@
 const bit = (position) => 2 ** position;
+const permissionModel = require('./permissionModel');
 
 const USER_GENERAL = {
   VIEW_CHANNELS: bit(0),
@@ -95,82 +96,64 @@ PERMISSIONS.CREATE_THREADS = USER_GENERAL.CREATE_PUBLIC_THREADS;
 PERMISSIONS.CREATE_INVITES = ADMIN_GENERAL.CREATE_INVITE;
 PERMISSIONS.USE_EXTERNAL_EMOJIS = PERMISSIONS.USE_EXTERNAL_EMOTES;
 
-function toPermissionBits(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0n;
-  const normalized = Math.trunc(value);
-  // Legacy signed-32 values should be interpreted as unsigned masks.
-  if (normalized < 0) return BigInt(normalized >>> 0);
-  return BigInt(normalized);
+const ALL_PERMISSIONS = permissionModel.encodeLegacy(permissionModel.KEYS);
+
+function computePermissionKeysForUser(userId, role, isOwner, db) {
+  if (isOwner || role === 'owner' || role === 'admin') return [...permissionModel.KEYS];
+  let keys;
+  try {
+    const rows = db.prepare(`
+      SELECT DISTINCT g.permission_key FROM role_permission_grants g
+      JOIN user_roles ur ON ur.role_id = g.role_id WHERE ur.user_id = ?
+    `).all(userId);
+    keys = permissionModel.normalizeKeys(rows.map((r) => r.permission_key));
+  } catch (error) {
+    if (!/no such table: role_permission_grants/.test(error.message)) throw error;
+    const roles = db.prepare(`SELECT r.permissions FROM roles r
+      JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ?`).all(userId);
+    keys = permissionModel.normalizeKeys(roles.flatMap((r) => permissionModel.decodeLegacy(r.permissions || 0)));
+  }
+  return keys.includes('ADMINISTRATOR') ? [...permissionModel.KEYS] : keys;
 }
 
-const ALL_PERMISSIONS = Number(
-  Object.values(FLAT_PERMISSIONS).reduce((acc, val) => (acc | toPermissionBits(val)), 0n)
-);
-
 function computePermissionsForUser(userId, role, isOwner, db) {
-  if (isOwner || role === 'owner' || role === 'admin') return ALL_PERMISSIONS;
-
-  const roleRows = db.prepare(`
-    SELECT r.permissions FROM roles r
-    JOIN user_roles ur ON ur.role_id = r.id
-    WHERE ur.user_id = ?
-  `).all(userId);
-
-  let permissions = 0n;
-  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
-
-  for (const r of roleRows) {
-    permissions |= toPermissionBits(r.permissions);
-    // If user has ADMINISTRATOR permission, grant all permissions
-    if ((permissions & administratorMask) === administratorMask) {
-      return ALL_PERMISSIONS;
-    }
-  }
-
-  return Number(permissions);
+  return permissionModel.encodeLegacy(computePermissionKeysForUser(userId, role, isOwner, db));
 }
 
 function hasPermission(user, permission) {
   if (!user) return false;
   if (user.is_owner || user.role === 'owner') return true;
-  const userBits = toPermissionBits(user.permissions);
-  const permissionBits = toPermissionBits(permission);
-  // Check for ADMINISTRATOR permission which grants all
-  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
-  if ((userBits & administratorMask) === administratorMask) return true;
-  return (userBits & permissionBits) === permissionBits;
+  try {
+    const keys = Array.isArray(user.permission_keys)
+      ? permissionModel.normalizeKeys(user.permission_keys)
+      : permissionModel.decodeLegacy(user.permissions || 0);
+    const required = permissionModel.requiredKeys(permission);
+    return keys.includes('ADMINISTRATOR') || required.every((key) => keys.includes(key));
+  } catch {
+    return false;
+  }
 }
 
-function applyPermissionOverwrites(currentPermissions, overwrites, userRoles, defaultRoleId, userId) {
-  let permissions = currentPermissions;
-  let everyoneAllow = 0n;
-  let everyoneDeny = 0n;
-  let rolesAllow = 0n;
-  let rolesDeny = 0n;
-  let userAllow = 0n;
-  let userDeny = 0n;
-
-  for (const overwrite of overwrites) {
-    const allow = toPermissionBits(Number(overwrite.allow || 0));
-    const deny = toPermissionBits(Number(overwrite.deny || 0));
-    if (overwrite.target_type === 'role') {
-      if (overwrite.target_id === defaultRoleId) {
-        everyoneAllow |= allow;
-        everyoneDeny |= deny;
-      } else if (userRoles.includes(overwrite.target_id)) {
-        rolesAllow |= allow;
-        rolesDeny |= deny;
-      }
-    } else if (overwrite.target_type === 'user' && overwrite.target_id === userId) {
-      userAllow |= allow;
-      userDeny |= deny;
+function applyPermissionOverwrites(currentKeys, overwrites, scope, userRoles, defaultRoleId, userId, db) {
+  const permissions = new Set(currentKeys);
+  for (const group of ['everyone', 'roles', 'user']) {
+    const allow = new Set();
+    const deny = new Set();
+    for (const overwrite of overwrites) {
+      const applies = group === 'everyone'
+        ? overwrite.target_type === 'role' && overwrite.target_id === defaultRoleId
+        : group === 'roles'
+          ? overwrite.target_type === 'role' && overwrite.target_id !== defaultRoleId && userRoles.includes(overwrite.target_id)
+          : overwrite.target_type === 'user' && overwrite.target_id === userId;
+      if (!applies) continue;
+      const rules = permissionModel.overwriteKeys(db, scope, overwrite);
+      for (const key of rules.allow) if (key !== 'ADMINISTRATOR') allow.add(key);
+      for (const key of rules.deny) if (key !== 'ADMINISTRATOR') deny.add(key);
     }
+    for (const key of deny) permissions.delete(key);
+    for (const key of allow) permissions.add(key);
   }
-
-  permissions = (permissions & ~everyoneDeny) | everyoneAllow;
-  permissions = (permissions & ~rolesDeny) | rolesAllow;
-  permissions = (permissions & ~userDeny) | userAllow;
-  return permissions;
+  return [...permissions];
 }
 
 /**
@@ -183,16 +166,22 @@ function applyPermissionOverwrites(currentPermissions, overwrites, userRoles, de
  * 5. Owner/Administrator always has all permissions
  */
 function computeChannelPermissions(userId, channelId, basePermissions, db, overwriteRoleIds = null, effectiveUser = null) {
+  return permissionModel.encodeLegacy(computeChannelPermissionKeys(userId, channelId, basePermissions, db, overwriteRoleIds, effectiveUser));
+}
+
+function computeChannelPermissionKeys(userId, channelId, basePermissions, db, overwriteRoleIds = null, effectiveUser = null) {
   // Owner and Administrator always have all permissions, but use the effective
   // user first so "view as role" does not fall back to the real DB user.
   const user = effectiveUser || db.prepare('SELECT is_owner, role FROM users WHERE id = ?').get(userId);
-  if (user?.is_owner || user?.role === 'owner') return ALL_PERMISSIONS;
-  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
-  if ((toPermissionBits(basePermissions) & administratorMask) === administratorMask) return ALL_PERMISSIONS;
+  if (user?.is_owner || user?.role === 'owner') return [...permissionModel.KEYS];
+  const baseKeys = Array.isArray(user?.permission_keys)
+    ? permissionModel.normalizeKeys(user.permission_keys)
+    : permissionModel.decodeLegacy(basePermissions || 0);
+  if (baseKeys.includes('ADMINISTRATOR')) return [...permissionModel.KEYS];
 
-  let permissions = toPermissionBits(basePermissions);
+  let permissions = baseKeys;
   const channel = db.prepare('SELECT category_id FROM channels WHERE id = ?').get(channelId);
-  if (!channel) return Number(permissions);
+  if (!channel) return permissions;
 
   // Get user's roles
   const userRoles = Array.isArray(overwriteRoleIds)
@@ -206,40 +195,39 @@ function computeChannelPermissions(userId, channelId, basePermissions, db, overw
 
   // Apply category-level overwrites first (if any), then channel-level overwrites.
   if (channel.category_id) {
-    const categoryOverwrites = db.prepare(`
-      SELECT * FROM category_permission_overwrites
-      WHERE category_id = ?
-    `).all(channel.category_id);
-    permissions = applyPermissionOverwrites(permissions, categoryOverwrites, userRoles, defaultRole?.id, userId);
+    const categoryOverwrites = permissionModel.listOverwrites(db, 'category', channel.category_id);
+    permissions = applyPermissionOverwrites(permissions, categoryOverwrites, 'category', userRoles, defaultRole?.id, userId, db);
   }
 
-  const channelOverwrites = db.prepare(`
-    SELECT * FROM channel_permission_overwrites
-    WHERE channel_id = ?
-  `).all(channelId);
-  permissions = applyPermissionOverwrites(permissions, channelOverwrites, userRoles, defaultRole?.id, userId);
+  const channelOverwrites = permissionModel.listOverwrites(db, 'channel', channelId);
+  permissions = applyPermissionOverwrites(permissions, channelOverwrites, 'channel', userRoles, defaultRole?.id, userId, db);
 
-  return Number(permissions);
+  return permissions;
 }
 
 function computeUserChannelPermissions(user, channelId, db) {
-  if (!user) return 0;
-  if (user.is_owner || user.role === 'owner') return ALL_PERMISSIONS;
+  return permissionModel.encodeLegacy(computeUserChannelPermissionKeys(user, channelId, db));
+}
+
+function computeUserChannelPermissionKeys(user, channelId, db) {
+  if (!user) return [];
+  if (user.is_owner || user.role === 'owner') return [...permissionModel.KEYS];
   const viewedRoleId = typeof user.view_as_role?.roleId === 'string'
     ? user.view_as_role.roleId
     : null;
   const overwriteRoleIds = viewedRoleId ? [viewedRoleId] : null;
-  return computeChannelPermissions(user.id, channelId, user.permissions || 0, db, overwriteRoleIds, user);
+  return computeChannelPermissionKeys(user.id, channelId, user.permissions || 0, db, overwriteRoleIds, user);
 }
 
 function hasChannelPermission(user, channelId, permission, db) {
   if (!user) return false;
   if (user.is_owner || user.role === 'owner') return true;
-  const channelBits = toPermissionBits(computeUserChannelPermissions(user, channelId, db));
-  const permissionBits = toPermissionBits(permission);
-  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
-  if ((channelBits & administratorMask) === administratorMask) return true;
-  return (channelBits & permissionBits) === permissionBits;
+  const keys = computeUserChannelPermissionKeys(user, channelId, db);
+  try {
+    return keys.includes('ADMINISTRATOR') || permissionModel.requiredKeys(permission).every((key) => keys.includes(key));
+  } catch {
+    return false;
+  }
 }
 
 module.exports = {
@@ -247,7 +235,10 @@ module.exports = {
   ALL_PERMISSIONS,
   hasPermission,
   computePermissionsForUser,
+  computePermissionKeysForUser,
   computeChannelPermissions,
+  computeChannelPermissionKeys,
   computeUserChannelPermissions,
+  computeUserChannelPermissionKeys,
   hasChannelPermission,
 };

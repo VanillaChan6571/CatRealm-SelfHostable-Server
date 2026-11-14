@@ -154,7 +154,8 @@ const MAX_COMMANDS_PER_BOT = 50;
 function commandPermissionBits(name) {
   if (typeof name !== 'string') return null;
   const value = PERMISSIONS[name];
-  return typeof value === 'number' ? value : null;
+  if (typeof value === 'number') return value;
+  return require('../permissionModel').KEYS.includes(name) ? name : null;
 }
 
 // Fixed values for string/integer options, shown as a picker in the composer.

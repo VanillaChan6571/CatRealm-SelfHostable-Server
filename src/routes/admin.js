@@ -3,6 +3,8 @@ const db = require('../db');
 const { SERVER_MODE } = require('../middleware/auth');
 const { getSetting, setSetting } = require('../settings');
 const { PERMISSIONS, hasPermission } = require('../permissions');
+const permissionModel = require('../permissionModel');
+const { prepareDiscordTemplate, importDiscordTemplate } = require('../discordTemplateImport');
 const { emitServerInfoUpdate, emitPermissionsChanged, kickUserFromServer, emitServerEvent } = require('../socket/handler');
 const { randomUUID } = require('crypto');
 const multer = require('multer');
@@ -49,6 +51,24 @@ function getHighestRolePosition(userId) {
 
 function isValidIdList(ids) {
   return Array.isArray(ids) && ids.every((id) => typeof id === 'string') && new Set(ids).size === ids.length;
+}
+
+function requestedRoleKeys(body, fallback = []) {
+  if (body.permissionKeys !== undefined) return permissionModel.normalizeKeys(body.permissionKeys);
+  if (body.permissions !== undefined) return permissionModel.decodeLegacy(body.permissions);
+  return fallback;
+}
+
+function maySetRoleKeys(actor, keys, existing = null) {
+  if (actor.is_owner || actor.role === 'owner') return true;
+  const top = getHighestRolePosition(actor.id);
+  if (existing?.is_default || (existing && Number(existing.position) >= top)) return false;
+  const owned = new Set(actor.permission_keys || permissionModel.decodeLegacy(actor.permissions || 0));
+  return !keys.includes('ADMINISTRATOR') && keys.every((key) => owned.has(key));
+}
+
+function serializeRole(role) {
+  return { ...role, permissionKeys: permissionModel.roleKeys(db, role.id) };
 }
 
 function isMediaHardLimitRemoved() {
@@ -341,12 +361,14 @@ router.put('/users/:id/role', requirePermission(PERMISSIONS.MANAGE_ROLES), (req,
   if (!['admin', 'member'].includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
   }
+  if (role === 'admin' && !req.user?.is_owner) return res.status(403).json({ error: 'Only the owner can grant admin' });
 
   const { id } = req.params;
   const user = db.prepare('SELECT id, role, is_owner FROM users WHERE id = ?').get(id);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   if (user.is_owner) return res.status(400).json({ error: 'Cannot change role for the server owner' });
+  if (user.role === 'admin' && !req.user?.is_owner) return res.status(403).json({ error: 'Only the owner can change an admin role' });
 
   db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
   logAuditAction(AUDIT_ACTIONS.MEMBER_BASE_ROLE_UPDATE, req.user.id, {
@@ -360,7 +382,7 @@ router.put('/users/:id/role', requirePermission(PERMISSIONS.MANAGE_ROLES), (req,
 // GET /api/admin/roles
 router.get('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (_req, res) => {
   const roles = db.prepare('SELECT * FROM roles ORDER BY position DESC, name COLLATE NOCASE').all();
-  res.json(roles);
+  res.json(roles.map(serializeRole));
 });
 
 // GET /api/admin/role-categories
@@ -452,6 +474,11 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
   if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 32) {
     return res.status(400).json({ error: 'Role name must be 2-32 characters' });
   }
+  let keys;
+  try { keys = requestedRoleKeys(req.body || {}); } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  if (!maySetRoleKeys(req.user, keys)) return res.status(403).json({ error: 'Cannot grant permissions above your own' });
   let normalizedCategoryId = null;
   if (categoryId !== null && categoryId !== undefined) {
     if (typeof categoryId !== 'string' || categoryId.trim().length === 0) {
@@ -464,9 +491,14 @@ router.post('/roles', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res) =>
   const maxPos = db.prepare('SELECT MAX(position) as m FROM roles').get().m || 0;
   const id = randomUUID();
   const normalizedStyleColors = Array.isArray(style_colors) ? JSON.stringify(style_colors) : (style_colors || null);
-  db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon, category_id, style_type, style_colors) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(id, name.trim(), color, permissions, maxPos + 1, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon, normalizedCategoryId, style_type || 'solid', normalizedStyleColors);
-  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
+  const actorTop = getHighestRolePosition(req.user.id);
+  const position = req.user?.is_owner ? maxPos + 1 : Math.max(0, actorTop - 1);
+  db.transaction(() => {
+    db.prepare('INSERT INTO roles (id, name, color, permissions, position, is_default, mentionable, hoist, icon, category_id, style_type, style_colors) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, name.trim(), color, 0, position, 0, mentionable ? 1 : 0, hoist ? 1 : 0, icon, normalizedCategoryId, style_type || 'solid', normalizedStyleColors);
+    permissionModel.writeRoleKeys(db, id, keys);
+  })();
+  const role = serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(id));
   logAuditAction(AUDIT_ACTIONS.ROLE_CREATE, req.user.id, {
     targetType: 'role',
     targetId: id,
@@ -515,7 +547,7 @@ router.put('/roles/reorder', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, 
   emitPermissionsChanged();
   const roles = db.prepare('SELECT * FROM roles ORDER BY position DESC, name COLLATE NOCASE').all();
   emitServerEvent('roles:reorder', { roles: roles.map((r) => ({ id: r.id, position: r.position })) });
-  res.json(roles);
+  res.json(roles.map(serializeRole));
 });
 
 // PUT /api/admin/roles/:id
@@ -523,15 +555,24 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
   const { id } = req.params;
   const existing = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Role not found' });
-  const { name, permissions, color, position, mentionable, hoist, icon, categoryId, style_type, style_colors } = req.body ?? {};
+  const { name, color, position, mentionable, hoist, icon, categoryId, style_type, style_colors } = req.body ?? {};
+  if (req.body?.permissionKeys === undefined && req.body?.permissions !== undefined &&
+      permissionModel.roleKeys(db, id).some((key) => permissionModel.LEGACY_POSITIONS[key] === undefined)) {
+    return res.status(409).json({ error: 'Update this role with a client that supports named permissions' });
+  }
+  let keys;
+  try { keys = requestedRoleKeys(req.body || {}, permissionModel.roleKeys(db, id)); } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  if (!maySetRoleKeys(req.user, keys, existing)) return res.status(403).json({ error: 'Cannot edit this role or grant these permissions' });
   if (typeof name === 'string') {
     if (name.trim().length < 2 || name.trim().length > 32) {
       return res.status(400).json({ error: 'Role name must be 2-32 characters' });
     }
     db.prepare('UPDATE roles SET name = ? WHERE id = ?').run(name.trim(), id);
   }
-  if (typeof permissions === 'number') {
-    db.prepare('UPDATE roles SET permissions = ? WHERE id = ?').run(permissions, id);
+  if (req.body?.permissionKeys !== undefined || req.body?.permissions !== undefined) {
+    db.transaction(() => permissionModel.writeRoleKeys(db, id, keys))();
   }
   if (typeof color === 'string' || color === null) {
     db.prepare('UPDATE roles SET color = ? WHERE id = ?').run(color, id);
@@ -573,7 +614,7 @@ router.put('/roles/:id', requirePermission(PERMISSIONS.MANAGE_ROLES), (req, res)
       db.prepare('UPDATE roles SET category_id = ? WHERE id = ?').run(categoryId.trim(), id);
     }
   }
-  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(id);
+  const role = serializeRole(db.prepare('SELECT * FROM roles WHERE id = ?').get(id));
   const roleChanges = diffFields(existing, role, ['name', 'permissions', 'color', 'position', 'mentionable', 'hoist', 'icon', 'category_id', 'style_type', 'style_colors']);
   if (roleChanges) {
     logAuditAction(AUDIT_ACTIONS.ROLE_UPDATE, req.user.id, {
@@ -973,7 +1014,7 @@ router.post('/fetch-template', requirePermission(PERMISSIONS.MANAGE_SERVER), asy
   }
 });
 
-// POST /api/admin/generate-import-token - Generate one-time import token for local owners
+// POST /api/admin/generate-import-token - Generate one-time import token for owners
 router.post('/generate-import-token', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   const user = db.prepare('SELECT id, account_type, is_owner FROM users WHERE id = ?').get(req.user.id);
 
@@ -981,20 +1022,18 @@ router.post('/generate-import-token', requirePermission(PERMISSIONS.MANAGE_SERVE
     return res.status(403).json({ error: 'Only the server owner can import templates' });
   }
 
-  if (user.account_type !== 'local') {
-    return res.status(400).json({ error: 'Token generation is only for local accounts. Central accounts use TOTP.' });
-  }
-
-  // Generate random 8-character token
+  // A console token works for both account types. Realm servers cannot verify
+  // Central TOTP locally, so a six-digit value is never accepted as proof.
   const crypto = require('crypto');
-  const token = crypto.randomBytes(4).toString('hex').toUpperCase();
+  const token = crypto.randomBytes(16).toString('hex').toUpperCase();
   const expiresAt = Math.floor(Date.now() / 1000) + (10 * 60); // 10 minutes
 
   // Clean up expired tokens
   db.prepare('DELETE FROM import_tokens WHERE expires_at < unixepoch() OR used = 1').run();
 
   // Store token
-  db.prepare('INSERT INTO import_tokens (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expiresAt);
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  db.prepare('INSERT INTO import_tokens (token, user_id, expires_at) VALUES (?, ?, ?)').run(tokenHash, user.id, expiresAt);
 
   const pteroLog = require('../logger');
   pteroLog('╔══════════════════════════════════════════════════════════╗');
@@ -1007,242 +1046,65 @@ router.post('/generate-import-token', requirePermission(PERMISSIONS.MANAGE_SERVE
   res.json({ message: 'Token generated. Check server console for the token.' });
 });
 
-// POST /api/admin/import-template - Import Discord server template
-router.post('/import-template', requirePermission(PERMISSIONS.MANAGE_SERVER), async (req, res) => {
-  const { template, verificationToken, totp } = req.body;
-
-  if (!template || typeof template !== 'object') {
-    return res.status(400).json({ error: 'Invalid template format' });
-  }
-
-  // Verify user is owner
-  const user = db.prepare('SELECT id, account_type, is_owner FROM users WHERE id = ?').get(req.user.id);
-  if (!user || !user.is_owner) {
-    return res.status(403).json({ error: 'Only the server owner can import templates' });
-  }
-
-  // Verify token or TOTP
-  if (user.account_type === 'local') {
-    // Local account: verify token
-    if (!verificationToken) {
-      return res.status(400).json({ error: 'Verification token required. Generate one first.' });
-    }
-
-    const tokenRecord = db.prepare(`
-      SELECT * FROM import_tokens
-      WHERE token = ? AND user_id = ? AND used = 0 AND expires_at > unixepoch()
-    `).get(verificationToken, user.id);
-
-    if (!tokenRecord) {
-      return res.status(401).json({ error: 'Invalid or expired verification token' });
-    }
-
-    // Mark token as used
-    db.prepare('UPDATE import_tokens SET used = 1 WHERE token = ?').run(verificationToken);
-  } else {
-    // Central account: verify TOTP
-    if (!totp) {
-      return res.status(400).json({ error: 'TOTP code required for central accounts' });
-    }
-
-    // TODO: Implement TOTP verification with central auth server
-    // For now, just check if totp is provided
-    if (totp.length !== 6 || !/^\d{6}$/.test(totp)) {
-      return res.status(400).json({ error: 'Invalid TOTP code format' });
-    }
-  }
-
-  // Emit start event to all clients
-  const { emitServerImportStatus } = require('../socket/handler');
-  emitServerImportStatus('start', { message: 'Owner is now importing a template... Cats are purring and rebuild the realm!' });
-
+// POST /api/admin/preview-template - Validate with the same mapper used by import.
+router.post('/preview-template', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
   try {
-    const { name, description, roles, channels } = template;
-    const imported = { roles: [], channels: [], categories: [] };
-
-    const pteroLog = require('../logger');
-
-    // DELETE ALL EXISTING DATA
-    pteroLog('[Template Import] Deleting all existing channels...');
-    emitServerImportStatus('progress', { message: 'Removing existing channels...' });
-    db.prepare('DELETE FROM channels').run();
-
-    pteroLog('[Template Import] Deleting all existing categories...');
-    emitServerImportStatus('progress', { message: 'Removing existing categories...' });
-    db.prepare('DELETE FROM categories').run();
-
-    pteroLog('[Template Import] Deleting all existing roles (except default)...');
-    emitServerImportStatus('progress', { message: 'Removing existing roles...' });
-    db.prepare('DELETE FROM roles WHERE is_default = 0').run();
-
-    pteroLog('[Template Import] Clearing existing data complete.');
-    emitServerImportStatus('progress', { message: 'Starting template import...' });
-
-    // Discord permission mapping
-    const DISCORD_PERMS = {
-      ADMINISTRATOR: 0x8,
-      VIEW_AUDIT_LOG: 0x80,
-      MANAGE_GUILD: 0x20,
-      MANAGE_ROLES: 0x10000000,
-      MANAGE_CHANNELS: 0x10,
-      KICK_MEMBERS: 0x2,
-      BAN_MEMBERS: 0x4,
-      MODERATE_MEMBERS: 0x1099511627776,
-      MANAGE_NICKNAMES: 0x8000000,
-      EMBED_LINKS: 0x4000,
-      ATTACH_FILES: 0x8000,
-      MENTION_EVERYONE: 0x20000,
-      MANAGE_MESSAGES: 0x2000,
-      MANAGE_WEBHOOKS: 0x20000000,
-      CREATE_INSTANT_INVITE: 0x1,
-      CREATE_PUBLIC_THREADS: 0x800000000,
-      MANAGE_THREADS: 0x400000000,
-    };
-
-    function mapDiscordPermissions(discordPerms) {
-      const perms = parseInt(discordPerms);
-      let catrealmPerms = 0;
-
-      if (perms & DISCORD_PERMS.ADMINISTRATOR) {
-        return PERMISSIONS.ADMINISTRATOR;
-      }
-
-      if (perms & DISCORD_PERMS.VIEW_AUDIT_LOG) catrealmPerms |= PERMISSIONS.VIEW_AUDIT_LOG;
-      if (perms & DISCORD_PERMS.MANAGE_GUILD) catrealmPerms |= PERMISSIONS.MANAGE_SERVER;
-      if (perms & DISCORD_PERMS.MANAGE_ROLES) catrealmPerms |= PERMISSIONS.MANAGE_ROLES;
-      if (perms & DISCORD_PERMS.MANAGE_CHANNELS) catrealmPerms |= PERMISSIONS.MANAGE_CHANNELS;
-      if (perms & DISCORD_PERMS.KICK_MEMBERS) catrealmPerms |= PERMISSIONS.KICK_MEMBER;
-      if (perms & DISCORD_PERMS.BAN_MEMBERS) catrealmPerms |= PERMISSIONS.BAN_MEMBER;
-      if (perms & DISCORD_PERMS.MODERATE_MEMBERS) catrealmPerms |= PERMISSIONS.TIMEOUT_USER;
-      if (perms & DISCORD_PERMS.MANAGE_NICKNAMES) catrealmPerms |= PERMISSIONS.MANAGE_NICKNAMES;
-      if (perms & (DISCORD_PERMS.EMBED_LINKS | DISCORD_PERMS.ATTACH_FILES)) catrealmPerms |= PERMISSIONS.SEND_MEDIA;
-      if (perms & DISCORD_PERMS.MENTION_EVERYONE) catrealmPerms |= PERMISSIONS.MENTION_EVERYONE;
-      if (perms & DISCORD_PERMS.MANAGE_MESSAGES) catrealmPerms |= PERMISSIONS.DELETE_MESSAGES;
-      if (perms & DISCORD_PERMS.MANAGE_WEBHOOKS) catrealmPerms |= PERMISSIONS.MANAGE_WEBHOOKS;
-      if (perms & DISCORD_PERMS.CREATE_INSTANT_INVITE) catrealmPerms |= PERMISSIONS.CREATE_INVITES;
-      if (perms & (DISCORD_PERMS.CREATE_PUBLIC_THREADS | DISCORD_PERMS.MANAGE_THREADS)) {
-        catrealmPerms |= PERMISSIONS.CREATE_THREADS;
-      }
-
-      return catrealmPerms;
-    }
-
-    // Import roles
-    if (Array.isArray(roles)) {
-      pteroLog(`[Template Import] Importing ${roles.length} roles...`);
-      emitServerImportStatus('progress', { message: `Creating ${roles.length} roles...` });
-
-      const maxPos = db.prepare('SELECT MAX(position) as m FROM roles').get().m || 0;
-      let positionOffset = maxPos + 1;
-
-      for (const role of roles) {
-        if (role.name === '@everyone') continue; // Skip @everyone
-
-        const roleId = randomUUID();
-        const color = role.color ? `#${role.color.toString(16).padStart(6, '0')}` : null;
-        const permissions = mapDiscordPermissions(role.permissions || '0');
-
-        db.prepare(`
-          INSERT INTO roles (id, name, color, permissions, position, mentionable, hoist)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(roleId, role.name, color, permissions, positionOffset++, role.mentionable ? 1 : 0, role.hoist ? 1 : 0);
-
-        imported.roles.push({ id: roleId, name: role.name, permissions });
-        pteroLog(`[Template Import]   ✓ Created role: ${role.name}`);
-      }
-    }
-
-    // Import channels and categories
-    if (Array.isArray(channels)) {
-      const channelMap = new Map(); // Discord ID -> CatRealm ID
-      const categories = channels.filter(ch => ch.type === 4);
-      const textVoiceChannels = channels.filter(ch => ch.type === 0 || ch.type === 2);
-
-      pteroLog(`[Template Import] Importing ${categories.length} categories...`);
-      emitServerImportStatus('progress', { message: `Creating ${categories.length} categories...` });
-
-      // First pass: create categories
-      for (const channel of channels) {
-        if (channel.type === 4) { // Category
-          const categoryId = randomUUID();
-          db.prepare(`
-            INSERT INTO categories (id, name, position)
-            VALUES (?, ?, ?)
-          `).run(categoryId, channel.name, channel.position || 0);
-
-          channelMap.set(channel.id, categoryId);
-          imported.categories.push({ id: categoryId, name: channel.name });
-          pteroLog(`[Template Import]   ✓ Created category: ${channel.name}`);
-        }
-      }
-
-      pteroLog(`[Template Import] Importing ${textVoiceChannels.length} channels...`);
-      emitServerImportStatus('progress', { message: `Creating ${textVoiceChannels.length} channels...` });
-
-      // Second pass: create channels
-      for (const channel of channels) {
-        if (channel.type === 0 || channel.type === 2) { // Text or Voice
-          const channelId = randomUUID();
-          const categoryId = channel.parent_id ? channelMap.get(channel.parent_id) : null;
-          const channelType = channel.type === 2 ? 'voice' : 'basic';
-
-          db.prepare(`
-            INSERT INTO channels (id, name, type, position, category_id, nsfw)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `).run(channelId, channel.name, channelType, channel.position || 0, categoryId, channel.nsfw ? 1 : 0);
-
-          imported.channels.push({ id: channelId, name: channel.name, category: categoryId });
-          pteroLog(`[Template Import]   ✓ Created channel: #${channel.name} (${channelType})`);
-        }
-      }
-    }
-
-    // Update server name/description if provided
-    if (name) {
-      pteroLog(`[Template Import] Renaming server to: ${name}`);
-      emitServerImportStatus('progress', { message: 'Updating server settings...' });
-      setSetting('server_name', name);
-    }
-    if (description) {
-      setSetting('server_description', description);
-    }
-
-    logAuditAction(AUDIT_ACTIONS.TEMPLATE_IMPORT, req.user.id, {
-      targetType: 'server',
-      details: {
-        template_name: name || 'Unknown',
-        roles_imported: imported.roles.length,
-        channels_imported: imported.channels.length,
-        categories_imported: imported.categories.length,
-      },
-    });
-
-    pteroLog('[Template Import] ✓ Import complete!');
-    pteroLog(`[Template Import]   Roles: ${imported.roles.length}`);
-    pteroLog(`[Template Import]   Categories: ${imported.categories.length}`);
-    pteroLog(`[Template Import]   Channels: ${imported.channels.length}`);
-
-    // Emit completion event
-    emitServerImportStatus('complete', {
-      message: 'Template import complete! Welcome to your new realm.',
-      imported
-    });
-
-    // Broadcast updates to all clients
-    const { broadcastChannelUpdate, emitServerInfoUpdate } = require('../socket/handler');
-    broadcastChannelUpdate();
-    const serverName = getSetting('server_name', 'CatRealm Server');
-    const serverDescription = getSetting('server_description', '');
-    emitServerInfoUpdate({ name: serverName, description: serverDescription });
-
+    const prepared = prepareDiscordTemplate(req.body?.template);
     res.json({
-      success: true,
-      imported
+      name: prepared.name,
+      description: prepared.description,
+      roles: prepared.roles.filter((role) => role.name !== '@everyone').map((role) => ({
+        name: role.name, color: role.color ? `#${role.color.toString(16).padStart(6, '0')}` : null,
+        permissions: permissionModel.encodeLegacy(role.permissionKeys), permissionKeys: role.permissionKeys,
+        position: role.position, mentionable: role.mentionable, hoist: role.hoist,
+      })),
+      channels: prepared.channels.filter((channel) => [0, 2, 5].includes(channel.type)).map((channel) => ({
+        name: channel.name, type: channel.type === 2 ? 'voice' : 'basic',
+        position: channel.position, parentId: channel.parentId, nsfw: channel.nsfw,
+        permissionOverwrites: channel.overwrites,
+      })),
+      categories: prepared.channels.filter((channel) => channel.type === 4).map((channel) => ({
+        name: channel.name, position: channel.position,
+      })),
+      warnings: prepared.warnings,
     });
   } catch (error) {
-    console.error('Template import error:', error);
-    emitServerImportStatus('error', { message: 'Import failed: ' + error.message });
-    res.status(500).json({ error: 'Failed to import template', details: error.message });
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/import-template - Replace realm structure in one transaction.
+router.post('/import-template', requirePermission(PERMISSIONS.MANAGE_SERVER), (req, res) => {
+  const user = db.prepare('SELECT id, is_owner FROM users WHERE id = ?').get(req.user.id);
+  if (!user?.is_owner) return res.status(403).json({ error: 'Only the server owner can import templates' });
+  if (typeof req.body?.verificationToken !== 'string' || !/^[A-F0-9]{32}$/.test(req.body.verificationToken)) {
+    return res.status(400).json({ error: 'A valid console verification token is required' });
+  }
+  let prepared;
+  try {
+    prepared = prepareDiscordTemplate(req.body.template);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  const { emitServerImportStatus, broadcastChannelUpdate } = require('../socket/handler');
+  try {
+    const imported = importDiscordTemplate(db, prepared, req.body.verificationToken, user.id, setSetting);
+    logAuditAction(AUDIT_ACTIONS.TEMPLATE_IMPORT, user.id, {
+      targetType: 'server',
+      details: {
+        template_name: prepared.name, roles_imported: imported.roles.length,
+        channels_imported: imported.channels.length, categories_imported: imported.categories.length,
+      },
+    });
+    emitPermissionsChanged();
+    broadcastChannelUpdate();
+    emitServerInfoUpdate({ name: prepared.name, description: prepared.description });
+    emitServerImportStatus('complete', { message: 'Template import complete', imported });
+    res.json({ success: true, imported });
+  } catch (error) {
+    const status = error instanceof RangeError ? 400 : 500;
+    emitServerImportStatus('error', { message: 'Import failed' });
+    res.status(status).json({ error: status === 400 ? error.message : 'Failed to import template' });
   }
 });
 

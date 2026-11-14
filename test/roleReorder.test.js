@@ -79,6 +79,13 @@ test('PUT /roles/:id rejects position changes at or above the actor', () => {
   assert.equal(pos('rebel'), 9);
 });
 
+test('role managers cannot grant Administrator to a lower role', () => {
+  const { call, db } = setup();
+  const res = call('/roles/:id', mod, { permissions: PERMISSIONS.ADMINISTRATOR }, { id: 'rebel' });
+  assert.equal(res.statusCode, 403);
+  assert.equal(db.prepare('SELECT permissions FROM roles WHERE id = ?').get('rebel').permissions, 0);
+});
+
 test('role categories reorder', () => {
   const { call, db } = setup();
   assert.equal(call('/role-categories/reorder', mod, { categoryIds: ['b'] }).statusCode, 400);

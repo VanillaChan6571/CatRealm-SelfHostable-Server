@@ -93,6 +93,7 @@ router.get('/self', requireBot, (req, res) => {
     roleIds: roles.map((r) => r.id),
     highestRolePosition: roles[0]?.position ?? -1,
     permissions: String(BigInt(Math.trunc(Number(req.user?.permissions) || 0))),
+    permissionKeys: req.user?.permission_keys || [],
   });
 });
 

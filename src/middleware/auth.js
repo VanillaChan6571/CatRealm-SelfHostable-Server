@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const db = require('../db');
-const { computePermissionsForUser } = require('../permissions');
+const { computePermissionsForUser, computePermissionKeysForUser } = require('../permissions');
 const { applyRoleViewToUser } = require('../viewAsRole');
 const { isBotToken, resolveBotToken } = require('../bots/core');
 const pteroLog = require('../logger');
@@ -30,6 +30,7 @@ async function authenticateToken(req, res, next) {
         is_owner: 0,
         is_bot: 1,
         permissions,
+        permission_keys: computePermissionKeysForUser(user.id, user.role, user.is_owner, db),
         accountType: 'bot',
       };
       req.user = req.authUser;
@@ -59,6 +60,7 @@ async function authenticateToken(req, res, next) {
         ...user,
         is_owner: user.is_owner ? 1 : 0,
         permissions,
+        permission_keys: computePermissionKeysForUser(user.id, user.role, user.is_owner, db),
         accountType: 'central',
       };
     } else {
@@ -76,6 +78,7 @@ async function authenticateToken(req, res, next) {
         ...user,
         is_owner: user.is_owner ? 1 : 0,
         permissions,
+        permission_keys: computePermissionKeysForUser(user.id, user.role, user.is_owner, db),
         accountType: 'local',
       };
     }

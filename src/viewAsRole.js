@@ -1,13 +1,6 @@
-const { PERMISSIONS, ALL_PERMISSIONS } = require('./permissions');
+const permissionModel = require('./permissionModel');
 
 const roleViewSessions = new Map();
-
-function toPermissionBits(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0n;
-  const normalized = Math.trunc(value);
-  if (normalized < 0) return BigInt(normalized >>> 0);
-  return BigInt(normalized);
-}
 
 function getRoleViewSession(userId) {
   return roleViewSessions.get(userId) || null;
@@ -35,19 +28,12 @@ function buildRoleViewInfo(role, session) {
   };
 }
 
-function buildViewedPermissions(role, defaultRole) {
-  let permissions = 0n;
-  if (defaultRole?.permissions != null) {
-    permissions |= toPermissionBits(Number(defaultRole.permissions));
-  }
-  if (role?.permissions != null) {
-    permissions |= toPermissionBits(Number(role.permissions));
-  }
-  const administratorMask = toPermissionBits(PERMISSIONS.ADMINISTRATOR);
-  if ((permissions & administratorMask) === administratorMask) {
-    return ALL_PERMISSIONS;
-  }
-  return Number(permissions);
+function buildViewedPermissionKeys(role, defaultRole, db) {
+  const keys = new Set([
+    ...(defaultRole ? permissionModel.roleKeys(db, defaultRole.id) : []),
+    ...permissionModel.roleKeys(db, role.id),
+  ]);
+  return keys.has('ADMINISTRATOR') ? [...permissionModel.KEYS] : [...keys];
 }
 
 function applyRoleViewToUser(user, db) {
@@ -80,7 +66,8 @@ function applyRoleViewToUser(user, db) {
     WHERE is_default = 1
     LIMIT 1
   `).get();
-  const viewedPermissions = buildViewedPermissions(role, defaultRole);
+  const permissionKeys = buildViewedPermissionKeys(role, defaultRole, db);
+  const viewedPermissions = permissionModel.encodeLegacy(permissionKeys);
   const viewAsRole = buildRoleViewInfo(role, session);
 
   return {
@@ -89,6 +76,7 @@ function applyRoleViewToUser(user, db) {
       role: role.name,
       is_owner: 0,
       permissions: viewedPermissions,
+      permission_keys: permissionKeys,
       view_as_role: viewAsRole,
     },
     session: viewAsRole,

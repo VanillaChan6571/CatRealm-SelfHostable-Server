@@ -5,7 +5,7 @@ const axios = require('axios');
 const { randomUUID } = require('crypto');
 const db = require('../db');
 const { JWT_SECRET, SERVER_MODE, checkUsernameConflict, authenticateToken } = require('../middleware/auth');
-const { computePermissionsForUser } = require('../permissions');
+const { computePermissionsForUser, computePermissionKeysForUser } = require('../permissions');
 const pteroLog = require('../logger');
 const { isBlockedUsername } = require('../usernameBlocklist');
 const { getSetting } = require('../settings');
@@ -88,7 +88,7 @@ router.post('/register', async (req, res) => {
   const permissions = computePermissionsForUser(id, 'member', 0, db);
   const token = jwt.sign({ id, username, role: 'member', is_owner: 0, permissions }, JWT_SECRET, { expiresIn: '7d' });
   const onboardingCompleted = welcomeEnabled ? false : true;
-  res.status(201).json({ token, user: { id, username, role: 'member', isOwner: false, permissions, accountType: 'local', status: 'online', onboardingCompleted } });
+  res.status(201).json({ token, user: { id, username, role: 'member', isOwner: false, permissions, permissionKeys: computePermissionKeysForUser(id, 'member', 0, db), accountType: 'local', status: 'online', onboardingCompleted } });
 });
 
 // POST /api/auth/login  (local accounts only — central accounts log in via central auth)
@@ -119,7 +119,7 @@ router.post('/login', (req, res) => {
   );
   res.json({
     token,
-    user: { id: user.id, username: user.username, role: user.role, isOwner: !!user.is_owner, permissions, accountType: 'local', status: user.status || 'online', avatar: user.avatar || null, banner: user.banner || null, bio: user.bio || null, onboardingCompleted: user.onboarding_completed !== 0 },
+    user: { id: user.id, username: user.username, role: user.role, isOwner: !!user.is_owner, permissions, permissionKeys: computePermissionKeysForUser(user.id, user.role, user.is_owner, db), accountType: 'local', status: user.status || 'online', avatar: user.avatar || null, banner: user.banner || null, bio: user.bio || null, onboardingCompleted: user.onboarding_completed !== 0 },
   });
 });
 
@@ -158,6 +158,7 @@ router.get('/me', authenticateToken, (req, res) => {
       role: effectiveRole,
       isOwner: effectiveOwner,
       permissions,
+      permissionKeys: req.user?.permission_keys || [],
       accountType,
       status: current.status || 'online',
       avatar: current.avatar || null,
@@ -210,6 +211,7 @@ router.post('/claim-admin', authenticateToken, (req, res) => {
       role: 'owner',
       isOwner: true,
       permissions,
+      permissionKeys: computePermissionKeysForUser(req.user.id, 'owner', 1, db),
       accountType: req.user.accountType === 'central' ? 'central' : 'local',
       status: 'online',
     },
@@ -399,6 +401,7 @@ router.post('/central', async (req, res) => {
       role: localUser.role,
       isOwner: !!localUser.is_owner,
       permissions,
+      permissionKeys: computePermissionKeysForUser(localUser.id, localUser.role, localUser.is_owner, db),
       accountType: 'central',
       status: localUser.status || 'online',
       avatar: localUser.avatar || null,

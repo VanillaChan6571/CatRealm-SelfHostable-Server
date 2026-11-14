@@ -1,11 +1,13 @@
 const router = require('express').Router();
 const { randomUUID } = require('crypto');
 const db = require('../db');
+const permissionModel = require('../permissionModel');
 const {
   PERMISSIONS,
   hasPermission,
   hasChannelPermission,
   computeUserChannelPermissions,
+  computeUserChannelPermissionKeys,
 } = require('../permissions');
 const { broadcastChannelUpdate, emitMessage, emitPermissionsChanged } = require('../socket/handler');
 const { getSetting } = require('../settings');
@@ -44,14 +46,10 @@ function visibleChannelListForUser(user, channels) {
     visible.push({
       ...channel,
       effective_permissions: effectivePermissions,
+      effective_permission_keys: computeUserChannelPermissionKeys(user, channel.id, db),
     });
   }
   return visible;
-}
-
-function normalizeOverwriteBits(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
-  return Math.trunc(value);
 }
 
 function validateOverwriteTarget(targetType, targetId) {
@@ -76,7 +74,12 @@ function listChannelOverwrites(channelId) {
     SELECT * FROM channel_permission_overwrites
     WHERE channel_id = ?
     ORDER BY created_at, target_type, target_id
-  `).all(channelId);
+  `).all(channelId).map((row) => withOverwriteKeys('channel', row));
+}
+
+function withOverwriteKeys(scope, row) {
+  const keys = permissionModel.overwriteKeys(db, scope, row);
+  return { ...row, allowKeys: keys.allow, denyKeys: keys.deny };
 }
 
 function isSystemRulesChannel(channel) {
@@ -514,10 +517,10 @@ router.post('/:id/permissions/sync-from-category', (req, res) => {
   if (!category) return res.status(404).json({ error: 'Category not found' });
 
   const categoryOverwrites = db.prepare(`
-    SELECT target_type, target_id, allow, deny
+    SELECT id, target_type, target_id, allow, deny
     FROM category_permission_overwrites
     WHERE category_id = ?
-  `).all(channel.category_id);
+  `).all(channel.category_id).map((row) => withOverwriteKeys('category', row));
 
   const syncTransaction = db.transaction((channelId, overwrites) => {
     db.prepare('DELETE FROM channel_permission_overwrites WHERE channel_id = ?').run(channelId);
@@ -526,14 +529,16 @@ router.post('/:id/permissions/sync-from-category', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?)
     `);
     for (const overwrite of overwrites) {
+      const id = randomUUID();
       insert.run(
-        randomUUID(),
+        id,
         channelId,
         overwrite.target_type,
         overwrite.target_id,
         Number(overwrite.allow || 0),
         Number(overwrite.deny || 0)
       );
+      permissionModel.writeOverwriteKeys(db, 'channel', id, overwrite.allowKeys, overwrite.denyKeys);
     }
   });
   syncTransaction(channel.id, categoryOverwrites);
@@ -559,10 +564,10 @@ router.post('/:id/permissions/sync-to-category', (req, res) => {
   if (!category) return res.status(404).json({ error: 'Category not found' });
 
   const channelOverwrites = db.prepare(`
-    SELECT target_type, target_id, allow, deny
+    SELECT id, target_type, target_id, allow, deny
     FROM channel_permission_overwrites
     WHERE channel_id = ?
-  `).all(channel.id);
+  `).all(channel.id).map((row) => withOverwriteKeys('channel', row));
 
   const syncTransaction = db.transaction((categoryId, overwrites) => {
     db.prepare('DELETE FROM category_permission_overwrites WHERE category_id = ?').run(categoryId);
@@ -571,14 +576,16 @@ router.post('/:id/permissions/sync-to-category', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?)
     `);
     for (const overwrite of overwrites) {
+      const id = randomUUID();
       insert.run(
-        randomUUID(),
+        id,
         categoryId,
         overwrite.target_type,
         overwrite.target_id,
         Number(overwrite.allow || 0),
         Number(overwrite.deny || 0)
       );
+      permissionModel.writeOverwriteKeys(db, 'category', id, overwrite.allowKeys, overwrite.denyKeys);
     }
   });
   syncTransaction(channel.category_id, channelOverwrites);
@@ -620,6 +627,7 @@ router.put('/:id/permissions', (req, res) => {
   }
 
   const seenTargets = new Set();
+  const parsed = [];
   for (const overwrite of overwrites) {
     const targetType = overwrite?.targetType ?? overwrite?.target_type;
     const targetId = overwrite?.targetId ?? overwrite?.target_id;
@@ -630,6 +638,12 @@ router.put('/:id/permissions', (req, res) => {
       return res.status(400).json({ error: `Duplicate overwrite target: ${dedupeKey}` });
     }
     seenTargets.add(dedupeKey);
+    try { parsed.push({ ...overwrite, ...permissionModel.parseOverwriteInput(overwrite) }); }
+    catch (error) { return res.status(400).json({ error: error.message }); }
+  }
+  if (overwrites.some((item) => item.allowKeys === undefined && item.denyKeys === undefined) &&
+      permissionModel.hasNamedOnlyRules(db, 'channel', channel.id)) {
+    return res.status(409).json({ error: 'Update this channel with a client that supports named permissions' });
   }
 
   const replaceTransaction = db.transaction((channelId, nextOverwrites) => {
@@ -639,22 +653,23 @@ router.put('/:id/permissions', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?)
     `);
     for (const overwrite of nextOverwrites) {
-      const allow = normalizeOverwriteBits(overwrite?.allow);
-      const deny = normalizeOverwriteBits(overwrite?.deny);
-      if (allow === 0 && deny === 0) continue;
+      const { allow, deny, allowKeys, denyKeys } = overwrite;
+      if (allowKeys.length === 0 && denyKeys.length === 0) continue;
+      const id = randomUUID();
       insert.run(
-        randomUUID(),
+        id,
         channelId,
         overwrite.targetType ?? overwrite.target_type,
         overwrite.targetId ?? overwrite.target_id,
         allow,
         deny
       );
+      permissionModel.writeOverwriteKeys(db, 'channel', id, allowKeys, denyKeys);
     }
   });
 
   const previous = listChannelOverwrites(channel.id);
-  replaceTransaction(channel.id, overwrites);
+  replaceTransaction(channel.id, parsed);
   const persisted = listChannelOverwrites(channel.id);
   logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_UPDATE, req.user.id, {
     targetType: 'channel',
@@ -676,6 +691,9 @@ router.post('/:id/permissions', (req, res) => {
   }
 
   const { targetType, targetId, allow, deny } = req.body ?? {};
+  if (req.body?.allowKeys !== undefined || req.body?.denyKeys !== undefined) {
+    return res.status(400).json({ error: 'Use PUT /permissions for named permission rules' });
+  }
   if (!targetType || !targetId) {
     return res.status(400).json({ error: 'targetType and targetId required' });
   }
@@ -695,9 +713,15 @@ router.post('/:id/permissions', (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
   }
 
+  if (permissionModel.hasNamedOnlyRules(db, 'channel', req.params.id)) {
+    return res.status(409).json({ error: 'Use a client that supports named permissions' });
+  }
+  let parsed;
+  try { parsed = permissionModel.parseOverwriteInput({ allow, deny }); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
   const id = randomUUID();
-  const allowBits = typeof allow === 'number' ? allow : 0;
-  const denyBits = typeof deny === 'number' ? deny : 0;
+  const allowBits = parsed.allow;
+  const denyBits = parsed.deny;
   const existing = db.prepare(`
     SELECT * FROM channel_permission_overwrites
     WHERE channel_id = ? AND target_type = ? AND target_id = ?
@@ -743,15 +767,20 @@ router.patch('/:id/permissions/:overwriteId', (req, res) => {
   }
 
   const { allow, deny } = req.body ?? {};
+  if (req.body?.allowKeys !== undefined || req.body?.denyKeys !== undefined) {
+    return res.status(400).json({ error: 'Use PUT /permissions for named permission rules' });
+  }
   const overwrite = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').get(req.params.overwriteId, req.params.id);
   if (!overwrite) return res.status(404).json({ error: 'Overwrite not found' });
+  if (permissionModel.hasNamedOnlyRules(db, 'channel', req.params.id)) {
+    return res.status(409).json({ error: 'Use a client that supports named permissions' });
+  }
+  let parsed;
+  try { parsed = permissionModel.parseOverwriteInput({ allow: allow ?? overwrite.allow, deny: deny ?? overwrite.deny }); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
 
-  if (typeof allow === 'number') {
-    db.prepare('UPDATE channel_permission_overwrites SET allow = ? WHERE id = ?').run(allow, req.params.overwriteId);
-  }
-  if (typeof deny === 'number') {
-    db.prepare('UPDATE channel_permission_overwrites SET deny = ? WHERE id = ?').run(deny, req.params.overwriteId);
-  }
+  db.prepare('UPDATE channel_permission_overwrites SET allow = ?, deny = ? WHERE id = ?')
+    .run(parsed.allow, parsed.deny, req.params.overwriteId);
 
   const updated = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ?').get(req.params.overwriteId);
   logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_UPDATE, req.user.id, {
@@ -774,6 +803,12 @@ router.delete('/:id/permissions/:overwriteId', (req, res) => {
   }
 
   const overwrite = db.prepare('SELECT * FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').get(req.params.overwriteId, req.params.id);
+  if (overwrite) {
+    const keys = permissionModel.overwriteKeys(db, 'channel', overwrite);
+    if ([...keys.allow, ...keys.deny].some((key) => permissionModel.LEGACY_POSITIONS[key] === undefined)) {
+      return res.status(409).json({ error: 'Use PUT /permissions to update named permission rules' });
+    }
+  }
   db.prepare('DELETE FROM channel_permission_overwrites WHERE id = ? AND channel_id = ?').run(req.params.overwriteId, req.params.id);
   if (overwrite) {
     logAuditAction(AUDIT_ACTIONS.CHANNEL_OVERWRITE_DELETE, req.user.id, {
