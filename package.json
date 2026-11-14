@@ -1,6 +1,6 @@
 {
   "name": "catrealm-server",
-  "version": "1.9.0",
+  "version": "1.9.5",
   "description": "Self-Hosted Realm - CatRealm",
   "main": "src/index.js",
   "scripts": {
