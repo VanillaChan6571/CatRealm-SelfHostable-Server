@@ -9,6 +9,7 @@ const { getSetting } = require('../settings');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
 const { BOT_SCOPES, botHasScope } = require('../bots/scopes');
 const { isServerAvatarOverride } = require('../lib/defaultAvatar');
+const { shrinkAvatarFile } = require('../lib/avatarResize');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../data/uploads');
 const AVATAR_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -144,13 +145,14 @@ router.post('/me/banner-url', (req, res) => {
 });
 
 // POST /api/profile/me/avatar  (multipart/form-data, field "avatar")
-router.post('/me/avatar', upload.single('avatar'), (req, res) => {
+router.post('/me/avatar', upload.single('avatar'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Avatar file required' });
   const maxBytes = Number(getSetting('avatar_max_mb', '10')) * 1024 * 1024;
   if (req.file.size > maxBytes) {
     fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: `Avatar exceeds ${getSetting('avatar_max_mb', '10')}MB limit` });
   }
+  await shrinkAvatarFile(req.file.path);
 
   const existing = db.prepare('SELECT avatar FROM users WHERE id = ?').get(req.user.id);
   const avatarPath = `/uploads/avatars/${req.file.filename}`;

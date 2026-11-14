@@ -32,6 +32,7 @@ const {
   updateOnlineUserDisplayName,
 } = require('../socket/handler');
 const { getPluginStatuses, approvePluginInstall } = require('../bots/pluginManager');
+const { shrinkAvatarFile } = require('../lib/avatarResize');
 
 function requirePermission(permission) {
   return (req, res, next) => {
@@ -351,7 +352,7 @@ router.patch('/:id/profile', requirePermission(PERMISSIONS.MANAGE_BOTS), (req, r
 });
 
 // POST /api/bots/:id/avatar  (multipart, field "avatar")
-router.post('/:id/avatar', requirePermission(PERMISSIONS.MANAGE_BOTS), botImageUpload.single('avatar'), (req, res) => {
+router.post('/:id/avatar', requirePermission(PERMISSIONS.MANAGE_BOTS), botImageUpload.single('avatar'), async (req, res) => {
   const bot = getBotById(db, req.params.id);
   if (!bot) {
     if (req.file) fs.unlink(req.file.path, () => {});
@@ -363,6 +364,7 @@ router.post('/:id/avatar', requirePermission(PERMISSIONS.MANAGE_BOTS), botImageU
     fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: `Avatar exceeds ${getSetting('avatar_max_mb', '10')}MB limit` });
   }
+  await shrinkAvatarFile(req.file.path);
   const existing = db.prepare('SELECT avatar FROM users WHERE id = ?').get(bot.user_id);
   const avatarPath = `/uploads/avatars/${req.file.filename}`;
   db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(avatarPath, bot.user_id);
