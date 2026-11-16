@@ -2,10 +2,16 @@ const router = require('express').Router();
 const { randomUUID } = require('crypto');
 const db = require('../db');
 const { PERMISSIONS, hasPermission, hasChannelPermission } = require('../permissions');
-const { decryptMessageRows } = require('../messageCrypto');
+const { decryptMessageRows, encryptMessageContent } = require('../messageCrypto');
 const { attachSafetyArtifacts } = require('../safety');
 const { attachReactionsToMessages } = require('../reactions');
-const { emitToChannel } = require('../socket/handler');
+const { emitToChannel, emitToChannelEach, emitMessage, messageAuthorFields, relayMentions } = require('../socket/handler');
+const { queueMessageCreatedEvent } = require('../webhooks');
+const { recordThreadActivity } = require('../threadActivity');
+const { channelPolicy, isThreadHidden } = require('../channelPolicy');
+
+const THREAD_NAME_MAX = 100;
+const MESSAGE_MAX = 2000;
 
 function canManageThread(user, thread) {
   return hasChannelPermission(user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)
@@ -44,8 +50,29 @@ router.get('/', (req, res) => {
   if (!hasChannelPermission(req.user, channelId, PERMISSIONS.READ_CHAT_HISTORY, db)) {
     return res.status(403).json({ error: 'Missing permission: read_chat_history' });
   }
-  const threads = db.prepare('SELECT * FROM threads WHERE channel_id = ? ORDER BY created_at DESC').all(channelId);
-  res.json(threads);
+  const rows = db.prepare(`
+    SELECT t.*, (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS reply_count,
+      COALESCE(ts.last_message_at, t.created_at) AS last_activity_at, ts.auto_hide_minutes
+    FROM threads t LEFT JOIN thread_settings ts ON ts.thread_id = t.id
+    WHERE t.channel_id = ? ORDER BY t.created_at DESC
+  `).all(channelId);
+  // Auto-hide: a thread that has been quiet for longer than its setting leaves the list
+  // (and comes back when someone writes in it). Staff can ask for them with includeHidden=1.
+  const autoHideMinutes = channelPolicy(db, channelId)?.effective.threadAutoHideMinutes ?? 0;
+  const threads = rows.map(({ last_activity_at, auto_hide_minutes, ...thread }) => ({
+    ...thread,
+    last_message_at: last_activity_at,
+    hidden: isThreadHidden(last_activity_at, auto_hide_minutes ?? autoHideMinutes),
+  }));
+  // A thread nobody has written in is only listed for its creator and for staff, so
+  // abandoned empty threads do not pile up in everyone's channel list. Forum posts are
+  // listed by /forum and always show.
+  const channel = db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId);
+  if (channel?.type === 'forum') return res.json(threads.map((thread) => ({ ...thread, hidden: false })));
+  const canManage = hasChannelPermission(req.user, channelId, PERMISSIONS.MANAGE_POSTS, db);
+  const includeHidden = canManage && req.query.includeHidden === '1';
+  res.json(threads.filter((thread) => (includeHidden || !thread.hidden)
+    && (thread.reply_count > 0 || canManage || thread.created_by === req.user.id)));
 });
 
 // GET /api/threads/forum?channelId=&archived=
@@ -96,8 +123,11 @@ router.get('/forum', (req, res) => {
 
 // POST /api/threads
 router.post('/', (req, res) => {
-  const { channelId, messageId, name, coverImage } = req.body ?? {};
+  const { channelId, messageId, name, coverImage, firstMessage } = req.body ?? {};
   if (!channelId || !messageId) return res.status(400).json({ error: 'channelId and messageId required' });
+  // Optional opening message, posted into the new thread by its creator.
+  const opening = typeof firstMessage === 'string' ? firstMessage.trim() : '';
+  if (opening.length > MESSAGE_MAX) return res.status(400).json({ error: `Message too long (max ${MESSAGE_MAX} chars)` });
   if (!hasChannelPermission(req.user, channelId, PERMISSIONS.VIEW_CHANNELS, db)) {
     return res.status(403).json({ error: 'Missing permission: view_channels' });
   }
@@ -107,6 +137,10 @@ router.post('/', (req, res) => {
     ? hasPermission(req.user, PERMISSIONS.CREATE_POST_IN_FORUMS) || hasPermission(req.user, PERMISSIONS.CREATE_THREADS)
     : hasPermission(req.user, PERMISSIONS.CREATE_THREADS);
   if (!canPost) return res.status(403).json({ error: 'Missing permission' });
+  if (opening && channel?.type !== 'forum'
+    && !hasChannelPermission(req.user, channelId, PERMISSIONS.SEND_MESSAGES_IN_THREADS, db)) {
+    return res.status(403).json({ error: 'Missing permission: send_messages_in_threads' });
+  }
   const msg = db.prepare('SELECT id, channel_id FROM messages WHERE id = ?').get(messageId);
   if (!msg || msg.channel_id !== channelId) {
     return res.status(400).json({ error: 'Message not in channel' });
@@ -135,7 +169,7 @@ router.post('/', (req, res) => {
   }
 
   const id = randomUUID();
-  const threadName = (typeof name === 'string' && name.trim().length > 0) ? name.trim() : 'Thread';
+  const threadName = (typeof name === 'string' && name.trim().length > 0) ? name.trim().slice(0, THREAD_NAME_MAX) : 'Thread';
   db.prepare('INSERT INTO threads (id, channel_id, parent_message_id, name, created_by) VALUES (?, ?, ?, ?, ?)')
     .run(id, channelId, messageId, threadName, req.user.id);
 
@@ -148,6 +182,66 @@ router.post('/', (req, res) => {
   `).run(id, safeCoverImage);
 
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(id);
+
+  // Threads in ordinary channels: post the opening message, announce the thread in the
+  // channel, and tell connected clients so it appears in their lists straight away.
+  if (channel?.type !== 'forum') {
+    const now = Math.floor(Date.now() / 1000);
+    let replyCount = 0;
+    if (opening) {
+      const openingId = randomUUID();
+      db.prepare(`
+        INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type, thread_id)
+        VALUES (?, ?, ?, ?, ?, 'user', ?)
+      `).run(openingId, channelId, req.user.id, encryptMessageContent(opening), now, id);
+      replyCount = 1;
+      // Same shape and side effects as a message sent over the socket: author styling,
+      // webhook and bot delivery, and mention notifications.
+      const openingMessage = {
+        id: openingId, channel_id: channelId, thread_id: id, user_id: req.user.id, username: req.user.username,
+        content: opening, edited: 0, is_owner: req.user.is_owner ? 1 : 0, ...messageAuthorFields(req.user.id),
+        message_type: 'user', created_at: now, attachments: [], nsfw_tags: [],
+      };
+      emitToChannel(`thread:${id}`, 'message:new', openingMessage);
+      queueMessageCreatedEvent(openingMessage);
+      relayMentions({
+        authorId: req.user.id, authorUsername: req.user.username, authorAvatar: openingMessage.avatar,
+        bot: req.user.is_bot ? req.bot : null,
+        channelId, messageId: openingId, createdAt: now, content: opening,
+      });
+      try {
+        const activity = recordThreadActivity(db, openingMessage);
+        if (activity) emitToChannel(channelId, 'thread:activity', activity);
+      } catch { /* non-critical */ }
+    }
+
+    if (replyCount > 0) {
+      const announcementId = randomUUID();
+      const announcement = `🧶 ${req.user.username} made a thread called ${threadName}`;
+      // attachment_url carries the message the thread grew from, as pin notices do, so older
+      // clients can jump to it. attachment_type names the thread, so newer ones can open it.
+      const threadRef = `thread:${id}`;
+      db.prepare(`
+        INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type, attachment_url, attachment_type)
+        VALUES (?, ?, ?, ?, ?, 'system', ?, ?)
+      `).run(announcementId, channelId, req.user.id, encryptMessageContent(announcement), now, messageId, threadRef);
+      emitMessage(channelId, {
+        id: announcementId, channel_id: channelId, user_id: req.user.id, username: req.user.username,
+        content: announcement, edited: 0, is_owner: req.user.is_owner ? 1 : 0, role_color: null,
+        message_type: 'system', attachment_url: messageId, attachment_type: threadRef, created_at: now,
+      });
+    }
+    // An empty thread is only listed for its creator and staff (see GET /), so only they
+    // hear about it. Everyone else learns of it from thread:activity once someone writes.
+    const created = { ...thread, reply_count: replyCount };
+    if (replyCount > 0) emitToChannel(channelId, 'thread:created', created);
+    else {
+      emitToChannelEach(channelId, 'thread:created', (user) => (user.id === req.user.id
+        || hasChannelPermission(user, channelId, PERMISSIONS.MANAGE_POSTS, db) ? created : null));
+    }
+    return res.status(201).json({ ...thread, reply_count: replyCount });
+  }
+
   res.status(201).json(thread);
 
   // Emit live forum post creation to all clients viewing this channel
@@ -189,6 +283,18 @@ router.post('/', (req, res) => {
   }
 });
 
+// GET /api/threads/:id — one thread, including one that has auto-hidden from the list,
+// so a link to it (such as its announcement) still opens it.
+router.get('/:id', (req, res) => {
+  const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(req.params.id);
+  if (!thread) return res.status(404).json({ error: 'Thread not found' });
+  if (!hasChannelPermission(req.user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)
+    || !hasChannelPermission(req.user, thread.channel_id, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: view_channels' });
+  }
+  res.json(thread);
+});
+
 // PATCH /api/threads/:id
 router.patch('/:id', (req, res) => {
   const { name } = req.body ?? {};
@@ -198,9 +304,15 @@ router.patch('/:id', (req, res) => {
   const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(req.params.id);
   if (!thread) return res.status(404).json({ error: 'Thread not found' });
   if (!canManageThread(req.user, thread)) return res.status(403).json({ error: 'Not allowed to manage this thread' });
-  db.prepare('UPDATE threads SET name = ? WHERE id = ?').run(name.trim(), req.params.id);
+  db.prepare('UPDATE threads SET name = ? WHERE id = ?').run(name.trim().slice(0, THREAD_NAME_MAX), req.params.id);
   const updated = db.prepare('SELECT * FROM threads WHERE id = ?').get(req.params.id);
   res.json(updated);
+  const replyCount = db.prepare('SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?').get(updated.id).count;
+  if (replyCount > 0) emitToChannel(updated.channel_id, 'thread:updated', updated);
+  else {
+    emitToChannelEach(updated.channel_id, 'thread:updated', (user) => (user.id === updated.created_by
+      || hasChannelPermission(user, updated.channel_id, PERMISSIONS.MANAGE_POSTS, db) ? updated : null));
+  }
 });
 
 // DELETE /api/threads/:id
@@ -211,6 +323,7 @@ router.delete('/:id', (req, res) => {
   db.prepare('DELETE FROM threads WHERE id = ?').run(req.params.id);
   res.json({ success: true });
   emitToChannel(thread.channel_id, 'forum:deleted', { id: req.params.id, channel_id: thread.channel_id });
+  emitToChannel(thread.channel_id, 'thread:deleted', { id: req.params.id, channel_id: thread.channel_id });
 });
 
 // GET /api/threads/:id/messages

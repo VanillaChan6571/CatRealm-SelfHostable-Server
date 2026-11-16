@@ -189,7 +189,7 @@ test('thread mutations require channel access and authorship or moderation permi
   const db = makeDatabase();
   t.after(() => db.close());
   const router = loadModule('src/routes/threads.js', {
-    '../db': db, '../socket/handler': { emitToChannel() {} },
+    '../db': db, '../socket/handler': { emitToChannel() {}, emitToChannelEach() {} },
     '../reactions': { attachReactionsToMessages: rows => rows },
   });
   for (const method of ['patch', 'delete']) {

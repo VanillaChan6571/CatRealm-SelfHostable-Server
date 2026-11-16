@@ -125,3 +125,31 @@ test('template preview rejects an Administrator grant to everyone', () => {
   unsafe.roles[0].permissions = '8';
   assert.throws(() => prepareDiscordTemplate(unsafe), /Administrator to @everyone/);
 });
+
+test('numeric Discord template IDs import and match role overwrites', () => {
+  const numeric = structuredClone(template);
+  for (const role of numeric.roles) role.id = Number(role.id);
+  for (const channel of numeric.channels) {
+    channel.id = Number(channel.id);
+    if (channel.parent_id) channel.parent_id = Number(channel.parent_id);
+    for (const overwrite of channel.permission_overwrites) overwrite.id = Number(overwrite.id);
+  }
+  const prepared = prepareDiscordTemplate(numeric);
+  assert.deepEqual(prepared.roles.map((role) => role.id), ['100', '101']);
+  assert.equal(prepared.channels[1].parentId, '200');
+  assert.equal(prepared.channels[1].overwrites[1].targetId, '101');
+
+  const db = fixture();
+  try {
+    const result = importDiscordTemplate(db, prepared, 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'owner', () => {});
+    assert.equal(result.roles.length, 1);
+    assert.equal(result.channels.length, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM channel_permission_overwrites').get().count, 2);
+  } finally { db.close(); }
+
+  const duplicate = structuredClone(numeric);
+  duplicate.roles[1].id = '100';
+  assert.throws(() => prepareDiscordTemplate(duplicate), /Duplicate role ID/);
+  duplicate.roles[1].id = Number.MAX_SAFE_INTEGER + 1;
+  assert.throws(() => prepareDiscordTemplate(duplicate), /Invalid role/);
+});

@@ -50,4 +50,8 @@ test('read-state flags channels with newer messages from others, per user', (t) 
   db.prepare("INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type) VALUES ('new2', 'public', 'bob', 'x', 310, 'user')").run();
   // Counts only Bob's visible messages after the read position (not the thread/scheduled/system ones).
   assert.deepEqual(readState(getUser(db, 'alice')).public, { lastMessageAt: 310, lastReadAt: 150, muted: false, unread: true, unreadCount: 2 });
+
+  // In a forum the replies to posts are the activity, so there they do count.
+  db.prepare("UPDATE channels SET type = 'forum' WHERE id = 'public'").run();
+  assert.deepEqual(readState(getUser(db, 'alice')).public, { lastMessageAt: 310, lastReadAt: 150, muted: false, unread: true, unreadCount: 3 });
 });

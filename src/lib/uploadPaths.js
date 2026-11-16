@@ -28,4 +28,11 @@ function resolveUploadForDeletion(directory, url) {
   }
 }
 
-module.exports = { localUploadSuffix, resolveUploadForDeletion };
+function removeLocalUploads(directory, urls) {
+  for (const url of new Set(urls)) {
+    const file = resolveUploadForDeletion(directory, url);
+    if (file) fs.unlink(file, () => {});
+  }
+}
+
+module.exports = { localUploadSuffix, resolveUploadForDeletion, removeLocalUploads };

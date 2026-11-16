@@ -108,6 +108,26 @@ const THUMBNAIL_IMAGE_MIME_TYPES = new Set([
   'image/avif',
 ]);
 
+const BOARD_BACKGROUND_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+function isChannelBackgroundImage(file) {
+  if (!BOARD_BACKGROUND_IMAGE_MIME_TYPES.has(file.mimetype)) return false;
+  const head = Buffer.alloc(12);
+  let fd;
+  try {
+    fd = fs.openSync(file.path, 'r');
+    const read = fs.readSync(fd, head, 0, head.length, 0);
+    if (file.mimetype === 'image/png') return read >= 8 && head.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+    if (file.mimetype === 'image/jpeg') return read >= 3 && head.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'));
+    if (file.mimetype === 'image/webp') return read >= 12 && head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP';
+    return read >= 6 && ['GIF87a', 'GIF89a'].includes(head.toString('ascii', 0, 6));
+  } catch (_err) {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 async function generateChatThumbnail(file) {
   if (!sharp || !file?.path || !THUMBNAIL_IMAGE_MIME_TYPES.has(file.mimetype)) return null;
   const base = path.basename(file.filename, path.extname(file.filename));
@@ -167,7 +187,20 @@ router.post('/chat', (req, res, next) => {
   };
 
   const channelId = typeof req.body?.channelId === 'string' ? req.body.channelId.trim() : '';
-  if (channelId) {
+  const appearanceKind = req.body?.purpose === 'board-background' ? 'board'
+    : req.body?.purpose === 'tracker-background' ? 'tracker' : null;
+  if (appearanceKind) {
+    const channel = channelId && db.prepare('SELECT type FROM channels WHERE id = ?').get(channelId);
+    const permission = appearanceKind === 'board' ? 'MANAGE_BOARDS' : 'MANAGE_ISSUES';
+    if (channel?.type !== appearanceKind || !hasChannelPermission(req.user, channelId, permission, db)) {
+      cleanupUploadedFile();
+      return res.status(403).json({ error: `Missing permission: ${permission.toLowerCase()}` });
+    }
+    if (!isChannelBackgroundImage(req.file)) {
+      cleanupUploadedFile();
+      return res.status(400).json({ error: 'Channel background must be a PNG, JPEG, WebP, or GIF image' });
+    }
+  } else if (channelId) {
     if (!hasChannelPermission(req.user, channelId, PERMISSIONS.ATTACH_FILES, db)) {
       cleanupUploadedFile();
       return res.status(403).json({ error: 'Missing permission: send_media' });

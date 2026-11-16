@@ -1004,6 +1004,13 @@ if (!threadSettingsColumnsAll.includes('cover_image')) {
   pteroLog('[CatRealm] Added thread_settings.cover_image column');
 }
 
+// Forum posts used to keep their creation time as "last activity" forever.
+{
+  const { backfillThreadActivity } = require('./threadActivity');
+  const fixed = backfillThreadActivity(db);
+  if (fixed > 0) pteroLog(`[CatRealm] Updated last activity on ${fixed} thread(s) from their newest message`);
+}
+
 // Seed default moderation settings
 const modSettingsCount = db.prepare('SELECT COUNT(*) as c FROM moderation_settings').get().c;
 if (modSettingsCount === 0) {
@@ -1212,5 +1219,6 @@ if (unmappedPermissionCount) {
 
 // Tracker and Board channels; needs the named permission tables above.
 require('./channelItems').migrate(db);
+require('./channelPolicy').migrate(db);
 
 module.exports = db;

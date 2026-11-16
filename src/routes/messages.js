@@ -6,6 +6,7 @@ const { decryptMessageRows, isSecureModeEnabled, encryptMessageContent } = requi
 const { searchLimiter } = require('../middleware/rateLimits');
 const { attachReactionsToMessages, normalizeReactionToken, removeMessageReactions } = require('../reactions');
 const { emitToChannel } = require('../socket/handler');
+const { tagMediaMessage } = require('../channelPolicy');
 const { attachSafetyArtifacts } = require('../safety');
 
 function attachNsfwTags(messages) {
@@ -151,6 +152,8 @@ router.post('/forum', (req, res) => {
     : null;
   db.prepare('INSERT INTO messages (id, channel_id, user_id, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, channelId, req.user.id, stored, attachmentsJson, now);
+  // Forum post bodies with media get the channel's automatic spoiler/NSFW marks too.
+  const nsfwTags = attachmentsJson ? tagMediaMessage(db, id, channelId, []) : [];
 
   const msg = db.prepare(`
     SELECT m.*, u.username, u.avatar, u.account_type,
@@ -166,7 +169,7 @@ router.post('/forum', (req, res) => {
   if (decrypted.attachments) {
     try { parsedAttachments = JSON.parse(decrypted.attachments); } catch { parsedAttachments = []; }
   }
-  res.status(201).json({ ...decrypted, attachments: parsedAttachments });
+  res.status(201).json({ ...decrypted, attachments: parsedAttachments, nsfw_tags: nsfwTags });
 });
 
 const SEARCH_SELECT = `

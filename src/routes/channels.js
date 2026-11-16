@@ -1,7 +1,9 @@
 const router = require('express').Router();
 const CHANNEL_TYPES = ['basic', 'media', 'voice', 'announcement', 'forum', 'theater', 'tracker', 'board'];
 const { randomUUID } = require('crypto');
+const path = require('path');
 const db = require('../db');
+const { removeLocalUploads } = require('../lib/uploadPaths');
 const permissionModel = require('../permissionModel');
 const {
   PERMISSIONS,
@@ -95,12 +97,13 @@ router.get('/', (req, res) => {
 
 // GET /api/channels/read-state - latest message vs. the caller's read position, per visible channel.
 // Clients that are not connected to this realm's socket (mobile background, other servers) use it
-// to decide which channels to highlight. Thread replies and unpublished scheduled messages don't count.
+// to decide which channels to highlight. Unpublished scheduled messages don't count. Thread replies
+// don't count either, except in forum channels, where replies to posts are the channel's activity.
 router.get('/read-state', (req, res) => {
   const channels = visibleChannelListForUser(req.user, db.prepare('SELECT * FROM channels').all());
   const latestStmt = db.prepare(`
     SELECT created_at, user_id FROM messages
-    WHERE channel_id = ? AND thread_id IS NULL AND scheduled_at IS NULL AND message_type != 'system'
+    WHERE channel_id = ? AND (thread_id IS NULL OR ? = 1) AND scheduled_at IS NULL AND message_type != 'system'
     ORDER BY created_at DESC LIMIT 1
   `);
   // Capped so a never-read busy channel stays a bounded index scan; clients show 99+.
@@ -108,7 +111,7 @@ router.get('/read-state', (req, res) => {
     SELECT COUNT(*) AS n FROM (
       SELECT 1 FROM messages
       WHERE channel_id = ? AND created_at > ? AND user_id != ?
-        AND thread_id IS NULL AND scheduled_at IS NULL AND message_type != 'system'
+        AND (thread_id IS NULL OR ? = 1) AND scheduled_at IS NULL AND message_type != 'system'
       LIMIT 100
     )
   `);
@@ -119,7 +122,8 @@ router.get('/read-state', (req, res) => {
   );
   const state = {};
   for (const channel of channels) {
-    const latest = latestStmt.get(channel.id);
+    const countReplies = channel.type === 'forum' ? 1 : 0;
+    const latest = latestStmt.get(channel.id, countReplies);
     const pref = prefs.get(channel.id);
     const lastReadAt = pref?.last_read_at ?? 0;
     // Your own latest message means you've seen the channel up to there.
@@ -129,7 +133,7 @@ router.get('/read-state', (req, res) => {
       lastReadAt,
       muted: !!pref?.muted,
       unread,
-      unreadCount: unread ? countStmt.get(channel.id, lastReadAt, req.user.id).n : 0,
+      unreadCount: unread ? countStmt.get(channel.id, lastReadAt, req.user.id, countReplies).n : 0,
     };
   }
   res.json({ channels: state });
@@ -173,8 +177,14 @@ router.delete('/:id', (req, res) => {
   if (isSystemRulesChannel(channel)) {
     return res.status(400).json({ error: 'Realm Rules is a system channel and cannot be deleted' });
   }
+  const attachmentUrls = db.prepare(`
+    SELECT a.url FROM tracker_issue_attachments a
+    JOIN channel_items i ON i.id = a.item_id
+    WHERE i.channel_id = ?
+  `).all(channel.id).map((row) => row.url);
   queueChannelDeletedEvent(channel);
   db.prepare('DELETE FROM channels WHERE id = ?').run(req.params.id);
+  removeLocalUploads(process.env.UGC_IMAGES_DIR || path.join(__dirname, '../../data/ugc/images'), attachmentUrls);
   logAuditAction(AUDIT_ACTIONS.CHANNEL_DELETE, req.user.id, {
     targetType: 'channel',
     targetId: channel.id,

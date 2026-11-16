@@ -47,8 +47,9 @@ function mapDiscordPermissions(value) {
   return permissions.normalizeKeys(keys);
 }
 
-function validId(value) {
-  return typeof value === 'string' && /^[0-9]{1,32}$/.test(value);
+function templateId(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+  return typeof value === 'string' && /^[0-9]{1,32}$/.test(value) ? value : null;
 }
 
 function prepareDiscordTemplate(template) {
@@ -62,11 +63,14 @@ function prepareDiscordTemplate(template) {
   }
   const roleIds = new Set();
   const roles = template.roles.map((role) => {
-    if (!validId(role?.id) || roleIds.has(role.id) || typeof role.name !== 'string' ||
-        !role.name.trim() || role.name.length > 32) throw new RangeError('Invalid or duplicate role');
-    roleIds.add(role.id);
+    const id = templateId(role?.id);
+    if (id === null || typeof role.name !== 'string' || !role.name.trim() || role.name.length > 32) {
+      throw new RangeError('Invalid role');
+    }
+    if (roleIds.has(id)) throw new RangeError('Duplicate role ID');
+    roleIds.add(id);
     return {
-      id: role.id, name: role.name, color: Number.isInteger(role.color) && role.color >= 0 && role.color <= 0xffffff ? role.color : 0,
+      id, name: role.name, color: Number.isInteger(role.color) && role.color >= 0 && role.color <= 0xffffff ? role.color : 0,
       position: Number.isSafeInteger(role.position) ? role.position : 0,
       mentionable: role.mentionable === true, hoist: role.hoist === true,
       permissionKeys: mapDiscordPermissions(role.permissions),
@@ -80,32 +84,37 @@ function prepareDiscordTemplate(template) {
   const channelIds = new Set();
   const warnings = ['Default member permissions will be replaced by the template @everyone role'];
   const channels = template.channels.map((channel) => {
-    if (!validId(channel?.id) || channelIds.has(channel.id) || typeof channel.name !== 'string' ||
-        !channel.name.trim() || channel.name.length > 100 || !Number.isInteger(channel.type)) {
-      throw new RangeError('Invalid or duplicate channel');
+    const id = templateId(channel?.id);
+    if (id === null || typeof channel.name !== 'string' || !channel.name.trim() ||
+        channel.name.length > 100 || !Number.isInteger(channel.type)) {
+      throw new RangeError('Invalid channel');
     }
-    channelIds.add(channel.id);
+    const parentId = channel.parent_id == null ? null : templateId(channel.parent_id);
+    if (channel.parent_id != null && parentId === null) throw new RangeError('Invalid channel parent ID');
+    if (channelIds.has(id)) throw new RangeError('Duplicate channel ID');
+    channelIds.add(id);
     const overwrites = Array.isArray(channel.permission_overwrites) ? channel.permission_overwrites : [];
     if (overwrites.length > 250) throw new RangeError('Too many channel overwrites');
     const overwriteTargets = new Set();
     const parsedOverwrites = overwrites.map((overwrite) => {
-      if (!validId(overwrite?.id) || ![0, 1].includes(overwrite.type)) throw new RangeError('Invalid channel overwrite');
-      if (overwrite.type === 0 && !roleIds.has(overwrite.id)) throw new RangeError('Overwrite references an unknown role');
-      const target = `${overwrite.type}:${overwrite.id}`;
+      const overwriteId = templateId(overwrite?.id);
+      if (overwriteId === null || ![0, 1].includes(overwrite.type)) throw new RangeError('Invalid channel overwrite');
+      if (overwrite.type === 0 && !roleIds.has(overwriteId)) throw new RangeError('Overwrite references an unknown role');
+      const target = `${overwrite.type}:${overwriteId}`;
       if (overwriteTargets.has(target)) throw new RangeError('Duplicate channel overwrite target');
       overwriteTargets.add(target);
       const allowKeys = mapDiscordPermissions(overwrite.allow).filter((key) => key !== 'ADMINISTRATOR');
       const denyKeys = mapDiscordPermissions(overwrite.deny).filter((key) => key !== 'ADMINISTRATOR');
       if (allowKeys.some((key) => denyKeys.includes(key))) throw new RangeError('Conflicting channel overwrite');
       return {
-        targetId: overwrite.id, targetType: overwrite.type === 0 ? 'role' : 'user',
+        targetId: overwriteId, targetType: overwrite.type === 0 ? 'role' : 'user',
         allowKeys, denyKeys,
       };
     });
     return {
-      id: channel.id, name: channel.name, type: channel.type,
+      id, name: channel.name, type: channel.type,
       position: Number.isSafeInteger(channel.position) ? channel.position : 0,
-      parentId: channel.parent_id || null, nsfw: channel.nsfw === true,
+      parentId, nsfw: channel.nsfw === true,
       overwrites: parsedOverwrites,
     };
   });

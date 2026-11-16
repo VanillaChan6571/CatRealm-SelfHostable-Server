@@ -629,6 +629,7 @@ app.use('/api/embeds', authenticateToken, embedsRoutes);
 app.use('/api/theater',  authenticateToken, theaterRoutes);
 app.use('/api/tracker',  authenticateToken, require('./routes/tracker'));
 app.use('/api/boards',   authenticateToken, require('./routes/boards'));
+app.use('/api/policy',   authenticateToken, require('./routes/policy'));
 app.use('/api/media', mediaRoutes);
 app.use('/api/webhooks', webhooksRoutes);
 app.use('/api/bots', authenticateToken, botsRoutes);

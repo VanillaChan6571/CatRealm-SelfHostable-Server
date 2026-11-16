@@ -20,6 +20,8 @@ const { BOT_SCOPES, botHasScope, getBotConsent } = require('../bots/scopes');
 const pteroLog = require('../logger');
 const { encryptMessageContent, decryptMessageContent } = require('../messageCrypto');
 const { queueMessageCreatedEvent } = require('../webhooks');
+const { recordThreadActivity } = require('../threadActivity');
+const { threadPolicy, tagMediaMessage } = require('../channelPolicy');
 const { normalizeReactionToken, toggleMessageReaction } = require('../reactions');
 const { relayMentionPush, relayMentionNotifications } = require('../lib/pushRelay');
 const { AUDIT_ACTIONS, logAuditAction } = require('../lib/auditLog');
@@ -275,7 +277,10 @@ setInterval(() => {
 
       clearStmt.run(msg.id);
 
-      if (msg.thread_id) ioInstance.to(`thread:${msg.thread_id}`).emit('message:new', payload);
+      if (msg.thread_id) {
+        ioInstance.to(`thread:${msg.thread_id}`).emit('message:new', payload);
+        emitThreadActivity(payload);
+      }
       else ioInstance.to(msg.channel_id).emit('message:new', payload);
     }
     if (due.length > 0) pteroLog(`[CatRealm] Published ${due.length} scheduled message(s)`);
@@ -326,6 +331,80 @@ function unlinkUgcImageIfUnreferenced(attachmentUrl) {
   try {
     fs.rmSync(filePath, { force: true });
   } catch {}
+}
+
+// Tells the whole channel that a thread or forum post has a new message. The
+// message itself only goes to sockets with that thread open, so this is what lets
+// everyone else show an unread badge, notify, and re-sort forum posts.
+function emitThreadActivity(message) {
+  try {
+    const activity = recordThreadActivity(db, message);
+    if (activity && ioInstance) ioInstance.to(activity.channelId).emit('thread:activity', activity);
+  } catch (err) {
+    pteroLog(`[CatRealm] thread activity update failed: ${err.message}`);
+  }
+}
+
+// Role styling, avatar and display name a message carries for its author.
+function messageAuthorFields(userId) {
+  const topRole = db.prepare(`
+    SELECT r.icon FROM roles r JOIN user_roles ur ON ur.role_id = r.id
+    WHERE ur.user_id = ? ORDER BY r.position DESC LIMIT 1
+  `).get(userId);
+  const colorRole = db.prepare(COLOR_ROLE_SQL).get(userId);
+  const userInfo = db.prepare(`
+    SELECT u.avatar, COALESCE(dno.display_name, u.display_name) as display_name
+    FROM users u LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
+    WHERE u.id = ?
+  `).get(userId);
+  return {
+    role_color: colorRole?.color || null,
+    role_icon: topRole?.icon || null,
+    role_style_type: colorRole?.style_type || 'solid',
+    role_style_colors: colorRole?.style_colors || null,
+    avatar: userInfo?.avatar || null,
+    display_name: userInfo?.display_name || null,
+  };
+}
+
+// @mention push relay — only runs if CENTRAL_SERVER_URL + PUSH_RELAY_SECRET configured.
+// `bot` is the sending bot, if any: it needs each user's "mentions" consent to ping them.
+function relayMentions({ authorId, authorUsername, authorAvatar, bot = null, channelId, messageId, createdAt, content }) {
+  if (!content || !content.includes('@')) return;
+  void (async () => {
+    try {
+      const allMembers = db.prepare('SELECT id, username, central_id FROM users').all();
+      const mentioned = allMembers.filter((m) => {
+        if (m.id === authorId) return false;
+        const isMentioned = (
+          new RegExp(`(^|\\s)@${escapeRegex(m.username)}(\\b|$)`, 'i').test(content) ||
+          new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(content) ||
+          content.includes(`<@${m.id}>`)
+        );
+        if (!isMentioned) return false;
+        if (bot && !botHasScope(db, bot.id, m.id, BOT_SCOPES.MENTIONS)) return false;
+        // Skip push only if the user has an active foregrounded session
+        return !isUserForegrounded(m.id);
+      });
+      if (mentioned.length === 0) return;
+      const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
+      const shared = {
+        channelId, channelName: ch?.name ?? channelId, senderUsername: authorUsername,
+        senderAvatarUrl: authorAvatar || null, contentPreview: content,
+      };
+      const signedRelayRecipients = await relayMentionNotifications({
+        ...shared, recipientLocalUserIds: mentioned.map((m) => m.id), messageId, messageCreatedAt: createdAt,
+      });
+      // Use central_id when available — the central push server indexes tokens by
+      // central user ID, not the local UUID the self-hosted server assigns.
+      await relayMentionPush({
+        ...shared,
+        recipientUserIds: mentioned.filter((m) => !signedRelayRecipients.has(m.id)).map((m) => m.central_id || m.id),
+      });
+    } catch (err) {
+      pteroLog(`[PushRelay] Mention detection error: ${err.message}`);
+    }
+  })();
 }
 
 function emitMessage(channelId, message) {
@@ -1474,22 +1553,33 @@ function setupSocketHandlers(io) {
         return fail('Media channels do not allow text-only messages');
       }
 
-      // Check slowmode
+      // Check slowmode. A thread has its own (set on the thread, its channel or its category,
+      // or synced with the channel's) and is paced by the sender's last message in that thread.
       const channelSettings = db.prepare('SELECT slowmode FROM channel_settings WHERE channel_id = ?').get(channelId);
-      if (channelSettings && channelSettings.slowmode > 0) {
+      const slowmodeSeconds = threadId
+        ? (threadPolicy(db, threadId)?.effective.slowmode ?? 0)
+        : (channelSettings?.slowmode ?? 0);
+      if (slowmodeSeconds > 0) {
         const hasBypass = hasChannelPermission(user, channelId, PERMISSIONS.BYPASS_SLOWMODE, db);
         if (!hasBypass) {
-          const lastMessage = db.prepare(`
-            SELECT created_at FROM messages
-            WHERE channel_id = ? AND user_id = ? AND message_type = 'user' AND scheduled_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT 1
-          `).get(channelId, user.id);
+          const lastMessage = threadId
+            ? db.prepare(`
+              SELECT created_at FROM messages
+              WHERE thread_id = ? AND user_id = ? AND message_type = 'user' AND scheduled_at IS NULL
+              ORDER BY created_at DESC
+              LIMIT 1
+            `).get(threadId, user.id)
+            : db.prepare(`
+              SELECT created_at FROM messages
+              WHERE channel_id = ? AND user_id = ? AND message_type = 'user' AND scheduled_at IS NULL
+              ORDER BY created_at DESC
+              LIMIT 1
+            `).get(channelId, user.id);
           if (lastMessage) {
             const now = Math.floor(Date.now() / 1000);
             const timeSince = now - lastMessage.created_at;
-            if (timeSince < channelSettings.slowmode) {
-              const remaining = channelSettings.slowmode - timeSince;
+            if (timeSince < slowmodeSeconds) {
+              const remaining = slowmodeSeconds - timeSince;
               return fail(`Slowmode active: please wait ${remaining}s before sending another message`);
             }
           }
@@ -1585,7 +1675,7 @@ function setupSocketHandlers(io) {
           nsfwTags
             .filter((tag) => typeof tag === 'string')
             .map((tag) => String(tag).toLowerCase().trim())
-            .filter((tag) => ['blood', 'gore', 'violence', 'lewd', 'sexual', 'disturbing', 'spoiler'].includes(tag))
+            .filter((tag) => ['blood', 'gore', 'violence', 'lewd', 'sexual', 'disturbing', 'spoiler', 'nsfw'].includes(tag))
         ))
         : [];
       const normalizedVoiceExpiresAt = (typeof voice_expires_at === 'number' && Number.isFinite(voice_expires_at))
@@ -1611,27 +1701,9 @@ function setupSocketHandlers(io) {
         normalizedVoiceExpiresAt,
         normalizedScheduledAt
       );
-      if (normalizedNsfwTags.length > 0) {
-        const insertTagStmt = db.prepare('INSERT OR IGNORE INTO message_nsfw_tags (message_id, tag) VALUES (?, ?)');
-        for (const tag of normalizedNsfwTags) {
-          insertTagStmt.run(id, tag);
-        }
-      }
+      // The sender's own tags plus whatever the channel or category marks automatically.
+      const finalNsfwTags = hasAttachment ? tagMediaMessage(db, id, channelId, normalizedNsfwTags) : [];
 
-      const topRole = db.prepare(`
-        SELECT r.color, r.hoist, r.icon, r.style_type, r.style_colors FROM roles r
-        JOIN user_roles ur ON ur.role_id = r.id
-        WHERE ur.user_id = ?
-        ORDER BY r.position DESC
-        LIMIT 1
-      `).get(user.id);
-      const colorRole = db.prepare(COLOR_ROLE_SQL).get(user.id);
-      const userInfo = db.prepare(`
-        SELECT u.avatar, COALESCE(dno.display_name, u.display_name) as display_name
-        FROM users u
-        LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
-        WHERE u.id = ?
-      `).get(user.id);
       const message = {
         id,
         channel_id: channelId,
@@ -1640,19 +1712,14 @@ function setupSocketHandlers(io) {
         content:    trimmed,
         edited:     0,
         is_owner:   authUser.is_owner ? 1 : 0,
-        role_color: colorRole?.color || null,
-        role_icon: topRole?.icon || null,
-        role_style_type: colorRole?.style_type || 'solid',
-        role_style_colors: colorRole?.style_colors || null,
-        avatar: userInfo?.avatar || null,
-        display_name: userInfo?.display_name || null,
+        ...messageAuthorFields(user.id),
         verified: authUser.verified || false,
         is_bot: authUser.is_bot ? 1 : 0,
         attachment_url: attachmentUrl,
         attachment_type: attachmentType,
         attachment_size: attachmentSize,
         attachments: attachmentsArray,
-        nsfw_tags: normalizedNsfwTags,
+        nsfw_tags: finalNsfwTags,
         message_type: 'user',
         thread_id: threadId || null,
         created_at: now,
@@ -1682,62 +1749,16 @@ function setupSocketHandlers(io) {
       } else {
         if (threadId) {
           io.to(`thread:${threadId}`).emit('message:new', message);
+          emitThreadActivity(message);
         } else {
           io.to(channelId).emit('message:new', message);
         }
         queueMessageCreatedEvent(message);
 
-        // @mention push relay — only runs if CENTRAL_SERVER_URL + PUSH_RELAY_SECRET configured
-        if (trimmed && trimmed.includes('@')) {
-          void (async () => {
-            try {
-              const allMembers = db.prepare('SELECT id, username, central_id FROM users').all();
-              const mentioned = allMembers.filter((m) => {
-                if (m.id === user.id) return false;
-                const isMentioned = (
-                  new RegExp(`(^|\\s)@${escapeRegex(m.username)}(\\b|$)`, 'i').test(trimmed) ||
-                  new RegExp(`(^|\\s)@${escapeRegex(m.id)}(\\b|$)`, 'i').test(trimmed) ||
-                  trimmed.includes(`<@${m.id}>`)
-                );
-                if (!isMentioned) return false;
-                // Bot authors need the user's per-user "mentions" consent to ping them.
-                if (authUser.is_bot && socket.bot && !botHasScope(db, socket.bot.id, m.id, BOT_SCOPES.MENTIONS)) return false;
-                // Skip push only if the user has an active foregrounded session
-                if (isUserForegrounded(m.id)) return false;
-                return true;
-              });
-              if (mentioned.length > 0) {
-                const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
-                const signedRelayRecipients = await relayMentionNotifications({
-                  recipientLocalUserIds: mentioned.map((m) => m.id),
-                  channelId,
-                  channelName: ch?.name ?? channelId,
-                  messageId: id,
-                  messageCreatedAt: now,
-                  senderUsername: authUser.username,
-                  senderAvatarUrl: userInfo?.avatar || null,
-                  contentPreview: trimmed,
-                });
-                // Use central_id when available — the central push server indexes tokens by
-                // central user ID, not the local UUID the self-hosted server assigns.
-                // Local-only users without a central account have no push token registered there
-                // so they're filtered out by dispatchPush anyway; no harm including them.
-                await relayMentionPush({
-                  recipientUserIds: mentioned
-                    .filter((m) => !signedRelayRecipients.has(m.id))
-                    .map((m) => m.central_id || m.id),
-                  channelId,
-                  channelName: ch?.name ?? channelId,
-                  senderUsername: authUser.username,
-                  senderAvatarUrl: userInfo?.avatar || null,
-                  contentPreview: trimmed,
-                });
-              }
-            } catch (err) {
-              pteroLog(`[PushRelay] Mention detection error: ${err.message}`);
-            }
-          })();
-        }
+        relayMentions({
+          authorId: user.id, authorUsername: authUser.username, authorAvatar: message.avatar,
+          bot: authUser.is_bot ? socket.bot : null, channelId, messageId: id, createdAt: now, content: trimmed,
+        });
       }
 
       reply({ status: 'ok', messageId: id, scheduled: !!normalizedScheduledAt });
@@ -1983,6 +2004,7 @@ function setupSocketHandlers(io) {
       };
       if (interaction.threadId) {
         io.to(`thread:${interaction.threadId}`).emit('message:new', message);
+        emitThreadActivity(message);
       } else {
         io.to(interaction.channelId).emit('message:new', message);
       }
@@ -2373,10 +2395,27 @@ function emitToChannel(channelId, event, data) {
   ioInstance.to(channelId).emit(event, data);
 }
 
+// Like emitToChannel, but each connected member gets its own payload: build(user)
+// returns what that user may see, or null/undefined to send them nothing.
+function emitToChannelEach(channelId, event, build) {
+  if (!ioInstance) return;
+  const room = ioInstance.sockets.adapter.rooms.get(channelId);
+  if (!room) return;
+  for (const socketId of room) {
+    const socket = ioInstance.sockets.sockets.get(socketId);
+    if (!socket?.user) continue;
+    const data = build(socket.user);
+    if (data !== null && data !== undefined) socket.emit(event, data);
+  }
+}
+
 module.exports = setupSocketHandlers;
 module.exports.broadcastChannelUpdate = broadcastChannelUpdate;
 module.exports.emitMessage = emitMessage;
 module.exports.emitToChannel = emitToChannel;
+module.exports.emitToChannelEach = emitToChannelEach;
+module.exports.messageAuthorFields = messageAuthorFields;
+module.exports.relayMentions = relayMentions;
 module.exports.emitServerInfoUpdate = emitServerInfoUpdate;
 module.exports.emitServerImportStatus = emitServerImportStatus;
 module.exports.emitPermissionsChanged = emitPermissionsChanged;

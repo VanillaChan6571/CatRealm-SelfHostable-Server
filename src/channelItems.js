@@ -38,7 +38,8 @@ function migrate(db) {
       updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
       -- issues
       number      INTEGER,
-      state       TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'closed')),
+      state       TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'in_progress', 'blocked', 'closed')),
+      priority    TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low', 'normal', 'high', 'urgent')),
       closed_at   INTEGER,
       closed_by   TEXT,
       -- cards
@@ -92,6 +93,95 @@ function migrate(db) {
       created_at  INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS idx_channel_item_events_item ON channel_item_events(item_id, created_at);
+  `);
+  // SQLite cannot alter a CHECK constraint. Rebuild only the original two-state table;
+  // keep its id values so labels, comments and other child rows remain attached.
+  const itemSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channel_items'").get()?.sql || '';
+  if (/CHECK\s*\(\s*state\s+IN\s*\(\s*'open'\s*,\s*'closed'\s*\)\s*\)/i.test(itemSchema)) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE channel_items_new (
+            id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK(kind IN ('issue', 'card')),
+            title TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            number INTEGER,
+            state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'in_progress', 'blocked', 'closed')),
+            priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low', 'normal', 'high', 'urgent')),
+            closed_at INTEGER,
+            closed_by TEXT,
+            list_id TEXT REFERENCES board_lists(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            due_at INTEGER,
+            archived INTEGER NOT NULL DEFAULT 0
+          );
+          INSERT INTO channel_items_new (id, channel_id, kind, title, body, created_by, created_at, updated_at,
+            number, state, priority, closed_at, closed_by, list_id, position, due_at, archived)
+          SELECT id, channel_id, kind, title, body, created_by, created_at, updated_at,
+            number, state, 'normal', closed_at, closed_by, list_id, position, due_at, archived FROM channel_items;
+          DROP TABLE channel_items;
+          ALTER TABLE channel_items_new RENAME TO channel_items;
+          CREATE UNIQUE INDEX idx_channel_items_number ON channel_items(channel_id, number) WHERE number IS NOT NULL;
+          CREATE INDEX idx_channel_items_channel ON channel_items(channel_id, kind, state);
+          CREATE INDEX idx_channel_items_list ON channel_items(list_id, position);
+        `);
+      })();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+  // List appearance and visibility arrived after the first release of board_lists.
+  const listColumns = db.prepare('PRAGMA table_info(board_lists)').all().map((column) => column.name);
+  if (!listColumns.includes('cover_image')) db.exec('ALTER TABLE board_lists ADD COLUMN cover_image TEXT');
+  if (!listColumns.includes('icon')) db.exec('ALTER TABLE board_lists ADD COLUMN icon TEXT');
+  if (!listColumns.includes('staff_only')) db.exec('ALTER TABLE board_lists ADD COLUMN staff_only INTEGER NOT NULL DEFAULT 0');
+  // Width the cover is drawn at, in pixels; NULL fits the cover to the list's width.
+  if (!listColumns.includes('cover_size')) db.exec('ALTER TABLE board_lists ADD COLUMN cover_size INTEGER');
+  // Per-board presentation: a title (NULL = the channel's name) and a background (JSON, NULL = none).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS board_settings (
+      channel_id TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+      title      TEXT,
+      background TEXT
+    );
+    CREATE TABLE IF NOT EXISTS tracker_settings (
+      channel_id TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+      title      TEXT,
+      background TEXT
+    );
+  `);
+  // Roles that may see a staff-only list in addition to board managers.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS board_list_roles (
+      list_id  TEXT NOT NULL REFERENCES board_lists(id) ON DELETE CASCADE,
+      role_id  TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (list_id, role_id)
+    );
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tracker_issue_watchers (
+      item_id TEXT NOT NULL REFERENCES channel_items(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (item_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tracker_issue_watchers_user ON tracker_issue_watchers(user_id);
+    CREATE TABLE IF NOT EXISTS tracker_issue_attachments (
+      id TEXT PRIMARY KEY,
+      item_id TEXT NOT NULL REFERENCES channel_items(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      mime TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      uploaded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_tracker_issue_attachments_item ON tracker_issue_attachments(item_id, created_at);
   `);
   if (fresh) {
     const grant = db.prepare(`INSERT OR IGNORE INTO role_permission_grants (role_id, permission_key)
@@ -172,7 +262,8 @@ function serializeItems(db, rows) {
       comment_count: commentCounts.get(row.id) || 0,
     };
     return row.kind === 'issue'
-      ? { ...item, number: row.number, state: row.state, closed_at: row.closed_at, closed_by: row.closed_by }
+      ? { ...item, number: row.number, state: row.state, priority: row.priority, due_at: row.due_at,
+          closed_at: row.closed_at, closed_by: row.closed_by }
       : { ...item, list_id: row.list_id, position: row.position, due_at: row.due_at, archived: !!row.archived };
   });
 }
@@ -232,7 +323,9 @@ function setAssignees(db, item, userIds, actorId, canView) {
  * labels, item detail/edit/delete, assignees and comments.
  *
  * config: { kind, channelType, noun, plural, prefix, perms: { create, comment, assign, manage },
- *           patchExtra?(req, item, canEdit) -> { sets, events } }
+ *           patchExtra?(req, item) -> { sets, events },
+ *           assigneeFields?: body fields an assignee may change without being the author or a manager,
+ *           canAccessItem?(req, item) -> boolean (false answers 404, as if the item did not exist) }
  * deps:   { db, emit(channelId, event, data), audit(action, actorId, info) }
  */
 function installSharedRoutes(router, config, deps) {
@@ -265,7 +358,9 @@ function installSharedRoutes(router, config, deps) {
     const number = /^\d{1,9}$/.test(ref) ? Number(ref) : null;
     const item = db.prepare('SELECT * FROM channel_items WHERE channel_id = ? AND kind = ? AND (id = ? OR number = ?)')
       .get(req.channel.id, kind, ref, number);
-    if (!item) return res.status(404).json({ error: `${noun} not found` });
+    if (!item || (config.canAccessItem && !config.canAccessItem(req, item))) {
+      return res.status(404).json({ error: `${noun} not found` });
+    }
     req.item = item;
     next();
   }
@@ -327,12 +422,16 @@ function installSharedRoutes(router, config, deps) {
     const comments = db.prepare('SELECT * FROM channel_item_comments WHERE item_id = ? ORDER BY created_at, rowid').all(req.item.id);
     const events = db.prepare('SELECT id, actor_id, type, data, created_at FROM channel_item_events WHERE item_id = ? ORDER BY created_at, rowid')
       .all(req.item.id).map((event) => ({ ...event, data: event.data ? JSON.parse(event.data) : null }));
-    res.json({ ...serializeItems(db, [req.item])[0], comments: serializeComments(db, comments), events });
+    res.json({ ...serializeItems(db, [req.item])[0], comments: serializeComments(db, comments), events,
+      ...(config.detailExtra ? config.detailExtra(req, req.item) : {}) });
   });
 
   router.patch(`/:channelId/${plural}/:itemId`, loadChannel, loadItem, handle((req, res) => {
-    if (!canEdit(req)) return res.status(403).json({ error: `Not allowed to edit this ${noun}` });
     const body = req.body ?? {};
+    const fields = Object.keys(body);
+    const asAssignee = () => fields.length > 0 && fields.every((field) => config.assigneeFields?.includes(field))
+      && !!db.prepare('SELECT 1 FROM channel_item_assignees WHERE item_id = ? AND user_id = ?').get(req.item.id, req.user.id);
+    if (!canEdit(req) && !asAssignee()) return res.status(403).json({ error: `Not allowed to edit this ${noun}` });
     const sets = {};
     const events = [];
     if (body.title !== undefined) {
@@ -352,11 +451,15 @@ function installSharedRoutes(router, config, deps) {
       for (const [type, data] of events) recordEvent(db, req.item.id, req.user.id, type, data);
       if (body.labelIds !== undefined) setLabels(db, req.item, body.labelIds, req.user.id);
     })();
-    res.json(emitItem(req.item.id));
+    const updated = emitItem(req.item.id);
+    if (config.onChanged) config.onChanged(req, updated, 'updated');
+    res.json(updated);
   }));
 
   router.delete(`/:channelId/${plural}/:itemId`, loadChannel, loadItem, require_(perms.manage), (req, res) => {
+    const cleanup = config.prepareDelete?.(req, req.item);
     db.prepare('DELETE FROM channel_items WHERE id = ?').run(req.item.id);
+    cleanup?.();
     audit('CHANNEL_ITEM_DELETE', req.user.id, {
       targetType: noun, targetId: req.item.id, channelId: req.channel.id,
       details: { title: req.item.title, number: req.item.number ?? undefined, author: req.item.created_by },
@@ -372,7 +475,9 @@ function installSharedRoutes(router, config, deps) {
         db.prepare('UPDATE channel_items SET updated_at = unixepoch() WHERE id = ?').run(req.item.id);
       }
     })();
-    res.json(emitItem(req.item.id));
+    const updated = emitItem(req.item.id);
+    if (config.onChanged) config.onChanged(req, updated, 'assigned');
+    res.json(updated);
   }));
 
   // ── Comments ────────────────────────────────────────────────────────────
@@ -393,6 +498,7 @@ function installSharedRoutes(router, config, deps) {
     db.prepare('UPDATE channel_items SET updated_at = unixepoch() WHERE id = ?').run(req.item.id);
     const [comment] = serializeComments(db, [db.prepare('SELECT * FROM channel_item_comments WHERE id = ?').get(id)]);
     emitComment(req, 'created', { comment });
+    if (config.onChanged) config.onChanged(req, serializeOne(req.item.id), 'commented');
     res.status(201).json(comment);
   }));
 
