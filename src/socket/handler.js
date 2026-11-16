@@ -382,9 +382,7 @@ function relayMentions({ authorId, authorUsername, authorAvatar, bot = null, cha
           content.includes(`<@${m.id}>`)
         );
         if (!isMentioned) return false;
-        if (bot && !botHasScope(db, bot.id, m.id, BOT_SCOPES.MENTIONS)) return false;
-        // Skip push only if the user has an active foregrounded session
-        return !isUserForegrounded(m.id);
+        return !(bot && !botHasScope(db, bot.id, m.id, BOT_SCOPES.MENTIONS));
       });
       if (mentioned.length === 0) return;
       const ch = db.prepare('SELECT name FROM channels WHERE id = ?').get(channelId);
@@ -394,6 +392,8 @@ function relayMentions({ authorId, authorUsername, authorAvatar, bot = null, cha
       };
       const signedRelayRecipients = await relayMentionNotifications({
         ...shared, recipientLocalUserIds: mentioned.map((m) => m.id), messageId, messageCreatedAt: createdAt,
+        // Central always records the mention; it only uses this to decide on the phone push.
+        activeLocalUserIds: mentioned.filter((m) => isUserForegrounded(m.id)).map((m) => m.id),
       });
       // Use central_id when available — the central push server indexes tokens by
       // central user ID, not the local UUID the self-hosted server assigns.

@@ -58,6 +58,7 @@ async function relayMentionNotifications(payload) {
       nonce: crypto.randomUUID(),
       realmInstanceId: identity.realmInstanceId,
       realmUrl: SERVER_URL,
+      recipientActive: !!payload.activeLocalUserIds?.includes(grant.local_user_id),
       senderAvatarUrl: toServerPublicUrl(payload.senderAvatarUrl),
       senderUsername: payload.senderUsername,
       type: 'server_mention',
