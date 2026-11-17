@@ -350,6 +350,16 @@ router.get('/:id/messages', (req, res) => {
          WHERE ur.user_id = u.id
          ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
          LIMIT 1) AS role_color,
+        (SELECT r.style_type FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+         LIMIT 1) AS role_style_type,
+        (SELECT r.style_colors FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+         LIMIT 1) AS role_style_colors,
         rm.id as reply_to_msg_id,
         rm.user_id as reply_to_user_id,
         rm.content as reply_to_content,
@@ -371,6 +381,16 @@ router.get('/:id/messages', (req, res) => {
          WHERE ur.user_id = u.id
          ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
          LIMIT 1) AS role_color,
+        (SELECT r.style_type FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+         LIMIT 1) AS role_style_type,
+        (SELECT r.style_colors FROM roles r
+         JOIN user_roles ur ON ur.role_id = r.id
+         WHERE ur.user_id = u.id
+         ORDER BY (COALESCE(r.color, '') != '') DESC, r.position DESC
+         LIMIT 1) AS role_style_colors,
         rm.id as reply_to_msg_id,
         rm.user_id as reply_to_user_id,
         rm.content as reply_to_content,
