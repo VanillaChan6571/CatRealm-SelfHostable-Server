@@ -242,6 +242,18 @@ function buildUploadMiddleware(type) {
 }
 
 // Public list endpoint for server expressions (usable outside the server context).
+
+// Lets connected clients refresh their emote/sticker lists. Only when the socket
+// layer is already running: loading it here would start its timers.
+function announceExpressionsChanged() {
+  try {
+    const handler = require.cache?.[path.join(__dirname, '..', 'socket', 'handler.js')];
+    handler?.exports.emitServerEvent?.('expressions:changed', {});
+  } catch {
+    // Best effort: clients still pick up new names when a message uses them.
+  }
+}
+
 router.get('/', (req, res) => {
   const { type } = req.query;
   if (type && !ensureValidType(type)) {
@@ -369,6 +381,7 @@ router.post('/:type', authenticateToken, (req, res) => {
       details: { name: created.name, type: created.type },
     });
 
+    announceExpressionsChanged();
     return res.status(201).json(withAbsoluteUrl(req, created));
   });
 });
@@ -411,6 +424,7 @@ router.patch('/:id', authenticateToken, (req, res) => {
     });
   }
 
+  announceExpressionsChanged();
   res.json(withAbsoluteUrl(req, updated));
 });
 
@@ -438,6 +452,7 @@ router.delete('/:id', authenticateToken, (req, res) => {
     fs.unlink(localPath, () => {});
   }
 
+  announceExpressionsChanged();
   res.json({ success: true });
 });
 
