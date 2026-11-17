@@ -37,6 +37,18 @@ function consumeInviteForRejoin(inviteCode) {
 }
 
 // POST /api/auth/register  (local/decentral accounts only)
+
+// Lets connected clients refresh their member lists when someone joins or rejoins.
+// Only when the socket layer is already running: loading it here would start its timers.
+function announceMemberJoin() {
+  try {
+    const handler = require.cache?.[require('path').join(__dirname, '..', 'socket', 'handler.js')];
+    handler?.exports.emitServerEvent?.('member:join', {});
+  } catch {
+    // Best effort: a missed broadcast only delays the member list refresh.
+  }
+}
+
 router.post('/register', async (req, res) => {
   if (SERVER_MODE === 'central_only') {
     return res.status(403).json({ error: 'This server uses CatRealm central accounts only. Register at catrealm.app' });
@@ -79,6 +91,7 @@ router.post('/register', async (req, res) => {
     db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(id);
   }
 
+  announceMemberJoin();
   logAuditAction(AUDIT_ACTIONS.MEMBER_JOIN, id, {
     targetType: 'user',
     targetId: id,
@@ -309,6 +322,7 @@ router.post('/central', async (req, res) => {
     }
 
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    announceMemberJoin();
     logAuditAction(AUDIT_ACTIONS.MEMBER_JOIN, localUser.id, {
       targetType: 'user',
       targetId: localUser.id,
@@ -330,6 +344,7 @@ router.post('/central', async (req, res) => {
       db.prepare('UPDATE users SET onboarding_completed = 0 WHERE id = ?').run(localUser.id);
     }
     localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(localUser.id);
+    announceMemberJoin();
     logAuditAction(AUDIT_ACTIONS.MEMBER_JOIN, localUser.id, {
       targetType: 'user',
       targetId: localUser.id,
