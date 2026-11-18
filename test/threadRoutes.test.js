@@ -10,6 +10,10 @@ function setup() {
       created_at INTEGER NOT NULL DEFAULT (unixepoch()));
     CREATE TABLE thread_settings (thread_id TEXT PRIMARY KEY, archived INTEGER NOT NULL DEFAULT 0, archive_at INTEGER,
       last_message_at INTEGER NOT NULL DEFAULT (unixepoch()), cover_image TEXT);
+    CREATE TABLE forum_post_reads (user_id TEXT, thread_id TEXT, last_read_at INTEGER DEFAULT 0,
+      PRIMARY KEY (user_id, thread_id));
+    CREATE TABLE channel_prefs (user_id TEXT, channel_id TEXT, muted INTEGER DEFAULT 0,
+      last_read_at INTEGER DEFAULT 0, PRIMARY KEY (user_id, channel_id));
     ALTER TABLE channel_settings ADD COLUMN thread_creation_cooldown INTEGER DEFAULT 0;
     INSERT INTO users (id, username, is_owner) VALUES ('owner', 'Owner', 1);
     INSERT INTO channels (id, name, type) VALUES ('help', 'Help', 'forum');
@@ -179,4 +183,20 @@ test('forum posts are unaffected: no announcement and always listed', () => {
   assert.equal(db.prepare("SELECT COUNT(*) AS c FROM messages WHERE message_type = 'system'").get().c, 0);
   assert.ok(!events.some((e) => e.event === 'thread:created'));
   assert.deepEqual(call('get /', 'bob', { query: { channelId: 'help' } }).body.map((t) => t.id), [post.body.id]);
+});
+
+test('opening a forum post reads only that post', () => {
+  const { db, call } = setup();
+  db.prepare("UPDATE messages SET message_type = 'user' WHERE id = 'forum-body'").run();
+  const first = call('post /', 'bob', { body: { channelId: 'help', messageId: 'forum-body', name: 'First' } }).body;
+  db.prepare("INSERT INTO messages (id, channel_id, user_id, content, created_at, message_type) VALUES ('second-body', 'help', 'bob', 'Second body', 2, 'user')").run();
+  const second = call('post /', 'bob', { body: { channelId: 'help', messageId: 'second-body', name: 'Second' } }).body;
+  const posts = () => call('get /forum', 'alice', { query: { channelId: 'help' } }).body;
+  assert.equal(posts().find((post) => post.id === first.id).unread_count, 1);
+  assert.equal(posts().find((post) => post.id === second.id).unread_count, 1);
+
+  assert.equal(call('post /:id/read', 'alice', { params: { id: first.id } }).statusCode, 200);
+  assert.equal(posts().find((post) => post.id === first.id).unread_count, 0);
+  assert.equal(posts().find((post) => post.id === second.id).unread_count, 1);
+  assert.equal(call('post /:id/read', 'alice', { params: { id: 'missing' } }).statusCode, 404);
 });

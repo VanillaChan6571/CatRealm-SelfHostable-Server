@@ -28,6 +28,8 @@ test('read-state flags channels with newer messages from others, per user', (t) 
   const db = makeDatabase();
   t.after(() => db.close());
   db.exec('CREATE TABLE channel_prefs (user_id TEXT, channel_id TEXT, muted INTEGER DEFAULT 0, last_read_at INTEGER DEFAULT 0, PRIMARY KEY (user_id, channel_id))');
+  db.exec('CREATE TABLE forum_post_reads (user_id TEXT, thread_id TEXT, last_read_at INTEGER DEFAULT 0, PRIMARY KEY (user_id, thread_id))');
+  db.exec('ALTER TABLE threads ADD COLUMN parent_message_id TEXT');
   db.prepare("UPDATE messages SET created_at = 100, message_type = 'user'").run();
   // Hide "private" from members so it never appears in the response.
   db.prepare("INSERT INTO channel_permission_overwrites (channel_id, target_type, target_id, deny) VALUES ('private', 'role', 'member', ?)")
@@ -51,7 +53,16 @@ test('read-state flags channels with newer messages from others, per user', (t) 
   // Counts only Bob's visible messages after the read position (not the thread/scheduled/system ones).
   assert.deepEqual(readState(getUser(db, 'alice')).public, { lastMessageAt: 310, lastReadAt: 150, muted: false, unread: true, unreadCount: 2 });
 
-  // In a forum the replies to posts are the activity, so there they do count.
+  // Forum posts have independent read positions. A forum channel's old read
+  // position remains a baseline for existing posts.
   db.prepare("UPDATE channels SET type = 'forum' WHERE id = 'public'").run();
+  db.prepare("UPDATE threads SET parent_message_id = 'public-message' WHERE id = 'public-thread'").run();
+  db.prepare("INSERT INTO threads (id, channel_id, created_by, name, parent_message_id) VALUES ('second-post', 'public', 'bob', 'Second', 'new')").run();
+  db.prepare("UPDATE messages SET thread_id = 'second-post' WHERE id = 'new2'").run();
   assert.deepEqual(readState(getUser(db, 'alice')).public, { lastMessageAt: 310, lastReadAt: 150, muted: false, unread: true, unreadCount: 3 });
+
+  db.prepare("INSERT INTO forum_post_reads (user_id, thread_id, last_read_at) VALUES ('alice', 'public-thread', 250)").run();
+  assert.equal(readState(getUser(db, 'alice')).public.unreadCount, 2);
+  db.prepare("INSERT INTO forum_post_reads (user_id, thread_id, last_read_at) VALUES ('alice', 'second-post', 350)").run();
+  assert.equal(readState(getUser(db, 'alice')).public.unread, false);
 });

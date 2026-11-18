@@ -90,19 +90,29 @@ router.get('/forum', (req, res) => {
   const rows = db.prepare(`
     SELECT t.id, t.channel_id, t.parent_message_id, t.name, t.created_by, t.created_at,
       ts.archived, ts.last_message_at, ts.cover_image,
+      COALESCE(fr.last_read_at, 0) AS post_last_read_at,
       u.username AS author_username, u.avatar AS author_avatar, u.account_type AS author_account_type,
       COALESCE(dno.display_name, u.display_name) AS author_display_name,
       m.content AS preview_content, m.attachments AS body_attachments_raw,
       (SELECT COUNT(*) FROM messages WHERE thread_id = t.id) AS reply_count
     FROM threads t
     LEFT JOIN thread_settings ts ON ts.thread_id = t.id
+    LEFT JOIN forum_post_reads fr ON fr.thread_id = t.id AND fr.user_id = ?
     JOIN users u ON u.id = t.created_by
     LEFT JOIN display_name_overrides dno ON dno.user_id = u.id
     JOIN messages m ON m.id = t.parent_message_id
     WHERE t.channel_id = ?
       AND (? = 1 OR COALESCE(ts.archived, 0) = 0)
     ORDER BY COALESCE(ts.last_message_at, t.created_at) DESC
-  `).all(channelId, showArchived);
+  `).all(req.user.id, channelId, showArchived);
+
+  const unreadCount = db.prepare(`
+    SELECT COUNT(*) AS count FROM messages
+    WHERE channel_id = ? AND (id = ? OR thread_id = ?)
+      AND user_id != ? AND created_at > ? AND scheduled_at IS NULL AND message_type != 'system'
+  `);
+  const channelReadAt = db.prepare('SELECT last_read_at FROM channel_prefs WHERE user_id = ? AND channel_id = ?')
+    .get(req.user.id, channelId)?.last_read_at ?? 0;
 
   const result = rows.map((r) => {
     const [decrypted] = decryptMessageRows([{ content: r.preview_content }]);
@@ -113,12 +123,33 @@ router.get('/forum', (req, res) => {
     const { body_attachments_raw, ...rest } = r;
     return {
       ...rest,
+      unread_count: unreadCount.get(channelId, r.parent_message_id, r.id, req.user.id,
+        Math.max(channelReadAt, r.post_last_read_at)).count,
       preview_content: (decrypted?.content ?? r.preview_content ?? '').slice(0, 1000),
       body_attachments,
     };
   });
 
   res.json(result);
+});
+
+// POST /api/threads/:id/read - opening one forum post does not read its siblings.
+router.post('/:id/read', (req, res) => {
+  const thread = db.prepare(`
+    SELECT t.id, t.channel_id FROM threads t JOIN channels c ON c.id = t.channel_id
+    WHERE t.id = ? AND c.type = 'forum'
+  `).get(req.params.id);
+  if (!thread) return res.status(404).json({ error: 'Forum post not found' });
+  if (!hasChannelPermission(req.user, thread.channel_id, PERMISSIONS.VIEW_CHANNELS, db)
+    || !hasChannelPermission(req.user, thread.channel_id, PERMISSIONS.READ_CHAT_HISTORY, db)) {
+    return res.status(403).json({ error: 'Missing permission: read_chat_history' });
+  }
+  const readAt = Math.floor(Date.now() / 1000);
+  db.prepare(`
+    INSERT INTO forum_post_reads (user_id, thread_id, last_read_at) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, thread_id) DO UPDATE SET last_read_at = MAX(last_read_at, excluded.last_read_at)
+  `).run(req.user.id, thread.id, readAt);
+  res.json({ lastReadAt: readAt });
 });
 
 // POST /api/threads

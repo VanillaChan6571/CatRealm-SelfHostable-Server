@@ -120,20 +120,41 @@ router.get('/read-state', (req, res) => {
       .all(req.user.id)
       .map((row) => [row.channel_id, row]),
   );
+  const forumPosts = db.prepare(`
+    SELECT t.id, t.parent_message_id, COALESCE(fr.last_read_at, 0) AS last_read_at
+    FROM threads t LEFT JOIN forum_post_reads fr ON fr.thread_id = t.id AND fr.user_id = ?
+    WHERE t.channel_id = ?
+  `);
+  const forumUnread = db.prepare(`
+    SELECT COUNT(*) AS n FROM messages
+    WHERE channel_id = ? AND (id = ? OR thread_id = ?) AND created_at > ?
+      AND user_id != ? AND scheduled_at IS NULL AND message_type != 'system'
+  `);
   const state = {};
   for (const channel of channels) {
     const countReplies = channel.type === 'forum' ? 1 : 0;
     const latest = latestStmt.get(channel.id, countReplies);
     const pref = prefs.get(channel.id);
     const lastReadAt = pref?.last_read_at ?? 0;
-    // Your own latest message means you've seen the channel up to there.
-    const unread = !!latest && latest.created_at > lastReadAt && latest.user_id !== req.user.id;
+    // A forum can contain several posts with independent read positions.
+    const forumUnreadCount = channel.type === 'forum'
+      ? forumPosts.all(req.user.id, channel.id).reduce((sum, post) => sum + forumUnread.get(
+        channel.id, post.parent_message_id, post.id,
+        Math.max(lastReadAt, post.last_read_at), req.user.id,
+      ).n, 0)
+      : 0;
+    // Your own latest message means you've seen an ordinary channel up to there.
+    const unread = channel.type === 'forum'
+      ? forumUnreadCount > 0
+      : !!latest && latest.created_at > lastReadAt && latest.user_id !== req.user.id;
     state[channel.id] = {
       lastMessageAt: latest?.created_at ?? 0,
       lastReadAt,
       muted: !!pref?.muted,
       unread,
-      unreadCount: unread ? countStmt.get(channel.id, lastReadAt, req.user.id, countReplies).n : 0,
+      unreadCount: unread ? (channel.type === 'forum'
+        ? Math.min(100, forumUnreadCount)
+        : countStmt.get(channel.id, lastReadAt, req.user.id, countReplies).n) : 0,
     };
   }
   res.json({ channels: state });

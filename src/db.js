@@ -239,6 +239,13 @@ db.exec(`
     PRIMARY KEY (user_id, channel_id)
   );
 
+  CREATE TABLE IF NOT EXISTS forum_post_reads (
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    thread_id    TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    last_read_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, thread_id)
+  );
+
   CREATE TABLE IF NOT EXISTS display_name_overrides (
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     display_name TEXT NOT NULL,
@@ -744,6 +751,7 @@ if (!messageColumns.includes('thread_id')) {
   db.prepare('ALTER TABLE messages ADD COLUMN thread_id TEXT').run();
   pteroLog('[CatRealm] Added messages.thread_id column');
 }
+db.prepare('CREATE INDEX IF NOT EXISTS idx_messages_thread_read ON messages(thread_id, created_at)').run();
 if (!messageColumns.includes('reply_to_id')) {
   db.prepare('ALTER TABLE messages ADD COLUMN reply_to_id TEXT REFERENCES messages(id) ON DELETE SET NULL').run();
   pteroLog('[CatRealm] Added messages.reply_to_id column');
