@@ -16,6 +16,7 @@ const {
 } = require('../lib/mediaConfig');
 const { requestFederatedMediaToken, hasPendingEnrollment } = require('../lib/centralMediaFallback');
 const { getHostUdpBufferLimit } = require('../lib/hostNetworkLimits');
+const { assignVoiceRegion, reconcileVoiceRegion } = require('../lib/voiceRegionState');
 
 const LIVEKIT_INGRESS_INPUT_WHIP = 1; // @livekit/protocol IngressInput.WHIP_INPUT
 const LIVEKIT_SCREEN_VIDEO_TRACK_NAME_PREFIX = 'catrealm:screen-share-video:';
@@ -485,7 +486,7 @@ function createSelfHostMediaSession({ context, channelId, user, role }) {
   };
 }
 
-async function createSelfHostMediaSessionWithFallback({ context, channelId, user, role }) {
+async function createSelfHostMediaSessionWithFallback({ context, channelId, user, role, preferredRegion }) {
   const result = createSelfHostMediaSession({ context, channelId, user, role });
   if (result.ok || !['voice', 'theater'].includes(context) || !channelId || result.status !== 503) {
     return result;
@@ -494,6 +495,7 @@ async function createSelfHostMediaSessionWithFallback({ context, channelId, user
   try {
     const userProfile = getUserProfile(user.id);
     const built = buildPublishSources(user, channelId);
+    const assignment = context === 'voice' ? assignVoiceRegion(channelId, preferredRegion) : null;
     const fallback = await requestFederatedMediaToken({
       context,
       channelId,
@@ -502,8 +504,14 @@ async function createSelfHostMediaSessionWithFallback({ context, channelId, user
       avatar: userProfile?.avatar || null,
       publishSources: role === 'screen' ? screenPublishSources(built.publishSources) : built.publishSources,
       role,
+      ...(assignment ? { preferredRegion: assignment.region, roomGeneration: assignment.generation } : {}),
     });
-    if (fallback?.ok) return fallback;
+    if (fallback?.ok) {
+      if (assignment && fallback.region) {
+        reconcileVoiceRegion(channelId, assignment.generation, fallback.region);
+      }
+      return fallback;
+    }
   } catch {
     // Fall through to the original local-media error.
   }
@@ -522,8 +530,8 @@ router.get('/central-enrollment/:state', (req, res) => {
 });
 
 router.post('/token', authenticateToken, async (req, res) => {
-  const { context, channelId } = req.body || {};
-  const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user: req.user });
+  const { context, channelId, preferredRegion } = req.body || {};
+  const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user: req.user, preferredRegion });
   if (!result.ok) {
     return res.status(result.status || 400).json({
       ok: false,

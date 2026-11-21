@@ -31,6 +31,7 @@ const {
   getSelfHostMediaContexts,
 } = require('../routes/media');
 const { getMediaCapability } = require('../lib/mediaConfig');
+const { assignVoiceRegion, markVoiceOccupied, markVoiceEmpty, switchOccupiedVoiceRegion, trackRegionSwitch, reportRegionSwitchResult, clearRegionSwitch, getVoiceRegionSession } = require('../lib/voiceRegionState');
 const COMPACT_EXTERNAL_TOKEN_REGEX = /:(https?:\/\/[^\s:]+(?::\d{1,5})?):(?:(sticker):)?([a-z0-9_-]{1,64})(?::([a-z0-9_-]{3,128}))?:/gi;
 const COMPACT_OWNER_TOKEN_REGEX = /:(?:(sticker):)?[a-z0-9_-]{1,64}:[a-z0-9_-]{3,128}:/gi;
 
@@ -75,6 +76,7 @@ const voiceRooms = new Map();
 const voiceLiveUsersByChannel = new Map();
 // Track when a voice room first became occupied, using server time as the source of truth.
 const voiceRoomStartedAt = new Map();
+const voiceRegionSwitchAt = new Map();
 // Track theater rooms: channelId -> Map<userId, { socketId, user }>
 const theaterRooms = new Map();
 // Track when a theater room first became occupied (server-authoritative start time)
@@ -744,15 +746,20 @@ function setupSocketHandlers(io) {
       if (typeof ack === 'function') ack({ ok: true, capability: getMediaCapability(getSelfHostMediaContexts()) });
     });
 
-    socket.on('media:v1:token', async ({ context, channelId } = {}, ack) => {
-      const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user });
+    socket.on('media:v1:token', async ({ context, channelId, preferredRegion } = {}, ack) => {
+      const result = await createSelfHostMediaSessionWithFallback({ context, channelId, user, preferredRegion });
       if (typeof ack === 'function') {
         ack(result.ok ? result : { ok: false, error: result.error, capability: getMediaCapability(getSelfHostMediaContexts()) });
       }
     });
 
     // ── Voice: join/leave/presence ────────────────────────────────────────────────
-    socket.on('voice:join', ({ channelId, muted = false, deafened = false }, ack) => {
+    socket.on('voice:region:result', ({ channelId, generation, ok } = {}) => {
+      if (typeof channelId !== 'string' || typeof generation !== 'string') return;
+      handleVoiceRegionResult(channelId, user.id, { generation, ok });
+    });
+
+    socket.on('voice:join', ({ channelId, muted = false, deafened = false, preferredRegion, regionSwitchVersion }, ack) => {
       if (!channelId) {
         if (typeof ack === 'function') ack({ ok: false, channelId, error: 'Missing channel' });
         return socket.emit('voice:join:failed', { channelId, error: 'Missing channel' });
@@ -795,6 +802,10 @@ function setupSocketHandlers(io) {
           return socket.emit('voice:join:failed', { channelId, error });
         }
       }
+
+      const capability = getMediaCapability(getSelfHostMediaContexts());
+      const centralVoiceAssignment = !capability.enabled && capability.liveKitFallbackContexts?.includes('voice')
+        ? assignVoiceRegion(channelId, preferredRegion) : null;
 
       clearPendingVoiceDisconnect(user.id);
       pteroLog(`[CatRealm] ${authUser.username} join voice ${channelId}`);
@@ -845,6 +856,7 @@ function setupSocketHandlers(io) {
           if (otherRoom.size === 0) {
             voiceRooms.delete(otherChannelId);
             voiceRoomStartedAt.delete(otherChannelId);
+            markVoiceEmpty(otherChannelId);
             emitVoiceRoomCount(io, otherChannelId);
             io.emit('voice:room-sync', { channelId: otherChannelId, users: [], startedAt: null });
           } else {
@@ -870,7 +882,9 @@ function setupSocketHandlers(io) {
         }
       }
       setVoiceLiveState(io, channelId, user.id, false);
-      room.set(user.id, { socketId: socket.id, muted: !!muted, deafened: !!deafened, user: voiceUser });
+      room.set(user.id, { socketId: socket.id, muted: !!muted, deafened: !!deafened,
+        regionSwitchVersion: regionSwitchVersion === 1 ? 1 : 0, user: voiceUser });
+      if (centralVoiceAssignment) markVoiceOccupied(channelId);
       socket.currentVoiceChannel = channelId;
       socket.join(`voice:${channelId}`);
 
@@ -880,6 +894,7 @@ function setupSocketHandlers(io) {
         liveUserIds: getVoiceLiveUserIds(channelId),
         startedAt: voiceRoomStartedAt.get(channelId) ?? Date.now(),
         you: user.id,
+        ...(centralVoiceAssignment ? { region: centralVoiceAssignment.region } : {}),
       };
       socket.emit('voice:users', payload);
       socket.emit('voice:join:ok', payload);
@@ -1104,8 +1119,14 @@ function setupSocketHandlers(io) {
         socketId: sourceEntry.socketId,
         muted: !!sourceEntry.muted,
         deafened: !!sourceEntry.deafened,
+        regionSwitchVersion: sourceEntry.regionSwitchVersion || 0,
         user: movedVoiceUser,
       });
+      const targetCapability = getMediaCapability(getSelfHostMediaContexts());
+      if (!targetCapability.enabled && targetCapability.liveKitFallbackContexts?.includes('voice')) {
+        assignVoiceRegion(toChannelId, null);
+        markVoiceOccupied(toChannelId);
+      }
       targetSocket.currentVoiceChannel = toChannelId;
       targetSocket.join(`voice:${toChannelId}`);
 
@@ -2488,6 +2509,44 @@ module.exports.getActiveTheaterUserCount = () => {
 };
 
 module.exports.getActiveVoiceRoomCount = () => voiceRooms.size;
+module.exports.applyVoiceRegionOverride = (channelId, region) => {
+  const room = voiceRooms.get(channelId);
+  if (!room?.size || !ioInstance) return { appliesNow: true, activeRegion: null };
+  const current = assignVoiceRegion(channelId, null);
+  if (!region || current.region === region) return { appliesNow: current.region === region, activeRegion: current.region };
+  if ([...room.values()].some((entry) => entry.regionSwitchVersion !== 1)) {
+    return { appliesNow: false, activeRegion: current.region, reason: 'client_upgrade' };
+  }
+  if (voiceLiveUsersByChannel.get(channelId)?.size) {
+    return { appliesNow: false, activeRegion: current.region, reason: 'active_video' };
+  }
+  if (Date.now() - (voiceRegionSwitchAt.get(channelId) || 0) < 30_000) {
+    return { appliesNow: false, activeRegion: current.region, reason: 'cooldown' };
+  }
+  const next = switchOccupiedVoiceRegion(channelId, region);
+  if (!next?.changed) return { appliesNow: false, activeRegion: current.region };
+  voiceRegionSwitchAt.set(channelId, Date.now());
+  trackRegionSwitch(channelId, {
+    previousRegion: current.region, generation: next.generation,
+    onRevert: (restored) => {
+      if (!ioInstance) return;
+      ioInstance.to(`voice:${channelId}`).emit('voice:region:changed', {
+        channelId, region: restored.region, generation: restored.generation, reverted: true,
+      });
+      emitVoiceRoomCount(ioInstance, channelId);
+    },
+  });
+  ioInstance.to(`voice:${channelId}`).emit('voice:region:changed', {
+    channelId, region: next.region, generation: next.generation,
+  });
+  emitVoiceRoomCount(ioInstance, channelId);
+  return { appliesNow: true, activeRegion: next.region };
+};
+
+function handleVoiceRegionResult(channelId, userId, result) {
+  const room = voiceRooms.get(channelId);
+  if (room) reportRegionSwitchResult(channelId, userId, result, [...room.keys()]);
+}
 module.exports.broadcastTheaterQueueUpdate = (channelId) => {
   if (ioInstance) ioInstance.to(`theater:${channelId}`).emit('theater:queue-updated', { channelId });
 };
@@ -2846,6 +2905,9 @@ function leaveVoiceRoom(io, socket, channelId, userId) {
   if (room.size === 0) {
     voiceRooms.delete(channelId);
     voiceRoomStartedAt.delete(channelId);
+    voiceRegionSwitchAt.delete(channelId);
+    clearRegionSwitch(channelId);
+    markVoiceEmpty(channelId);
     emitVoiceRoomCount(io, channelId);
     io.emit('voice:room-sync', { channelId, users: [], startedAt: null });
   }
@@ -2861,7 +2923,13 @@ function emitVoiceRoomCount(io, channelId) {
     channelId,
     count: room ? room.size : 0,
     startedAt: room && room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
+    region: getVoiceRoomRegion(channelId, room),
   });
+}
+
+// Central-fallback region of an occupied voice room, or null (own LiveKit/empty).
+function getVoiceRoomRegion(channelId, room = voiceRooms.get(channelId)) {
+  return room?.size ? (getVoiceRegionSession(channelId)?.region ?? null) : null;
 }
 
 function emitVoiceRoomSync(io, channelId) {
@@ -2871,6 +2939,7 @@ function emitVoiceRoomSync(io, channelId) {
     users: room ? Array.from(room.values()).map((entry) => entry.user) : [],
     liveUserIds: getVoiceLiveUserIds(channelId),
     startedAt: room && room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
+    region: getVoiceRoomRegion(channelId, room),
   });
 }
 
@@ -2881,6 +2950,7 @@ function buildVoiceRoomCounts() {
     users: Array.from(room.values()).map((entry) => entry.user),
     liveUserIds: getVoiceLiveUserIds(channelId),
     startedAt: room.size > 0 ? (voiceRoomStartedAt.get(channelId) ?? null) : null,
+    region: getVoiceRoomRegion(channelId, room),
   }));
 }
 

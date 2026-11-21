@@ -420,9 +420,37 @@ router.get('/:id/settings', (req, res) => {
     bitrate: 64000,
     video_quality_mode: '720p',
     default_framerate: 60,
+    voice_region_override: null,
     thread_auto_archive: 1440,
     thread_creation_cooldown: 0,
   });
+});
+
+// PATCH /api/channels/:id/voice-region - Persist a Central-fallback voice override.
+router.patch('/:id/voice-region', (req, res) => {
+  const channelId = req.params.id;
+  const channel = db.prepare('SELECT id, type FROM channels WHERE id = ?').get(channelId);
+  if (!channel || channel.type !== 'voice') return res.status(404).json({ error: 'Voice channel not found' });
+  if (!hasChannelPermission(req.user, channelId, PERMISSIONS.MANAGE_CHANNELS, db)) {
+    return res.status(403).json({ error: 'Missing permission: manage_channels' });
+  }
+  const capability = require('../lib/mediaConfig').getMediaCapability(['voice']);
+  if (capability.enabled || !capability.liveKitFallbackContexts?.includes('voice')) {
+    return res.status(409).json({ error: 'This realm uses its own LiveKit' });
+  }
+  const region = req.body?.region;
+  if (region !== null && region !== 'eu' && region !== 'us-central') {
+    return res.status(400).json({ error: 'Region must be Automatic, EU, or US Central' });
+  }
+  db.prepare('INSERT OR IGNORE INTO channel_settings (channel_id) VALUES (?)').run(channelId);
+  db.prepare('UPDATE channel_settings SET voice_region_override = ? WHERE channel_id = ?').run(region, channelId);
+  const { resetEmptyVoiceRegion, getVoiceRegionSession } = require('../lib/voiceRegionState');
+  resetEmptyVoiceRegion(channelId);
+  const currentSession = getVoiceRegionSession(channelId);
+  const result = currentSession?.occupied
+    ? require('../socket/handler').applyVoiceRegionOverride(channelId, region)
+    : { appliesNow: true, activeRegion: null };
+  res.json({ ok: true, region, ...result });
 });
 
 // PATCH /api/channels/:id/settings - Update channel settings

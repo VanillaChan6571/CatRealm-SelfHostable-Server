@@ -129,7 +129,7 @@ function postSigned(requestPath, body, { secret, origin }) {
  *
  * Returns the token response object or null if unavailable/disabled.
  */
-async function requestFederatedMediaToken({ context, channelId, userId, displayName, avatar, publishSources, role }) {
+async function requestFederatedMediaToken({ context, channelId, userId, displayName, avatar, publishSources, role, preferredRegion, roomGeneration }) {
   if (!isConfigured()) return null;
   if (!['voice', 'theater'].includes(context)) return null;
 
@@ -143,6 +143,8 @@ async function requestFederatedMediaToken({ context, channelId, userId, displayN
     avatar: avatar || null,
     publishSources: Array.isArray(publishSources) ? publishSources : [],
     ...(role ? { role } : {}),
+    ...(context === 'voice' && preferredRegion ? { preferredRegion } : {}),
+    ...(context === 'voice' && roomGeneration ? { roomGeneration } : {}),
   });
   const requestPath = `/api/media/federated/${context}-token`;
 

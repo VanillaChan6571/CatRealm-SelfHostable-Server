@@ -267,6 +267,7 @@ db.exec(`
     bitrate INTEGER DEFAULT 64000,
     video_quality_mode TEXT DEFAULT '720p',
     default_framerate INTEGER DEFAULT 60,
+    voice_region_override TEXT CHECK(voice_region_override IN ('eu', 'us-central') OR voice_region_override IS NULL),
     thread_auto_archive INTEGER DEFAULT 1440,
     thread_creation_cooldown INTEGER DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -994,6 +995,9 @@ if (!channelColumns2.includes('nsfw')) {
 }
 
 const channelSettingsColumns = db.prepare('PRAGMA table_info(channel_settings)').all().map((c) => c.name);
+if (!channelSettingsColumns.includes('voice_region_override')) {
+  db.prepare('ALTER TABLE channel_settings ADD COLUMN voice_region_override TEXT').run();
+}
 if (!channelSettingsColumns.includes('default_framerate')) {
   db.prepare('ALTER TABLE channel_settings ADD COLUMN default_framerate INTEGER DEFAULT 60').run();
   pteroLog('[CatRealm] Added channel_settings.default_framerate column');
